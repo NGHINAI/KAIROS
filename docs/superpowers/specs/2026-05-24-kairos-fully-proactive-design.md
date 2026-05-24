@@ -677,16 +677,22 @@ Click → dropdown (380px wide):
 
 Stable, scannable, always there. Cards color-coded by autonomy tier.
 
-### Surface 2: Liquid Glass Floating HUD
+### Surface 2: Liquid Glass Floating HUD — Wispr-Flow-style oval
 
 The "alive" surface — floats on top of all windows. **This is what makes KAIROS feel different.**
 
+The default footprint is a **small horizontal oval pinned to the bottom-center of the screen**, ~240×40px, matching Wispr Flow's minimal visual footprint. It expands only when KAIROS speaks, listens, or surfaces an action card — otherwise it's a quiet pill showing one-line state. The user can drag to reposition; it remembers per-display location.
+
 ```
-Idle state (~280×80 px, always visible):
-┌──────────────────────────────────────┐
-│ ⚡ ●─●─●  watching VS Code · auth.ts │  ← Liquid Glass material
-│ ⏰ Standup in 23m · 3 DMs unread     │     vibrancy + refraction
-└──────────────────────────────────────┘
+Idle state (~240×40 px oval, pinned bottom-center):
+        ╭───────────────────────────────────╮
+        │ ⚡  VS Code · auth.ts · standup 23m │  ← Liquid Glass oval
+        ╰───────────────────────────────────╯       glass blur + refraction
+
+Compact mode (when nothing notable — minimum footprint):
+        ╭──────╮
+        │  ⚡  │       ← collapses to a single glass dot
+        ╰──────╯
 
 Trigger fires (expands ~360×220 with spring animation):
 ┌──────────────────────────────────────────────┐
@@ -720,20 +726,31 @@ Listening state (during voice capture):
 - Right-click → preferences
 - Animations via SwiftUI spring physics
 
-### Surface 3: Voice + Global Hotkey
+### Surface 3: Voice + Global Hotkey — Wispr-style hold + hands-free toggle
+
+Two hotkey modes matching Wispr Flow's interaction model — every binding is user-configurable in Settings.
 
 ```
-Default hotkey: ⌃⌥Space. Configurable.
+Mode 1 — HOLD-TO-SPEAK (default: ⌃⇧4 / Control+Shift+4)
+  Press and hold → audio capture starts (oval pulses, glass shimmer)
+  Speak naturally → live transcript scrolls inside oval
+  Release → transcription finalizes → routed to KAIROS
 
-Hold hotkey → audio capture starts (HUD shows listening state)
-Speak naturally → live transcript in HUD
-Release hotkey → transcription finalizes → fed to KAIROS
+Mode 2 — DOUBLE-TAP HANDS-FREE (default: tap Control twice quickly)
+  Double-tap Control → enters hands-free conversation mode (oval stays expanded)
+  Speak whenever → VAD detects utterance boundaries
+  KAIROS responds via TTS through the oval
+  Double-tap Control again → exits hands-free mode
 
-KAIROS responds:
-  - Always: visible reply in HUD (text)
-  - Optional: spoken response via TTS
-  - If action included: action card appears, awaits confirmation
+Mode 3 — PAUSE everything (default: ⌃⌥⌘Space)
+  Instant freeze of all observers + collapse HUD to invisible
 ```
+
+**KAIROS responds**:
+- **Always** through the oval (text + animation)
+- **By default** via TTS so the response is hands-free
+- If an action is included → action card expands, awaits confirmation
+- **Critically, KAIROS can also initiate** — proactive triggers cause the oval to chime + expand + speak ("Heads up, your standup starts in 2 minutes") without the user pressing anything. This is the "AI comes with you" behavior.
 
 **Transcription**:
 - **Local Whisper.cpp** — runs on-device, free, ~500ms latency
@@ -741,9 +758,15 @@ KAIROS responds:
 - **Default**: local Whisper with API fallback if slow
 
 **TTS** (when KAIROS speaks back):
-- macOS native `say` — free, fast, robotic
+- macOS native `say` — free, fast, slightly robotic
 - ElevenLabs API — best quality, $5-22/month
-- OpenAI TTS — middle ground
+- OpenAI TTS — middle ground, $0.015/1k chars
+- **Default**: macOS `say` for short utterances (chimes, confirmations), ElevenLabs for proactive speech if user subscribes
+
+**Voice Activity Detection** (for hands-free mode):
+- `webrtcvad` or Silero VAD (both local, free)
+- Endpoints utterances when ~800ms of silence detected
+- Skip if last utterance was KAIROS's own TTS (so it doesn't loop on itself)
 
 ### Notifications
 
@@ -969,11 +992,14 @@ KAIROS must NOT be locked to Anthropic. Every LLM call goes through a single **M
 |---|---|---|---|
 | **Anthropic** (subscription) | Claude Haiku/Sonnet/Opus via `claude -p` CLI | Pro/Max subscription | $0 incremental (subscription) |
 | **Anthropic** (API) | Same models via API | API key | Pay-per-token |
-| **OpenAI** | GPT-4o, GPT-4o-mini, GPT-5, o-series | API key | Pay-per-token |
+| **OpenAI Codex** (subscription) | GPT-5-Codex / o-series via `codex exec` CLI | ChatGPT Plus/Pro subscription | $0 incremental (subscription) |
+| **OpenAI** (API) | GPT-4o, GPT-4o-mini, GPT-5, o-series | API key | Pay-per-token |
 | **Google Gemini** | Gemini 2.5 Flash Lite, Flash, Pro | API key | Pay-per-token (Flash Lite is cheapest viable model) |
 | **Moonshot (Kimi)** | Kimi K2, K2 Turbo | API key (OpenAI-compatible) | Very cheap |
 | **Local (Ollama)** | Qwen3, Llama-3.3, Mistral, any local | None (localhost) | $0 |
 | **OpenRouter** (optional) | Any model on OpenRouter | API key | Marked up but unified |
+
+**Subscription-first principle:** the two $0-incremental paths (Anthropic CLI via Pro/Max, OpenAI Codex CLI via ChatGPT Plus/Pro) are the cheapest tier of all when configured. They route ahead of paid APIs for any task the subscription model can handle. This is the highest-leverage cost optimization in the system.
 
 ### Task-type → model tier mapping (default policy)
 
@@ -1045,11 +1071,12 @@ User configures providers in settings UI OR via `~/.kairos/providers.json`:
 {
   "providers": {
     "anthropic_cli": { "enabled": true, "priority": 1 },
+    "codex_cli":     { "enabled": true, "priority": 1 },
     "anthropic_api": { "enabled": false },
-    "openai": { "enabled": true, "api_key_env": "OPENAI_API_KEY", "priority": 2 },
-    "gemini": { "enabled": true, "api_key_env": "GEMINI_API_KEY", "priority": 3 },
-    "kimi": { "enabled": false },
-    "ollama": { "enabled": true, "base_url": "http://localhost:11434", "priority": 4 }
+    "openai":        { "enabled": true, "api_key_env": "OPENAI_API_KEY", "priority": 3 },
+    "gemini":        { "enabled": true, "api_key_env": "GEMINI_API_KEY", "priority": 4 },
+    "kimi":          { "enabled": false },
+    "ollama":        { "enabled": true, "base_url": "http://localhost:11434", "priority": 5 }
   },
   "default_policy": "cost_optimized",  // or "quality_optimized" or "latency_optimized"
   "monthly_budget_usd": 50
@@ -1060,12 +1087,47 @@ User configures providers in settings UI OR via `~/.kairos/providers.json`:
 
 - Custom thin router using each provider's official SDK (no Vercel AI SDK dependency)
 - Anthropic: existing `claude -p` subprocess for CLI mode, `@anthropic-ai/sdk` for API mode
+- **Codex CLI: `codex exec "<prompt>" -m <model>` subprocess** (similar wrapper pattern to `claude -p`); detects installation via `which codex`; degrades to disabled if absent
 - OpenAI: `openai` package
 - Gemini: `@google/genai`
 - Kimi: `openai` package with `baseURL` override (OpenAI-compatible API)
 - Ollama: `openai` package with `baseURL: http://localhost:11434/v1` (also OpenAI-compatible)
 
-~600 lines total. One file per provider adapter, one router orchestrator.
+~700 lines total. One file per provider adapter, one router orchestrator.
+
+---
+
+## Section 8.5: Per-Phase Validation Gate (NEW)
+
+**Every phase ships with explicit validation BEFORE its tag is cut.** No phase is "done" merely because its tests pass — each must demonstrate the user-visible capability working in the real environment.
+
+### Validation requirements per phase
+
+| Phase | Validation type | What "validated" looks like |
+|---|---|---|
+| **A** (Local observers + router) | Smoke test script + manual app/tab switch | `bun run scripts/smoke-proactive.ts` runs 5 min; observed events for every observer; ≥1 narrative produced; cost stays under 1¢ |
+| **B** (Memory layers) | Replay test + LLM-judged recall quality | Replay 7 days of events; verify episodic→semantic consolidation; ask 5 recall questions, judge accuracy |
+| **C** (Trigger Engine + Autonomy) | Trigger catalog walkthrough | Each built-in trigger fires correctly in a scripted scenario; autonomy gates approve/deny correctly per tier |
+| **D** (OAuth connectors) | Live round-trip on each connector | Send + receive on Gmail/Slack/GitHub/Calendar with real OAuth tokens; verify rate limits respected |
+| **E** (Voice — Wispr-style) | Hands-on hotkey test | Hold-to-speak transcribes; double-tap toggles hands-free; AI speaks back via TTS; oval HUD shows recording state |
+| **F** (Liquid Glass UI) | Visual review on real macOS | Menu bar item + floating HUD render with glass blur; matches Wispr Flow's minimal footprint; hotkey overlay summons HUD |
+| **G** (Self-evolution Hermes-style) | 24h autonomous run | Daemon runs unattended; produces ≥1 self-generated skill; gap detector flags ≥1 missing capability; no cost overruns |
+| **H** (Multi-modal vision) | Screen-shot interpretation test | Capture screenshots from 5 apps; vision model produces accurate descriptions; integrates with narrator |
+| **I** (Commercial packaging) | Install on clean Mac | Pkg installs via Sparkle; provider config wizard works; Stripe sign-up + tier gating verified |
+
+### Validation gate enforcement
+
+1. Validation script lives in `scripts/validate-phase-<X>.sh` (or `.ts`)
+2. Validation runs at the END of each phase plan as its FINAL task
+3. If validation fails: the phase is NOT tagged. We diagnose, fix, re-validate.
+4. Validation results are recorded in `CHANGELOG.md` under the phase entry — what was tested, observed numbers, any caveats
+5. UI phases (F, parts of E) require a **manual visual review** that the user signs off on. Other phases can be fully automated.
+
+### Why this matters
+
+Tests prove code correctness. Validation proves **feature correctness**. KAIROS is a user-facing AI companion; "55 tests pass" doesn't prove a user can actually talk to it. Every phase ends with "demo it to yourself before declaring victory."
+
+This rule applies retroactively: Phase A's tag (`v0.1.0-phase-a`) is provisional until the user runs `scripts/smoke-proactive.ts` and the CHANGELOG is updated with observed event counts + narratives. Phase A is "code-complete" but not "validated-complete" until that runs.
 
 ---
 
