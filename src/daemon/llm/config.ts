@@ -8,6 +8,7 @@ export function defaultProviderConfig(): RouterConfig {
   return {
     providers: {
       anthropic_cli: empty({ enabled: true, priority: 1 }),
+      codex_cli:     empty({ enabled: true, priority: 1 }),
       anthropic_api: empty({ api_key_env: 'ANTHROPIC_API_KEY' }),
       openai:        empty({ api_key_env: 'OPENAI_API_KEY' }),
       gemini:        empty({ api_key_env: 'GEMINI_API_KEY' }),

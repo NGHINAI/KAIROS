@@ -6,6 +6,7 @@
 export type ProviderId =
   | 'anthropic_cli'
   | 'anthropic_api'
+  | 'codex_cli'
   | 'openai'
   | 'gemini'
   | 'kimi'

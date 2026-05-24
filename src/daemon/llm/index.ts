@@ -7,6 +7,7 @@ import { CostTracker } from './costTracker'
 import { ModelRouter } from './router'
 import { AnthropicCliProvider } from './providers/anthropicCli'
 import { AnthropicApiProvider } from './providers/anthropicApi'
+import { CodexCliProvider } from './providers/codexCli'
 import { GeminiProvider } from './providers/gemini'
 import { OpenAIProvider } from './providers/openai'
 import type { LLMProvider, ProviderId } from './types'
@@ -21,6 +22,7 @@ export function buildRouter(db: Database, configPath: string): ModelRouter {
 
   const providers: Partial<Record<ProviderId, LLMProvider>> = {
     anthropic_cli: new AnthropicCliProvider(cfg.providers.anthropic_cli),
+    codex_cli:     new CodexCliProvider(cfg.providers.codex_cli),
     anthropic_api: new AnthropicApiProvider(cfg.providers.anthropic_api),
     gemini:        new GeminiProvider(cfg.providers.gemini),
     openai:        new OpenAIProvider('openai', cfg.providers.openai),
