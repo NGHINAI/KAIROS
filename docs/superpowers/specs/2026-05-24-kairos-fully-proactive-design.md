@@ -1097,6 +1097,104 @@ User configures providers in settings UI OR via `~/.kairos/providers.json`:
 
 ---
 
+## Section 8.4: Research-Driven Architecture Refinements (2026-05-24)
+
+Background research surveyed 15+ proactive-agent projects and 4 academic papers. Full report at `docs/research/2026-05-24-proactive-agent-landscape.md`. The following refinements are now part of the architecture:
+
+### 8.4.1 — Tiered perception (KAIROS_SILENT pattern)
+
+The original Section 1 loop has the Narrator firing every 2-5 minutes unconditionally. **This is the cron-as-proactivity anti-pattern**. The refined loop:
+
+```
+EVENT BATCH arrives in EventBus
+        ↓
+TIER 1 — Cheap classifier (Haiku/Gemini Flash Lite, ~200 tokens, ~$0.00005)
+         Returns: SIGNIFICANT | ROUTINE | SILENT
+        ↓ (only if SIGNIFICANT)
+TIER 2 — Lightweight summarizer (mid-tier, ~500 tokens)
+         Returns: short description + significance score 0-1
+        ↓ (only if score > 0.6)
+TIER 3 — Full Narrator (mid-tier, ~1500 tokens) → publish 'narrator/summary'
+        ↓ (only if trigger threshold met)
+TIER 4 — Trigger Engine → Action composition → User-visible
+```
+
+**Effect**: ~95% of event batches are silently dropped at Tier 1. Cost per active hour drops from ~$0.30 to ~$0.02. Crucially, the agent stops producing routine summaries that train the user to ignore notifications — the failure mode that has killed every shipped "ambient AI" product.
+
+**Implementation note**: Phase A's current timer-driven Narrator becomes Tier 3. Phase B adds Tiers 1 + 2. The narrator's invocation flips from "fire every 5 min" to "fire when Tier 2 promotes the event batch."
+
+### 8.4.2 — STANDING_ORDERS.md (user-editable trigger rules)
+
+A plain markdown file at `~/.kairos/STANDING_ORDERS.md` that the user edits to declare what the daemon should watch for. Examples:
+
+```markdown
+- If my calendar has a meeting starting in 10 min and I'm not on a video call, remind me.
+- If my Spotify changes to a song I haven't heard before, note it in memory.
+- If someone DMs me on Slack and I haven't responded in 30 min, draft a reply.
+- Never proactively message me on Sunday before 11am.
+```
+
+The Tier 2 classifier reads STANDING_ORDERS.md on every significant batch and biases its score toward matches. Standing orders are first-class triggers, on par with the built-in catalog. This is the killer feature for power users — KAIROS becomes user-programmable in plain English.
+
+### 8.4.3 — Rate limiter (anti-spam from day 1)
+
+Hard caps baked into the trigger engine, NOT the UI:
+- **Max 8 proactive notifications per day** (rolling)
+- **Max 2 per hour**
+- Excess signals queue and bundle into a digest delivered next surface time
+- **Urgent overrides** bypass caps: calendar conflict <15min away, clipboard contains password-like string, error in active task
+
+The research is unambiguous: more than 3-5 proactive messages/day dilutes signal into noise. The rate limiter is not optional — Friend.com and early Omi failed by ignoring this.
+
+### 8.4.4 — Memory backend: Engram (not custom)
+
+Drop Section 3's "build custom on GBrain" plan. Use **Engram** (https://github.com/tstockham96/engram, MIT, npm `engram-sdk`) as the memory backend:
+- SQLite + Gemini embeddings + typed knowledge graph + LLM consolidation
+- Beats Mem0 80% vs 66.9% on LOCOMO benchmark using fewer tokens
+- MCP server interface — drops into KAIROS without rewrites
+- Layer **Hermes Dreaming scoring** on top: `score = w1·relevance + w2·frequency + w3·recency + w4·diversity + w5·richness - w6·duplication`. Promote above threshold to knowledge graph; prune below.
+- Run consolidation when user idle >20min AND on AC power (not on cron) — use `IOPMAssertCreateWithName` to detect.
+
+### 8.4.5 — Voice pipeline: Pipecat (fork kwindla/macos-local-voice-agents)
+
+Phase E's voice layer should NOT be built from scratch. Fork **kwindla/macos-local-voice-agents** which already delivers <800ms voice-to-voice on Apple Silicon using:
+- **Silero VAD** (1ms/chunk, MIT) for voice activity detection
+- **WhisperKit** (Apple Silicon CoreML) for local STT
+- **Kokoro TTS** (local) or ElevenLabs for speech-out
+- **WebRTC over UDP** (NOT WebSocket — too much jitter for <1s loop)
+- **Barge-in handling** native: VAD mid-TTS cancels speech + LLM gen
+
+Hold-to-speak via **CGEventTap** on the configured hotkey (default Ctrl+Shift+4). Reference: `VocaMac` (https://github.com/jatinkrmalik/vocamac) — fork its CGEventTap + MenuBarExtra setup directly.
+
+### 8.4.6 — UI shell: SwiftUI lock-in (not Tauri, definitely not Electron)
+
+Section 6's "primary SwiftUI / alternative Tauri / backup Electron" becomes **SwiftUI-only**. Research is firm:
+- Liquid Glass material (`.glassEffect(.regular)`) requires native SwiftUI on macOS 26 Tahoe
+- NSPanel with `.nonactivatingPanel` + `.canJoinAllSpaces` is the canonical floating-HUD recipe
+- Tauri's WebKit cannot access `liquidGlass` material
+- Electron's 250 MB RAM idle baseline is unacceptable for a 24/7 daemon (SwiftUI: ~10 MB)
+- macOS-only is fine — KAIROS is Apple-native by design
+
+Target macOS 26+ as minimum OS. Pre-26 users use the menu-bar-only mode (no glass HUD).
+
+### 8.4.7 — Optional: ActivityWatch as additional sensor
+
+For deeper system telemetry beyond Phase A's 5 observers (focus app, tabs, clipboard, files, calendar), consider consuming **ActivityWatch** (https://github.com/ActivityWatch/activitywatch) via its REST API. Provides:
+- Window focus durations
+- AFK / idle state
+- Per-browser tab durations (not just current set)
+
+Phase B candidate addition if the 5 core observers prove insufficient. Don't add upfront — only if needed.
+
+### What did NOT change
+
+- **5-stage loop semantics** — still OBSERVE → AGGREGATE → NARRATE → TRIGGER → ACT, but NARRATE is now gated by Tiers 1+2
+- **Multi-LLM router** — unchanged (Section 8). The Tier 1 classifier and Tier 2 summarizer ARE router calls, just to cheap tiers.
+- **Per-phase validation gate** — unchanged (Section 8.5)
+- **9 build phases (A-I)** — same scope, refined implementation per above
+
+---
+
 ## Section 8.5: Per-Phase Validation Gate (NEW)
 
 **Every phase ships with explicit validation BEFORE its tag is cut.** No phase is "done" merely because its tests pass — each must demonstrate the user-visible capability working in the real environment.
