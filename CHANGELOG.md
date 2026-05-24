@@ -37,4 +37,30 @@
 - ~2,400 LOC TypeScript + tests added
 - 24 commits on branch `phase-a`
 
-Phase A is complete. Phase B (memory layers) starts next.
+### Post-tag additions
+- **Codex CLI provider** (Phase A.1, commit `5390bdc` + `8b0594d`) — 7th provider added. Uses ChatGPT Plus/Pro subscription via `codex exec` subprocess, $0 incremental cost. Registered in `ultra_cheap` / `mid` / `heavy` tiers ahead of paid APIs (subscription-first principle). Verified working with `codex-cli 0.133.0`.
+- Spec refinements (commits `17b987d`, `c61148f`, `3cfc2d1`): per-phase validation gate (Section 8.5), research-driven architectural refinements (Section 8.4 — tiered perception, STANDING_ORDERS, custom memory build, custom glassmorphism UI direction).
+
+### Validation (per Section 8.5 gate)
+
+**Smoke test executed 2026-05-24 22:53Z, 5 min duration. PASSED.**
+
+- Total events captured: **31**
+  - `focus-app`: 24
+  - `narrator`: 3
+  - `clipboard`: 2
+  - `file-events`: 1
+  - `browser-tabs`: 1
+- Narratives produced: **3**, all via `anthropic_cli/claude-haiku-4-5-20251001`
+- Cost: **$0** (subscription-based Haiku used)
+- Latency: narrator tick ~1-2s end-to-end
+
+Sample narrative excerpt (1 of 3):
+
+> "You're on the `phase-a` branch of KAIROS with a clean working tree. Recent commits show you've been locking in architecture decisions and integrating research findings. Your task tracker shows 13 tasks: 4 done, 1 in progress, 8 open. KAIROS GitHub tab open. Recent file: `pulse_v2_third.db` (parallel work). Pattern: spec solidification → architecture lock-in → execution. What are you working on next?"
+
+The narrator correctly identified: current branch, recent commit topics, active app (Claude Code/Brave), open browser tab (GitHub), recent files, background music, and inferred user workflow pattern. The third narrative emergent-ended with a question ("What are you working on next?") — companion behavior without prompting.
+
+**Phase A is now both code-complete AND validated-complete.**
+
+Phase B (custom memory layers + Tier 1/2 perception + ActivityWatch observer + STANDING_ORDERS.md) plans next.
