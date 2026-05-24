@@ -959,6 +959,116 @@ Year 2 (aggressive):
 
 ---
 
+## Section 8: Multi-LLM Provider Architecture
+
+KAIROS must NOT be locked to Anthropic. Every LLM call goes through a single **ModelRouter** that abstracts providers and picks the right model per task based on complexity, cost, and latency.
+
+### Supported providers
+
+| Provider | Models | Auth | Pricing |
+|---|---|---|---|
+| **Anthropic** (subscription) | Claude Haiku/Sonnet/Opus via `claude -p` CLI | Pro/Max subscription | $0 incremental (subscription) |
+| **Anthropic** (API) | Same models via API | API key | Pay-per-token |
+| **OpenAI** | GPT-4o, GPT-4o-mini, GPT-5, o-series | API key | Pay-per-token |
+| **Google Gemini** | Gemini 2.5 Flash Lite, Flash, Pro | API key | Pay-per-token (Flash Lite is cheapest viable model) |
+| **Moonshot (Kimi)** | Kimi K2, K2 Turbo | API key (OpenAI-compatible) | Very cheap |
+| **Local (Ollama)** | Qwen3, Llama-3.3, Mistral, any local | None (localhost) | $0 |
+| **OpenRouter** (optional) | Any model on OpenRouter | API key | Marked up but unified |
+
+### Task-type → model tier mapping (default policy)
+
+| Task type | Tier | Default model preference (cheap → expensive fallback) |
+|---|---|---|
+| `narrative` (summarize state every 5min) | ultra-cheap | Gemini 2.5 Flash Lite → Haiku 4.5 → GPT-4o-mini → local Qwen3 |
+| `trigger_eval` (should this fire?) | ultra-cheap | Gemini 2.5 Flash Lite → Haiku 4.5 |
+| `action_compose` (draft a message) | mid | Sonnet 4.6 → Gemini 2.5 Flash → GPT-4o |
+| `skill_generate` (write new bash script) | heavy | Sonnet 4.7 → Gemini 2.5 Pro → GPT-5 |
+| `source_patch` (modify own code) | heavy | Sonnet 4.7 → GPT-5 → Gemini 2.5 Pro |
+| `dream` (consolidate memories) | mid | Sonnet 4.6 → Gemini 2.5 Flash |
+| `voice_transcribe` | special | Whisper.cpp local → Whisper API fallback |
+| `embed` (memory embeddings) | special | nomic-embed-text local (always) |
+
+### ModelRouter interface
+
+```typescript
+interface ModelRouter {
+  complete(req: CompletionRequest): Promise<CompletionResult>
+}
+
+type CompletionRequest = {
+  task_type: TaskType                // determines tier
+  prompt: string
+  system?: string
+  max_cost_cents?: number            // refuse if all providers exceed
+  latency_target?: 'realtime' | 'standard' | 'background'
+  fallback_chain?: ProviderId[]      // optional override
+  structured?: boolean               // require JSON output
+}
+
+type CompletionResult = {
+  text: string
+  parsed?: unknown                   // if structured
+  provider: ProviderId               // who answered
+  model: string                      // exact model name
+  cost_cents: number
+  latency_ms: number
+  fallback_count: number             // how many providers tried before this
+}
+```
+
+### Routing logic
+
+```
+1. Look up policy for task_type → ordered list of (provider, model) candidates
+2. Filter by: configured providers + available auth + cost budget
+3. Pick first candidate
+4. Try call
+5. On failure (rate limit, error, timeout): fallback to next candidate
+6. Track cost + log + emit telemetry
+7. Return result with provider/cost/latency
+```
+
+### Cost-efficiency strategies
+
+- **Prompt caching** — exploit Anthropic prompt cache (5-min TTL) by reusing identical system prompts
+- **Local-first** — for embeddings and voice transcription, always prefer local (free, fast)
+- **Subscription pass-through** — if user has Anthropic Pro/Max, `claude -p` CLI usage is $0 incremental
+- **Budget enforcement** — per-task budget; refuse if cheapest option exceeds
+- **Rolling cost window** — daily/hourly cost caps (existing budget tracker, extended to provider dimension)
+- **Aggressive cheap-tier defaults** — most KAIROS work (narration, triggers) is ultra-cheap; expensive only for skill/code generation
+
+### Provider configuration
+
+User configures providers in settings UI OR via `~/.kairos/providers.json`:
+
+```json
+{
+  "providers": {
+    "anthropic_cli": { "enabled": true, "priority": 1 },
+    "anthropic_api": { "enabled": false },
+    "openai": { "enabled": true, "api_key_env": "OPENAI_API_KEY", "priority": 2 },
+    "gemini": { "enabled": true, "api_key_env": "GEMINI_API_KEY", "priority": 3 },
+    "kimi": { "enabled": false },
+    "ollama": { "enabled": true, "base_url": "http://localhost:11434", "priority": 4 }
+  },
+  "default_policy": "cost_optimized",  // or "quality_optimized" or "latency_optimized"
+  "monthly_budget_usd": 50
+}
+```
+
+### Implementation
+
+- Custom thin router using each provider's official SDK (no Vercel AI SDK dependency)
+- Anthropic: existing `claude -p` subprocess for CLI mode, `@anthropic-ai/sdk` for API mode
+- OpenAI: `openai` package
+- Gemini: `@google/genai`
+- Kimi: `openai` package with `baseURL` override (OpenAI-compatible API)
+- Ollama: `openai` package with `baseURL: http://localhost:11434/v1` (also OpenAI-compatible)
+
+~600 lines total. One file per provider adapter, one router orchestrator.
+
+---
+
 ## Tech stack summary
 
 | Layer | Tech | Reason |
