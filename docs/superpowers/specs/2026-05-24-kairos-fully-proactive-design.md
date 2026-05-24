@@ -17,17 +17,31 @@ The shift: **"ask → answer" becomes "observe → act."** The model prompts the
 
 ## Vision
 
-A proactive AI assistant that:
+A proactive AI **co-worker** (not assistant) that:
 
 - **Lives on your Mac**, not in your browser
 - **Observes continuously** across local apps and 4-6 cloud services
-- **Maintains layered memory** (working, episodic, semantic, procedural) at the scale of years of use
+- **Maintains human-like layered memory** (working, episodic, semantic, procedural) at the scale of years of use
 - **Acts on its own** at the right autonomy tier — small reversible actions silently, moderate actions with one-tap approval, irreversible actions with full preview
-- **Talks back** via voice when you press a hotkey (Wispr Flow pattern)
+- **Talks back** via voice when you press a hotkey OR **initiates voice unprompted** — "hey, John just messaged you on Slack about the auth bug, want me to draft a reply?"
+- **Voice-driven delegation** — you say "remind me in 10 min" / "draft a reply" / "tell him I'm in a meeting" and KAIROS executes
+- **Drafts in your voice** — replies use your tone, your phrases, your prior responses to that person as style guide
 - **Self-improves continuously** — writes new skills from successful workflows (Hermes pattern), iterates skills mid-execution, evolves prompts and source code with user approval
-- **Looks like an Apple product** — Liquid Glass HUD, native macOS feel, motion physics
+- **Looks like an Apple product** — custom-glassmorphism HUD (iOS-18 Control Center aesthetic), native macOS feel, motion physics
 - **Is private by architecture** — data never leaves the user's machine; brain is local markdown + SQLite
 - **Scales commercially** with high margins because compute runs on the user's machine
+
+### The "co-worker not assistant" distinction (added 2026-05-24 per user clarification)
+
+KAIROS doesn't wait to be asked. It:
+1. **Reads** your incoming Slack/Gmail/Discord/WhatsApp messages as they arrive
+2. **Decides** whether each one warrants interruption (Tier 1/2 gates from 8.4.1)
+3. **Speaks** the relevant ones via TTS — "John sent: 'can you review my PR?' He's mentioned this twice today."
+4. **Listens** for your verbal response: "not now, remind me in 10" / "draft a yes, ask when he needs it" / "snooze until 3pm"
+5. **Executes** the response — sets reminder, drafts message in your voice, sends after preview confirmation
+6. **Learns** from the exchange — your preferences, John's communication style, what topics you defer vs handle immediately
+
+This is the central UX paradigm. The triangle-cursor model (Clicky) is explicitly NOT what KAIROS is — KAIROS doesn't fly around the screen pointing at things. KAIROS lives in your ear and in your message threads, with a glass HUD that surfaces what it's thinking and waiting on.
 
 ---
 
@@ -1261,10 +1275,15 @@ Deep dive on farzaa/clicky (6k stars, MIT, macOS voice companion) — full repor
 | Tiered perception (KAIROS_SILENT) | **Adopted** — Phase B implements Tiers 1+2 wrapping Phase A's narrator (Phase A code unchanged) |
 | Rate limiter | **Skipped** — trust the significance gate; validate volume during Phase B gate |
 | STANDING_ORDERS.md | **Adopted** — plain markdown, first-class trigger source |
-| Memory backend | **Custom build** on GBrain + pgvector (keep Section 3 plan); layer Hermes Dreaming + MemOS L1-L4 patterns |
+| STANDING_ORDERS grammar | **Hybrid** — free-form English authoring + LLM compile step → structured triggers stored in DB |
+| Memory backend tech | **SQLite + sqlite-vec extension** — single embedded DB, FTS5 lexical + vector semantic hybrid retrieval. "Human-like" memory comes from the SCHEMA layered on top (4-tier MemOS L1-L4 + Hermes Dreaming consolidation + decay/forgetting curves), not the engine. |
+| TLS warmup retrofit | **Adopted in Phase B** — 10-line `HEAD /` background fire at daemon start in each network provider adapter (skip anthropic_cli, codex_cli — subprocess-based, no socket reuse benefit) |
 | Voice pipeline (Phase E) | **Fork kwindla** for low-latency stack; voice must feel human-realistic (ElevenLabs / OpenAI TTS-1-HD primary; Kokoro/say only for sub-1s confirmations) |
 | Hotkey + overlay (Phase E) | **Study VocaMac, reimplement** — custom glassmorphism direction precludes fork |
+| Voice prompt design (Phase E) | **Adopt Clicky's voice system prompt** verbatim (8.4.8 #1) |
+| Cloudflare Worker proxy (Phase E + I) | **Adopt with HMAC auth** — Clicky's open Worker is the anti-pattern to avoid |
 | UI shell (Phase F) | **SwiftUI required** for performance + native blur; **custom glassmorphism** rendering (not stock `.glassEffect`), matching iOS-18-Control-Center aesthetic from user's reference screenshots |
+| Screen pointing (Clicky-style) | **DROPPED** — KAIROS lives in your ear + messages, not as a cursor flying around the screen |
 | ActivityWatch (Phase B) | **Adopted** as 6th observer |
 
 ---
