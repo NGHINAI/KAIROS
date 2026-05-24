@@ -1136,55 +1136,91 @@ A plain markdown file at `~/.kairos/STANDING_ORDERS.md` that the user edits to d
 
 The Tier 2 classifier reads STANDING_ORDERS.md on every significant batch and biases its score toward matches. Standing orders are first-class triggers, on par with the built-in catalog. This is the killer feature for power users — KAIROS becomes user-programmable in plain English.
 
-### 8.4.3 — Rate limiter (anti-spam from day 1)
+### 8.4.3 — Rate limiter: NONE (USER DECISION 2026-05-24)
 
-Hard caps baked into the trigger engine, NOT the UI:
-- **Max 8 proactive notifications per day** (rolling)
-- **Max 2 per hour**
-- Excess signals queue and bundle into a digest delivered next surface time
-- **Urgent overrides** bypass caps: calendar conflict <15min away, clipboard contains password-like string, error in active task
+**Decision**: skip the rate limiter. Trust the Tier 1 + Tier 2 significance gate to filter signal from noise. If the perception tiers do their job, no hard cap is needed.
 
-The research is unambiguous: more than 3-5 proactive messages/day dilutes signal into noise. The rate limiter is not optional — Friend.com and early Omi failed by ignoring this.
+**Risk acknowledged**: if Tier 1/2 are tuned too permissively in early Phase B, notification volume could spike. Mitigation: validate notification rate during Phase B validation gate (target: <10 unsolicited surfaces/day in normal usage). If Tier gates leak, tighten thresholds rather than adding a cap.
 
-### 8.4.4 — Memory backend: Engram (not custom)
+The research warned this is a high-risk choice; the user accepts the risk to preserve flexibility for power-user usage.
 
-Drop Section 3's "build custom on GBrain" plan. Use **Engram** (https://github.com/tstockham96/engram, MIT, npm `engram-sdk`) as the memory backend:
-- SQLite + Gemini embeddings + typed knowledge graph + LLM consolidation
-- Beats Mem0 80% vs 66.9% on LOCOMO benchmark using fewer tokens
-- MCP server interface — drops into KAIROS without rewrites
-- Layer **Hermes Dreaming scoring** on top: `score = w1·relevance + w2·frequency + w3·recency + w4·diversity + w5·richness - w6·duplication`. Promote above threshold to knowledge graph; prune below.
-- Run consolidation when user idle >20min AND on AC power (not on cron) — use `IOPMAssertCreateWithName` to detect.
+### 8.4.4 — Memory backend: CUSTOM BUILD (USER DECISION 2026-05-24)
 
-### 8.4.5 — Voice pipeline: Pipecat (fork kwindla/macos-local-voice-agents)
+Keep Section 3's custom-build plan. Build KAIROS's own memory layers on top of GBrain patterns + pgvector hybrid retrieval. Reasons:
+- Full control of event schema (KAIROS's `world_state_events` table has a specific shape Engram doesn't know about)
+- Zero external runtime dependency
+- Long-term maintenance surface offset by zero version-skew risk
+- Hermes Dreaming and ContextAgent patterns can be implemented directly without adapter shims
 
-Phase E's voice layer should NOT be built from scratch. Fork **kwindla/macos-local-voice-agents** which already delivers <800ms voice-to-voice on Apple Silicon using:
+Phase B effort estimate revises upward (~2-3 weeks vs ~3 days with Engram), worth it for the control.
+
+**Still adopt** (these are patterns, not dependencies):
+- **Hermes Dreaming scoring formula**: `score = w1·relevance + w2·frequency + w3·recency + w4·diversity + w5·richness - w6·duplication`. Promote above threshold to semantic; prune below.
+- **Idle-triggered consolidation** (not cron): consolidation runs only when user idle >20 min AND on AC power. Use `IOPMAssertionCreateWithName` to detect.
+- **4-tier layout from MemOS**: L1 raw traces → L2 typed episodes → L3 semantic facts/notes → L4 crystallized skills.
+
+### 8.4.5 — Voice pipeline (USER DECISION 2026-05-24)
+
+**Decision**: Fork **kwindla/macos-local-voice-agents** as Phase E starter. Adapt for KAIROS's event bus + ModelRouter. Keep the proven low-latency stack.
+
+**Pipeline** (from kwindla):
 - **Silero VAD** (1ms/chunk, MIT) for voice activity detection
 - **WhisperKit** (Apple Silicon CoreML) for local STT
-- **Kokoro TTS** (local) or ElevenLabs for speech-out
-- **WebRTC over UDP** (NOT WebSocket — too much jitter for <1s loop)
-- **Barge-in handling** native: VAD mid-TTS cancels speech + LLM gen
+- **WebRTC over UDP** (NOT WebSocket — too much jitter for <1s voice-to-voice loop)
+- **Barge-in handling** native via Pipecat: VAD mid-TTS cancels speech + LLM gen
 
-Hold-to-speak via **CGEventTap** on the configured hotkey (default Ctrl+Shift+4). Reference: `VocaMac` (https://github.com/jatinkrmalik/vocamac) — fork its CGEventTap + MenuBarExtra setup directly.
+**TTS quality requirement (CRITICAL)**: Voice MUST feel realistic and human. Kokoro is acceptable for short confirmations/chimes, but proactive speech and conversational responses MUST use a top-tier TTS — KAIROS is a companion, not a robot. Provider order:
+1. **ElevenLabs** (default for proactive speech if user subscribes) — best-in-class natural voice, $5/mo starter tier handles realistic personal-use volume. Custom voice cloning available.
+2. **OpenAI TTS-1-HD** (default if no ElevenLabs key) — `nova` / `onyx` voices, ~$0.030/1k chars, very natural, fast.
+3. **Kokoro local** (only for sub-1-second confirmations, NOT for proactive narration) — free but obviously synthetic at length.
+4. **macOS native `say`** — fallback only, never the default. Robotic, not companion-grade.
 
-### 8.4.6 — UI shell: SwiftUI lock-in (not Tauri, definitely not Electron)
+A "voice quality validation" task is part of Phase E's validation gate: 10 sample proactive utterances must be rated "would sound natural in conversation" by the user. If TTS feels robotic, default provider escalates to ElevenLabs.
 
-Section 6's "primary SwiftUI / alternative Tauri / backup Electron" becomes **SwiftUI-only**. Research is firm:
-- Liquid Glass material (`.glassEffect(.regular)`) requires native SwiftUI on macOS 26 Tahoe
-- NSPanel with `.nonactivatingPanel` + `.canJoinAllSpaces` is the canonical floating-HUD recipe
-- Tauri's WebKit cannot access `liquidGlass` material
-- Electron's 250 MB RAM idle baseline is unacceptable for a 24/7 daemon (SwiftUI: ~10 MB)
-- macOS-only is fine — KAIROS is Apple-native by design
+**Hotkey + overlay** (USER DECISION 2026-05-24): **Study** VocaMac's CGEventTap + MenuBarExtra + floating-indicator pattern, but **reimplement** for KAIROS (don't fork code). Reason: KAIROS's hotkey UX diverges (double-tap Control for hands-free, custom-glassmorphism oval rendering, different state machine), and inheriting VocaMac visuals would clash with the custom-glassmorphism direction in 8.4.6.
 
-Target macOS 26+ as minimum OS. Pre-26 users use the menu-bar-only mode (no glass HUD).
+References to study (don't fork):
+- VocaMac (https://github.com/jatinkrmalik/vocamac) — push-to-talk with Right Option hold; clean SwiftUI + CGEventTap implementation
+- OkClaw (https://okclaw.app) — overlay-on-hold pattern with smooth transitions
 
-### 8.4.7 — Optional: ActivityWatch as additional sensor
+### 8.4.6 — UI shell: SwiftUI required, but CUSTOM glassmorphism (not Apple's default)
 
-For deeper system telemetry beyond Phase A's 5 observers (focus app, tabs, clipboard, files, calendar), consider consuming **ActivityWatch** (https://github.com/ActivityWatch/activitywatch) via its REST API. Provides:
-- Window focus durations
-- AFK / idle state
-- Per-browser tab durations (not just current set)
+**Clarification from user 2026-05-24**: SwiftUI is the right shell technology, BUT KAIROS should NOT settle for Apple's default `.glassEffect(.regular)` material. The aesthetic target is "designer-grade glassmorphism" matching the visual richness of iOS-18-style Control Center: heavy frosted blur, stacked floating glass tiles with rounded pill shapes, vibrant colored backgrounds bleeding through, custom inner highlights + outer shadows giving real depth.
 
-Phase B candidate addition if the 5 core observers prove insufficient. Don't add upfront — only if needed.
+**Rendering recipe** (custom, not stock):
+- **Base layer**: `NSVisualEffectView` with `.hudWindow` material AND a higher-than-default blur radius (custom CIFilter chain if needed)
+- **Glass tile pattern**: stacked rounded-rectangle layers per UI element (NOT one panel) — each tile is its own `NSPanel` or a SwiftUI shape with `.background(.ultraThinMaterial)` and additional gradient overlays
+- **Inner highlight**: linear gradient on top edge (`white opacity 0.15 → transparent`) inside each tile for the "lit edge" effect
+- **Outer shadow**: deep + diffuse drop shadow (`radius: 24, opacity: 0.25, offset: 0,12`) under each tile for floating-above-surface feel
+- **Pill corner radius**: 24-32px for cards, fully circular for action buttons
+- **Color refraction**: tiles slightly tinted toward the dominant color of the wallpaper behind them (sample with `NSScreen.mainScreen.colorSpace`)
+- **Motion**: spring physics with bouncy settle (SwiftUI `interpolatingSpring(stiffness: 280, damping: 22)`)
+
+**Why still SwiftUI** (and not Tauri/Electron):
+- Native blur runs at 120Hz on Apple Silicon; web `backdrop-filter: blur()` caps at ~30fps under load
+- True wallpaper color sampling needs native `CGWindowListCopyWindowInfo` access
+- 24/7 daemon RAM matters: SwiftUI shell ~15MB; Tauri ~50MB; Electron ~250MB
+- Direct `NSPanel.level = .floating` + `.canJoinAllSpaces` for always-on-top behavior
+- Tauri's WebKit cannot access `liquidGlass` material; matching the screenshot aesthetic in web would require canvas/Metal fallbacks defeating the cross-platform argument
+
+**OS targeting**: macOS 26+ native for full effect; macOS 14-25 fallback uses NSVisualEffectView + manual SwiftUI gradients (looks ~85% as good).
+
+**Reference screenshots from user**: iOS Control Center stacked glass tiles + nested glassmorphism cards with deep frosted blur. Aesthetic target is more "iOS-18 Control Center" than "macOS 26 Tahoe default." The HUD oval at the bottom of screen follows the same rendering recipe — small pill version of the same glass material.
+
+### 8.4.7 — ActivityWatch as 6th observer in Phase B (USER DECISION 2026-05-24)
+
+**Decision**: Add ActivityWatch as Phase B's 6th observer. Phase B includes:
+- Install/setup helper (detect ActivityWatch, prompt to install if missing — Homebrew formula exists)
+- New `src/daemon/proactive/observers/activityWatch.ts` consuming the REST API at `localhost:5600/api/0`
+- Polls window focus durations + AFK state + per-browser-tab time-on-site every 30s
+- Feeds enriched events into the bus alongside the 5 core observers
+
+Why valuable:
+- Tier 1 classifier benefits from "user has been on this app for 47 minutes" (signals deep work; suppress interruption) vs "user is bouncing between apps every 30s" (signals scattered; could benefit from a nudge)
+- AFK detection prevents triggers firing when user is away from desk
+- Per-tab dwell time enables "noticed you've been re-reading docs/auth.md three times in 10 min — open the related PRs?" triggers
+
+Failure mode: if ActivityWatch isn't installed, observer disables itself gracefully (no daemon crash).
 
 ### What did NOT change
 
@@ -1192,6 +1228,19 @@ Phase B candidate addition if the 5 core observers prove insufficient. Don't add
 - **Multi-LLM router** — unchanged (Section 8). The Tier 1 classifier and Tier 2 summarizer ARE router calls, just to cheap tiers.
 - **Per-phase validation gate** — unchanged (Section 8.5)
 - **9 build phases (A-I)** — same scope, refined implementation per above
+
+### Final decision summary (2026-05-24 user sign-off)
+
+| Pivot | Decision |
+|---|---|
+| Tiered perception (KAIROS_SILENT) | **Adopted** — Phase B implements Tiers 1+2 wrapping Phase A's narrator (Phase A code unchanged) |
+| Rate limiter | **Skipped** — trust the significance gate; validate volume during Phase B gate |
+| STANDING_ORDERS.md | **Adopted** — plain markdown, first-class trigger source |
+| Memory backend | **Custom build** on GBrain + pgvector (keep Section 3 plan); layer Hermes Dreaming + MemOS L1-L4 patterns |
+| Voice pipeline (Phase E) | **Fork kwindla** for low-latency stack; voice must feel human-realistic (ElevenLabs / OpenAI TTS-1-HD primary; Kokoro/say only for sub-1s confirmations) |
+| Hotkey + overlay (Phase E) | **Study VocaMac, reimplement** — custom glassmorphism direction precludes fork |
+| UI shell (Phase F) | **SwiftUI required** for performance + native blur; **custom glassmorphism** rendering (not stock `.glassEffect`), matching iOS-18-Control-Center aesthetic from user's reference screenshots |
+| ActivityWatch (Phase B) | **Adopted** as 6th observer |
 
 ---
 
