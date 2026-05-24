@@ -1,0 +1,11 @@
+{
+  "name": "user-process-summary",
+  "description": "Count running processes for the current user and return process name frequency and CPU usage breakdown",
+  "when_to_use": "When checking system load, monitoring what the current user is running, or inspecting process count and CPU distribution",
+  "command": "./run.sh",
+  "timeout_ms": 10000,
+  "output_format": "json",
+  "category": "monitoring",
+  "generated": true,
+  "generated_at": 1777691860490
+}

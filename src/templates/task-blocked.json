@@ -1,0 +1,7 @@
+[
+  "🛡️ Hit a push wall. {command} blocked by your protection rules. Approve or deny: {approval_id}",
+  "🛡️ {command} — can't run that without your say-so. Approval: {approval_id}",
+  "🛡️ Reached a gate. Want to run {command} but you said to always ask. Reply with: kairos approve {approval_id}",
+  "🛡️ Protected operation detected: {command}. Your call: approve {approval_id} or deny {approval_id}",
+  "🛡️ Paused at {command}. This one's on the always-ask list. {approval_id} is the approval ID."
+]

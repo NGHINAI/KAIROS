@@ -1,0 +1,22 @@
+{
+  "name": "kairos-sandbox",
+  "version": "0.1.0-phase0",
+  "type": "module",
+  "private": true,
+  "description": "Always-on autonomous AI assistant — sandbox build",
+  "scripts": {
+    "build": "bash scripts/build.sh",
+    "daemon": "bun run src/daemon/index.ts --sandbox --verbose",
+    "daemon:bin": "./bin/kairos-daemon --sandbox --verbose",
+    "nuke": "rm -rf state/* runtime/* bin/* && mkdir -p state/inbox state/pending-approvals state/approved state/tasks state/logs runtime bin && echo '✓ Sandbox wiped'",
+    "inspect": "bash scripts/inspect-state.sh",
+    "version": "bun run src/daemon/index.ts --version"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "googleapis": "^171.4.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}

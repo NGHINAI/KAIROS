@@ -1,0 +1,8 @@
+[
+  "🔎 Noticed: {description}\n   Suggestion: {suggested_action}\n   → Use kairos_observe(action=\"act\", observation_id=\"{observation_id}\") to act, or ignore.",
+  "🔎 {description}\n   → {suggested_action}\n   Say \"kairos do it\" with observation {observation_id} to proceed.",
+  "🔎 Quick heads up: {description}. {suggested_action}",
+  "🔎 Spotted something: {description}.\n   If you want, I can: {suggested_action}. Observation: {observation_id}",
+  "🔎 {description} — might be worth a look.\n   {suggested_action}",
+  "🔎 Found: {description}.\n   Want me to handle it? Use observation {observation_id}."
+]

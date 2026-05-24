@@ -1,0 +1,9 @@
+{
+  "name": "disk-space",
+  "description": "Check disk space usage on the main filesystem",
+  "when_to_use": "When user asks about disk space, free space, storage, or when system feels slow",
+  "command": "./check.sh",
+  "timeout_ms": 5000,
+  "output_format": "json",
+  "category": "monitoring"
+}

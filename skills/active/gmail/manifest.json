@@ -1,0 +1,10 @@
+{
+  "name": "gmail",
+  "description": "Gmail integration: read inbox, send emails, and manage labels via Google OAuth",
+  "when_to_use": "When user asks to check email, read inbox, send a message, search Gmail, manage labels, or any Gmail/email operation",
+  "command": "./gmail.js",
+  "args": ["read", "--count=5"],
+  "timeout_ms": 15000,
+  "output_format": "json",
+  "category": "communication"
+}

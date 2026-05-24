@@ -1,0 +1,5 @@
+[
+  "🛡️ Need your OK to proceed. Command: {command}. Approve? kairos approve {approval_id}",
+  "🛡️ Protected operation: {command}. Say the word: kairos approve {approval_id}",
+  "🛡️ Blocked at {command}. Your protection rules doing their job. Approval: {approval_id}"
+]

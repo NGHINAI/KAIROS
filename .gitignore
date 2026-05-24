@@ -1,0 +1,22 @@
+# KAIROS sandbox runtime artifacts
+state/
+runtime/
+bin/
+
+# Bun / Node
+node_modules/
+bun.lockb
+bun.lock
+
+# Logs (in case any escape state/logs/)
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo

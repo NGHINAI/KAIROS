@@ -1,0 +1,8 @@
+[
+  "✗ That didn't work. {summary}",
+  "✗ Hit a wall. {summary} Check the logs if you want the gory details.",
+  "✗ {summary} I tried. Moving on unless you want a retry.",
+  "✗ Failed. {summary} Not my finest moment.",
+  "✗ {summary} The subprocess had opinions, and they were all errors.",
+  "✗ Nope. {summary} Logs are at state/tasks/{task_id}/ if you're curious."
+]

@@ -1,0 +1,6 @@
+[
+  "⏰ Scheduled task fired: \"{description}\". Working on it now.",
+  "⏰ Time's up — running \"{description}\" as scheduled.",
+  "⏰ Scheduled: \"{description}\" just fired. Task queued.",
+  "⏰ Your scheduled \"{description}\" is running. Results incoming."
+]

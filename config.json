@@ -1,0 +1,37 @@
+{
+  "_comment": "KAIROS sandbox runtime configuration. Edit this to change behavior without rebuilding.",
+  "_docs": "See ~/Desktop/kairos-design.md Section 5 for budget/tick details.",
+
+  "tick": {
+    "_comment": "120s default in sandbox (slower for observability). Production uses 60s.",
+    "defaultIntervalMs": 120000,
+    "minSleepMs": 60000,
+    "maxSleepMs": 600000
+  },
+
+  "budget": {
+    "_comment": "Real-use budget — each tick decision costs ~10¢ with full context. Old 100¢/hr cap was for sandbox safety but blocks active use. $5/hr is a sane upper bound for a personal agent — at peak usage that's $120/day, but typical idle ticks are much cheaper.",
+    "maxSubprocessPerHour": 60,
+    "maxProactiveMsgsPerHour": 10,
+    "maxCostCentsPerHour": 500
+  },
+
+  "task": {
+    "_comment": "Single concurrent task in sandbox for easier debugging.",
+    "maxConcurrent": 1,
+    "timeoutMs": 600000
+  },
+
+  "models": {
+    "_comment": "Haiku for tick decisions (cheap), Sonnet for real work and dreams.",
+    "tick": "claude-haiku-4-5",
+    "work": "claude-sonnet-4-6",
+    "dream": "claude-sonnet-4-6"
+  },
+
+  "dream": {
+    "_comment": "Faster dreams in sandbox (5min vs 15min) so you can observe consolidation.",
+    "minIntervalMinutes": 5,
+    "minCandidates": 3
+  }
+}

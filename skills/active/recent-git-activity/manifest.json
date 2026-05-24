@@ -1,0 +1,9 @@
+{
+  "name": "recent-git-activity",
+  "description": "Show recent git commits in the current directory (last 7 days)",
+  "when_to_use": "When user asks what they worked on recently, git history, recent commits, or 'what did I do this week'",
+  "command": "./recent.sh",
+  "timeout_ms": 5000,
+  "output_format": "json",
+  "category": "query"
+}

@@ -1,0 +1,6 @@
+[
+  "⏰ Scheduled: \"{description}\". Next fire: {next_fire}.",
+  "⏰ Got it. \"{description}\" scheduled. First run: {next_fire}.",
+  "⏰ Schedule set: {description}. I'll kick it off at {next_fire}.",
+  "⏰ Locked in. \"{description}\" fires at {next_fire}. You can manage with kairos_schedule."
+]

@@ -1,0 +1,9 @@
+{
+  "name": "system-info",
+  "description": "Get current system stats: CPU, memory, uptime, load",
+  "when_to_use": "When user asks about system performance, CPU usage, memory, or general health of the Mac",
+  "command": "./info.sh",
+  "timeout_ms": 5000,
+  "output_format": "json",
+  "category": "monitoring"
+}
