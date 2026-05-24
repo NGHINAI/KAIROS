@@ -1229,6 +1229,31 @@ Failure mode: if ActivityWatch isn't installed, observer disables itself gracefu
 - **Per-phase validation gate** — unchanged (Section 8.5)
 - **9 build phases (A-I)** — same scope, refined implementation per above
 
+### 8.4.8 — Clicky-derived patterns (2026-05-24)
+
+Deep dive on farzaa/clicky (6k stars, MIT, macOS voice companion) — full report at `docs/research/2026-05-24-clicky-deep-dive.md`. Clicky is **not proactive** (it's a better Siri button), but its engineering of voice + macOS + spatial grounding is production-quality and 5 patterns are worth adopting verbatim:
+
+**Steal (with phase mapping):**
+
+1. **Voice system prompt design** (`CompanionManager.swift:544-577`) → **Phase E**. The best TTS-aware LLM prompt structure in any open repo. Rules: "write for the ear not the eye", ban lists/bullets/markdown/symbols, spell out numbers ("for example" not "e.g."), default concise but escape hatch to go long, "plant a seed" instead of dead-end yes/no closer, never say "simply"/"just". KAIROS voice prompts inherit this verbatim.
+
+2. **Cloudflare Worker key-proxy** (`worker/src/index.ts`, ~142 lines) → **Phase E + Phase I**. Three routes: `/chat` → Anthropic, `/tts` → ElevenLabs, `/transcribe-token` → short-lived AssemblyAI token. Daemon binary holds zero API keys. Adopt for KAIROS voice + commercial packaging. **MUST add HMAC-SHA256 signed-request auth** (Clicky's anti-pattern — their open Worker burns credits when URL leaks).
+
+3. **TLS warmup HEAD request** (`ClaudeAPI.swift`, `warmUpTLSConnectionIfNeeded()`) → **Phase B retrofit candidate**. Fire background `HEAD /` at daemon start to pre-warm TLS session tickets. Eliminates cold-handshake latency on first real LLM call. ~10ms background cost, big perceived-latency win for narrator first tick.
+
+4. **Shared `URLSession` for WebSocket pools** → **Phase E (STT)**. Document FIRST in code: `URLSession` MUST be shared across AssemblyAI/streaming-STT sessions, NEVER recreated per-session. Clicky discovered the OS connection pool corrupts otherwise ("Socket is not connected" after rapid reconnects). This is the kind of footgun worth pre-empting.
+
+5. **`[POINT:x,y:label:screenN]` spatial grounding protocol** (`CompanionManager.swift:640-690`, `CompanionScreenCaptureUtility.swift`) → **Phase H (multi-modal) + Phase F (HUD)**. Production-tested LLM → pixel-coordinate protocol across multi-monitor setups. Coordinate system: screenshot pixels → display points → AppKit global, with per-display scaling + `isCursorScreen` prioritization. If KAIROS adds "show me where" capability (Phase H), this is the protocol.
+
+**Avoid (Clicky anti-patterns):**
+
+1. **Non-streaming TTS** — Clicky downloads full ElevenLabs audio before play (1-3s dead silence). KAIROS Phase E MUST stream TTS bytes to audio player as they arrive.
+2. **No memory architecture** — Clicky's #1 GitHub Issue. Phase B fixes this for KAIROS (custom memory layers).
+3. **Open unauthenticated proxy** — Clicky Worker has no auth, anyone burns their credits. KAIROS Worker MUST sign requests.
+4. **Polling timer for cursor position** — Clicky uses 16ms `Timer` for `NSEvent.mouseLocation`. Use `NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved)` instead.
+5. **Hardcoded hotkey** — Clicky's `Ctrl+Option` is uneditable, top UX complaint. KAIROS exposes hotkey binding from day-1 (Phase E config or STANDING_ORDERS.md).
+6. **No cancellation mid-TTS** — When user starts new utterance, Clicky has awkward gap. KAIROS Phase E: explicit cancellation + immediate mic activation (barge-in, native in Pipecat — already locked in 8.4.5).
+
 ### Final decision summary (2026-05-24 user sign-off)
 
 | Pivot | Decision |
