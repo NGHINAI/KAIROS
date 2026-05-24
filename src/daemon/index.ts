@@ -35,6 +35,16 @@ import { MemoryStore } from './memory'
 import { Voice } from './voice'
 import { sendMacNotification, setSandboxDir as setNotifySandboxDir } from './notify'
 import { postToDiscord, isDiscordConfigured } from './discord'
+import { buildRouter } from './llm'
+import { EventBus } from './proactive/eventBus'
+import { StateSnapshot } from './proactive/stateSnapshot'
+import { ObserverRegistry } from './proactive/observerRegistry'
+import { Narrator } from './proactive/narrator'
+import { FocusAppObserver } from './proactive/observers/focusApp'
+import { BrowserTabsObserver } from './proactive/observers/browserTabs'
+import { ClipboardObserver } from './proactive/observers/clipboard'
+import { FileEventsObserver } from './proactive/observers/fileEvents'
+import { CalendarLocalObserver } from './proactive/observers/calendarLocal'
 
 const VERSION = '0.2.0'
 
@@ -296,6 +306,33 @@ async function main(): Promise<void> {
   // 10. Start the tick scheduler
   scheduler.start()
 
+  // 10b. Proactive subsystem (ModelRouter + EventBus + observers + Narrator)
+  let proactiveStop: (() => Promise<void>) | null = null
+  if (config.proactive.enabled) {
+    const router = buildRouter(db, config.proactive.providerConfigPath)
+    const bus = new EventBus(db)
+    const snapshot = new StateSnapshot(bus)
+    const registry = new ObserverRegistry(bus)
+
+    registry.register(new FocusAppObserver(bus))
+    registry.register(new BrowserTabsObserver(bus))
+    registry.register(new ClipboardObserver(bus))
+    registry.register(new FileEventsObserver(bus))
+    registry.register(new CalendarLocalObserver(bus))
+
+    await registry.startAll()
+    const narrator = new Narrator(bus, snapshot, router, {
+      intervalMs: config.proactive.narratorIntervalMs,
+    })
+    await narrator.start()
+    log(`Proactive subsystem active: ${registry.list().length} observers + narrator`)
+
+    proactiveStop = async () => {
+      await narrator.stop()
+      await registry.stopAll()
+    }
+  }
+
   // 11. Write ready flag (shim watches for this)
   writeReadyFlag(config.sandboxDir)
 
@@ -303,6 +340,7 @@ async function main(): Promise<void> {
   setupSignalHandlers(() => {
     discordBot?.stop()
     scheduler.stop()
+    if (proactiveStop) void proactiveStop()
     gracefulShutdown({ sandboxDir: config.sandboxDir, db, server })
   })
 

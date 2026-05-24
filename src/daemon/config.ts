@@ -51,6 +51,11 @@ const DEFAULTS: Config = {
     collectionIntervalTicks: 5,
     metricsWindowHours: 168,
   },
+  proactive: {
+    enabled: true,
+    narratorIntervalMs: 5 * 60_000,
+    providerConfigPath: join(process.env.HOME ?? '', '.kairos', 'providers.json'),
+  },
 }
 
 const SANDBOX_OVERRIDES: Partial<Config> = {
