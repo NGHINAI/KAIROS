@@ -35,10 +35,12 @@ For each rule, emit 1+ triggers. Each trigger has:
 
 If a rule restricts timing (e.g. "never on Sunday morning"), encode as a separate trigger with action "suspend" and appropriate when_kind: "time".
 
+For EACH emitted trigger, include `source_rule_number`: the 1-based index of the input rule that this trigger came from. This is used for attribution + debugging.
+
 Output strict JSON:
 {
   "triggers": [
-    { "id": "...", "when_kind": "...", "when_match": "...", "condition": null|"...", "action": "..." }
+    { "id": "...", "when_kind": "...", "when_match": "...", "condition": null|"...", "action": "...", "source_rule_number": 1 }
   ]
 }`
 
@@ -78,11 +80,20 @@ export class OrdersCompiler {
         max_output_tokens: 1200,
         latency_target: 'background',
       })
-      const parsed = result.parsed as { triggers?: Array<Omit<CompiledTrigger, 'source_rule'>> } | undefined
-      const compiled: CompiledTrigger[] = (parsed?.triggers ?? []).map((t, i) => ({
-        ...t,
-        source_rule: rules[i] ?? rules[0] ?? '',
-      }))
+      const parsed = result.parsed as { triggers?: Array<Omit<CompiledTrigger, 'source_rule'> & { source_rule_number?: number }> } | undefined
+      const compiled: CompiledTrigger[] = (parsed?.triggers ?? []).map((t, i) => {
+        // Prefer LLM-provided source_rule_number (1-based); fall back to
+        // position index only if the model omitted it. This fixes the
+        // attribution bug where source_rule showed the wrong rule when
+        // the LLM emitted triggers in different order than input rules.
+        const ruleNumber = t.source_rule_number ?? (i + 1)
+        const idx = Math.max(0, Math.min(rules.length - 1, ruleNumber - 1))
+        const { source_rule_number, ...triggerFields } = t
+        return {
+          ...triggerFields,
+          source_rule: rules[idx] ?? rules[0] ?? '',
+        }
+      })
       this.replaceAll(compiled)
       this.setMeta('source_hash', sourceHash)
       log(`OrdersCompiler: ${rules.length} rules → ${compiled.length} triggers`)
