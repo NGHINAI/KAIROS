@@ -67,6 +67,16 @@ import { NativeNotifier } from './agency/nativeNotifier'
 import { ActionExecutor } from './agency/actionExecutor'
 import { TriggerEngine } from './agency/triggerEngine'
 import { PerceptionToTrigger } from './agency/perceptionToTrigger'
+import { BrowserOpener } from './onboarding/browserOpener'
+import { ClipboardPatternWatcher } from './onboarding/clipboardPatternWatcher'
+import { OAuthCallbackHandler } from './onboarding/oauthCallbackHandler'
+import { McpAutoInstaller } from './onboarding/mcpAutoInstaller'
+import { McpConfigMutator } from './onboarding/mcpConfigMutator'
+import { FlowStateStore } from './onboarding/flowStateStore'
+import { InboxUserChannel } from './onboarding/inboxUserChannel'
+import { SetupSkillGenerator } from './onboarding/setupSkillGenerator'
+import { SetupFlowRuntime } from './onboarding/setupFlowRuntime'
+import { registerSetupIntent } from './onboarding/setupIntent'
 
 const VERSION = '0.2.0'
 
@@ -433,6 +443,26 @@ async function main(): Promise<void> {
           log(`MCP host active: ${mcpHost.listServers().length} server(s), ${mcpHost.listAllTools().length} tool(s) registered as intents`)
 
           mcpStop = async () => { await mcpHost.stopAll() }
+
+          // ─── Onboarding subsystem (Phase C.2.5) ───────────────────────
+          const onboardingChatPath = join(config.sandboxDir, 'state', 'onboarding-chat.md')
+          const flowStateStore = new FlowStateStore(db)
+          const setupRuntime = new SetupFlowRuntime({
+            browserOpener: new BrowserOpener(),
+            clipboardPatternWatcher: new ClipboardPatternWatcher(bus),
+            oauthCallbackHandler: new OAuthCallbackHandler(),
+            mcpAutoInstaller: new McpAutoInstaller(),
+            mcpConfigMutator: new McpConfigMutator(config.mcp.configPath),
+            flowStateStore,
+            keychain,
+            mcpHost,
+            userChannel: new InboxUserChannel({ path: onboardingChatPath }),
+          })
+          registerSetupIntent(intentRegistry, {
+            generator: new SetupSkillGenerator(router),
+            runtime: setupRuntime,
+          })
+          log('Onboarding subsystem active — setup_service intent registered')
         }
 
         const trajectory = new TrajectoryLog(db)
