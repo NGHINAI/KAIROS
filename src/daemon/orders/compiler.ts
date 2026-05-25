@@ -35,7 +35,7 @@ For each rule, emit 1+ triggers. Each trigger has:
 
 If a rule restricts timing (e.g. "never on Sunday morning"), encode as a separate trigger with action "suspend" and appropriate when_kind: "time".
 
-For EACH emitted trigger, include `source_rule_number`: the 1-based index of the input rule that this trigger came from. This is used for attribution + debugging.
+For EACH emitted trigger, include "source_rule_number": the 1-based index of the input rule that this trigger came from. This is used for attribution + debugging.
 
 Output strict JSON:
 {
