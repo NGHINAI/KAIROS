@@ -6,7 +6,9 @@
 
 **Architecture:** A push-based perception pipeline gates every event batch through two cheap classifiers before deciding to invoke the Narrator. The memory system writes raw events to L1 (working), promotes meaningful sequences to L2 (episodic), distills patterns to L3 (semantic facts/notes), and crystallizes repeated successful actions to L4 (procedural skills). Consolidation runs only during user idle + on AC power. A STANDING_ORDERS.md file lets the user declare what to watch for in plain English; a one-time LLM compile step parses it to structured triggers cached in the DB.
 
-**Tech Stack:** TypeScript on Bun, `bun:sqlite` + `sqlite-vec` (vector search inside SQLite), `fastembed` (local nomic-embed-text for embeddings), ActivityWatch REST API (`localhost:5600`), reuse Phase A's ModelRouter for all classifier/narrator/dreamer LLM calls.
+**Tech Stack:** TypeScript on Bun, `bun:sqlite` (with embeddings stored as BLOB; cosine similarity done in pure TypeScript over in-memory Float32Array — `bun:sqlite` cannot load dynamic extensions like sqlite-vec), `fastembed` (local nomic-embed-text for embeddings), ActivityWatch REST API (`localhost:5600`), reuse Phase A's ModelRouter for all classifier/narrator/dreamer LLM calls.
+
+**Why pure-TS cosine instead of sqlite-vec**: discovered at Task 0 that `bun:sqlite` is compiled without `SQLITE_ALLOW_LOAD_EXTENSION`. At KAIROS's personal-use scale (target ~10k semantic facts over years of use, 768-dim embeddings), pure-TS cosine over an in-memory `Float32Array` matrix is sub-10ms — perfectly acceptable. We avoid: dual sqlite drivers in one process, native binding fragility, Bun version coupling. If scale ever exceeds 100k facts we can revisit with HNSW (`hnswlib-node`) without changing the public Recall API.
 
 **Scope boundary:** Phase B ships the perception + memory + STANDING_ORDERS pipeline. Phase C builds the trigger engine + autonomy tiers (acting on perceived signal). Phase D wires OAuth connectors so KAIROS can read incoming messages. Phase E adds voice. Until Phase D/E, KAIROS can only observe local activity (Phase A's 5 observers + the new ActivityWatch) and store memory — it cannot yet act or talk back.
 
@@ -133,14 +135,14 @@ describe('memory schema', () => {
     db = new Database(':memory:')
   })
 
-  it('creates all 4 tier tables and vec virtual table', () => {
+  it('creates all 4 tier tables and embedding table', () => {
     initMemorySchema(db)
     const tables = db.query("SELECT name FROM sqlite_master WHERE type IN ('table','virtual')").all() as { name: string }[]
     const names = tables.map(t => t.name)
     expect(names).toContain('mem_l2_episodes')
     expect(names).toContain('mem_l3_semantic')
     expect(names).toContain('mem_l4_procedural_index')
-    expect(names).toContain('mem_l3_vec')   // sqlite-vec virtual table
+    expect(names).toContain('mem_l3_embeddings')   // BLOB-based, not sqlite-vec
   })
 
   it('creates FTS5 index for lexical search on L3', () => {
@@ -176,11 +178,15 @@ Expected: FAIL — module not found.
 // L3 (semantic) — distilled facts/notes/persona, embedded for fuzzy recall
 // L4 (procedural) — pointer index into skills/active/ (skills live as files)
 //
-// sqlite-vec provides cosine similarity over 768-dim nomic-embed-text vectors.
-// FTS5 provides BM25 lexical search. Hybrid retrieval combines both.
+// Vector search: embeddings stored as BLOB in mem_l3_embeddings (one-to-one
+// with mem_l3_semantic.id). Cosine similarity is done in pure TypeScript over
+// an in-memory Float32Array matrix loaded at recall time. See recall.ts.
+// Reason: bun:sqlite cannot load dynamic extensions like sqlite-vec.
+// At KAIROS scale (~10k facts max), pure-TS cosine is sub-10ms — fine.
+//
+// FTS5 provides BM25 lexical search (built into SQLite, no extension needed).
 
 import type { Database } from 'bun:sqlite'
-import * as sqliteVec from 'sqlite-vec'
 
 const SCHEMA = `
   -- L2: Episodic memory. Each row is one "episode" (a meaningful event sequence).
@@ -263,18 +269,15 @@ const SCHEMA = `
 `
 
 export function initMemorySchema(db: Database): void {
-  // sqlite-vec must be loaded BEFORE creating the virtual table
-  sqliteVec.load(db)
-
   db.exec(SCHEMA)
 
-  // Vector table for L3 embeddings (nomic-embed-text is 768-dim).
-  // sqlite-vec syntax: virtual table with float[N] dimension declaration.
+  // Embeddings stored as BLOB (Float32Array bytes). Loaded into memory at
+  // recall time for cosine similarity. One row per mem_l3_semantic row.
   db.exec(`
-    CREATE VIRTUAL TABLE IF NOT EXISTS mem_l3_vec USING vec0(
-      l3_id INTEGER PRIMARY KEY,
-      embedding FLOAT[768]
-    )
+    CREATE TABLE IF NOT EXISTS mem_l3_embeddings (
+      l3_id     INTEGER PRIMARY KEY REFERENCES mem_l3_semantic(id) ON DELETE CASCADE,
+      embedding BLOB NOT NULL
+    );
   `)
 }
 ```
@@ -904,10 +907,8 @@ export class SemanticMemory {
       ],
     )
     const id = Number(info.lastInsertRowid)
-    this.db.run(
-      'INSERT INTO mem_l3_vec(l3_id, embedding) VALUES (?, ?)',
-      [id, new Float32Array(input.embedding).buffer as any],
-    )
+    const buf = new Uint8Array(new Float32Array(input.embedding).buffer)
+    this.db.run('INSERT INTO mem_l3_embeddings(l3_id, embedding) VALUES (?, ?)', [id, buf as any])
     return id
   }
 
@@ -978,14 +979,30 @@ export class Recall {
   }
 
   semantic(embedding: number[], limit: number = 10): SemanticRow[] {
-    const buf = new Float32Array(embedding).buffer
+    // Pure-TS cosine similarity. Loads all active embeddings + their rows
+    // in one query, computes cosine in memory, returns top-K.
+    // At KAIROS scale (~10k facts × 768 dim × 4 bytes = ~30MB), this is sub-10ms.
     const rows = this.db.query(
-      `SELECT s.* FROM mem_l3_vec v
-       JOIN mem_l3_semantic s ON s.id = v.l3_id
-       WHERE v.embedding MATCH ? AND s.decayed_at IS NULL
-       ORDER BY distance LIMIT ?`,
-    ).all(buf as any, limit) as Array<Omit<SemanticRow, 'source_episodes'> & { source_episodes: string | null }>
-    return rows.map(r => ({ ...r, source_episodes: r.source_episodes ? JSON.parse(r.source_episodes) : null }))
+      `SELECT s.*, e.embedding AS emb_blob
+       FROM mem_l3_semantic s JOIN mem_l3_embeddings e ON e.l3_id = s.id
+       WHERE s.decayed_at IS NULL`,
+    ).all() as Array<Omit<SemanticRow, 'source_episodes'> & { source_episodes: string | null; emb_blob: Uint8Array }>
+
+    const query = new Float32Array(embedding)
+    const queryNorm = norm(query)
+    if (queryNorm === 0) return []
+
+    const scored: Array<{ row: Omit<SemanticRow, 'source_episodes'> & { source_episodes: string | null }; score: number }> = []
+    for (const r of rows) {
+      const vec = new Float32Array(r.emb_blob.buffer, r.emb_blob.byteOffset, r.emb_blob.byteLength / 4)
+      const score = cosine(query, vec, queryNorm)
+      scored.push({ row: { ...r, source_episodes: r.source_episodes }, score })
+    }
+    scored.sort((a, b) => b.score - a.score)
+    return scored.slice(0, limit).map(s => {
+      const { emb_blob: _, ...rest } = s.row as any
+      return { ...rest, source_episodes: s.row.source_episodes ? JSON.parse(s.row.source_episodes as any) : null }
+    })
   }
 
   hybrid(query: string, embedding: number[], limit: number = 10): SemanticRow[] {
@@ -993,7 +1010,6 @@ export class Recall {
     const sem = this.semantic(embedding, limit)
     const seen = new Set<number>()
     const merged: SemanticRow[] = []
-    // Interleave: take one from each list until exhausted, dedupe by id
     for (let i = 0; i < limit; i++) {
       const l = lex[i], s = sem[i]
       if (l && !seen.has(l.id)) { merged.push(l); seen.add(l.id) }
@@ -1002,6 +1018,20 @@ export class Recall {
     }
     return merged.slice(0, limit)
   }
+}
+
+function norm(v: Float32Array): number {
+  let s = 0
+  for (let i = 0; i < v.length; i++) s += v[i]! * v[i]!
+  return Math.sqrt(s)
+}
+
+function cosine(a: Float32Array, b: Float32Array, aNorm: number): number {
+  let dot = 0, bSum = 0
+  const n = Math.min(a.length, b.length)
+  for (let i = 0; i < n; i++) { dot += a[i]! * b[i]!; bSum += b[i]! * b[i]! }
+  const bNorm = Math.sqrt(bSum)
+  return bNorm === 0 ? 0 : dot / (aNorm * bNorm)
 }
 ```
 
