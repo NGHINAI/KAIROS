@@ -11,12 +11,18 @@ export class Recall {
   constructor(private db: Database) {}
 
   lexical(query: string, limit: number = 10): SemanticRow[] {
+    // Sanitize for FTS5: strip non-alphanumeric (FTS5 MATCH chokes on
+    // '?', quotes, etc), tokenize, OR-join. Caller can pass natural-
+    // language questions — we extract searchable tokens defensively.
+    const tokens = query.replace(/[^\w\s]/g, ' ').split(/\s+/).filter(t => t.length > 1)
+    if (tokens.length === 0) return []
+    const ftsQuery = tokens.map(t => `"${t}"`).join(' OR ')
     const rows = this.db.query(
       `SELECT s.* FROM mem_l3_fts f
        JOIN mem_l3_semantic s ON s.id = f.rowid
        WHERE mem_l3_fts MATCH ? AND s.decayed_at IS NULL
        ORDER BY rank LIMIT ?`,
-    ).all(query, limit) as Array<Omit<SemanticRow, 'source_episodes'> & { source_episodes: string | null }>
+    ).all(ftsQuery, limit) as Array<Omit<SemanticRow, 'source_episodes'> & { source_episodes: string | null }>
     return rows.map(r => ({ ...r, source_episodes: r.source_episodes ? JSON.parse(r.source_episodes) : null }))
   }
 

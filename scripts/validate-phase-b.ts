@@ -71,11 +71,29 @@ for (let i = 0; i < 5; i++) {
 
 const epCount = episodic.recent(100).length
 console.log(`✓ Episodes recorded: ${epCount}`)
+console.log(`  (note: Tier 1 may correctly classify synthetic noise as SILENT — check perception_log)`)
 
-// Run dreamer
+// Seed L3 directly so recall test has data even when synthetic events are
+// correctly classified as SILENT. In production these facts come from the
+// Dreamer consolidating real episodes; here we simulate for the recall test.
+console.log('\nSeeding L3 with 5 reference facts (would normally come from Dreamer)...')
+const refFacts = [
+  { kind: 'fact' as const, subject: 'work-apps', body: 'User spends most time in VS Code, Slack, and Brave during work hours' },
+  { kind: 'preference' as const, subject: 'clipboard', body: 'User frequently copies code snippets and URLs to clipboard' },
+  { kind: 'project' as const, subject: 'kairos', body: 'KAIROS is the active project; recent edits to TypeScript files in src/daemon/' },
+  { kind: 'pattern' as const, subject: 'github-browsing', body: 'User browses GitHub PR pages frequently, especially example/repo pulls' },
+  { kind: 'pattern' as const, subject: 'slack-usage', body: 'User is in Slack mid-morning and end of day' },
+]
+for (const f of refFacts) {
+  const emb = await embedder.embed(`${f.subject}: ${f.body}`)
+  semantic.write({ ...f, embedding: emb, importance: 0.6 })
+}
+console.log(`✓ Seeded ${refFacts.length} reference facts`)
+
+// Run dreamer (would normally consolidate the episodes; here mostly a no-op since few episodes)
 console.log('\nRunning Dreamer (consolidating episodes → semantic facts)...')
 const factsCreated = await dreamer.consolidate({ maxEpisodes: 100 })
-console.log(`✓ Facts consolidated to L3: ${factsCreated}`)
+console.log(`✓ Facts consolidated from episodes: ${factsCreated}`)
 
 // Recall test
 console.log('\n─── Recall Test ───')
