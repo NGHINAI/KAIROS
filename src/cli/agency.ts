@@ -16,7 +16,10 @@ export type CliOptions = {
   daemonUrl?: string
 }
 
-const DEFAULT_DAEMON_URL = 'http://localhost:9876'
+// Default port matches src/daemon/config.ts DEFAULTS.agency.daemonHttpPort (9877).
+// Port 9876 is reserved for the main MCP HTTP server.
+// Overridable via KAIROS_AGENCY_URL env var or `opts.daemonUrl`.
+const DEFAULT_DAEMON_URL = process.env.KAIROS_AGENCY_URL ?? 'http://localhost:9877'
 
 export async function runAgencyCommand(argv: string[], opts: CliOptions = {}): Promise<CliResult> {
   const url = opts.daemonUrl ?? DEFAULT_DAEMON_URL
