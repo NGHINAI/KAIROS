@@ -61,6 +61,11 @@ export type Config = {
     enabled: boolean
     filePath: string
   }
+  agency: {
+    enabled: boolean
+    inboxPath: string
+    daemonHttpPort: number
+  }
 }
 
 // ─── Database row types ─────────────────────────────────────────────

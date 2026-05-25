@@ -59,6 +59,11 @@ const DEFAULTS: Config = {
   memory: { enabled: true, dreamIntervalMs: 30 * 60_000 },
   perception: { enabled: true, pipelinePollMs: 30_000 },
   orders: { enabled: true, filePath: join(process.env.HOME ?? '', '.kairos', 'STANDING_ORDERS.md') },
+  agency: {
+    enabled: true,
+    inboxPath: join(process.env.HOME ?? '', '.kairos', 'inbox.md'),
+    daemonHttpPort: 9877,
+  },
 }
 
 const SANDBOX_OVERRIDES: Partial<Config> = {

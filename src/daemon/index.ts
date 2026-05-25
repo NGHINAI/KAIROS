@@ -60,6 +60,13 @@ import { OrdersCompiler } from './orders/compiler'
 import { OrdersRuntime } from './orders/runtime'
 import { ensureSeedFile } from './orders/seedFile'
 import { ActivityWatchObserver } from './proactive/observers/activityWatch'
+import { IntentRegistry, registerBuiltIns } from './agency/intentRegistry'
+import { TrajectoryLog, TRAJECTORY_SCHEMA } from './agency/trajectoryLog'
+import { InboxSurface } from './agency/inboxSurface'
+import { NativeNotifier } from './agency/nativeNotifier'
+import { ActionExecutor } from './agency/actionExecutor'
+import { TriggerEngine } from './agency/triggerEngine'
+import { PerceptionToTrigger } from './agency/perceptionToTrigger'
 
 const VERSION = '0.2.0'
 
@@ -387,7 +394,75 @@ async function main(): Promise<void> {
         log('Perception pipeline active: Tier1 → Tier2 → Narrator')
       }
 
+      // ─── Agency subsystem (Phase C.1) ─────────────────────
+      let agencyStop: (() => void) | null = null
+      if (config.agency.enabled) {
+        db.exec(TRAJECTORY_SCHEMA)
+        // Pre-create tables referenced by remindIn and suspend intent handlers
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS agency_scheduled_reminders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT, body TEXT, fire_at INTEGER, fired INTEGER NOT NULL DEFAULT 0
+          );
+          CREATE TABLE IF NOT EXISTS agency_suspend_state (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope TEXT, until_ms INTEGER, reason TEXT
+          );
+        `)
+
+        const intentRegistry = new IntentRegistry()
+        registerBuiltIns(intentRegistry)
+        const trajectory = new TrajectoryLog(db)
+        const notifier = new NativeNotifier()
+        const inbox = new InboxSurface(db, config.agency.inboxPath)
+
+        const actionCtx = {
+          db,
+          notifier,
+          embedder: { embed: (text: string) => embedder.embed(text) },
+          semantic,
+        }
+        const executor = new ActionExecutor(db, intentRegistry, trajectory, inbox, actionCtx)
+        const triggerEngine = new TriggerEngine(db, bus, (req) => executor.dispatch(req))
+        const bridge = new PerceptionToTrigger(bus, episodic)
+
+        // Seed bridge high-water from latest existing episode so we don't re-fire on restart
+        const latestEp = episodic.recent(1)[0]
+        if (latestEp) bridge.setHighWaterMark(latestEp.id)
+
+        triggerEngine.start()
+        const bridgeTimer = setInterval(() => { void bridge.republishLatest() }, config.perception.pipelinePollMs)
+
+        // HTTP endpoints for CLI approve/dismiss
+        const agencyHttpServer = Bun.serve({
+          port: config.agency.daemonHttpPort,
+          fetch: async (req) => {
+            const url = new URL(req.url)
+            if (url.pathname === '/agency/approve' && req.method === 'POST') {
+              const { item_id } = await req.json() as { item_id: string }
+              const result = await executor.approveItem(item_id)
+              return Response.json(result)
+            }
+            if (url.pathname === '/agency/dismiss' && req.method === 'POST') {
+              const { item_id, reason } = await req.json() as { item_id: string; reason: string }
+              const result = await executor.dismissItem(item_id, reason)
+              return Response.json(result)
+            }
+            return new Response('not found', { status: 404 })
+          },
+        })
+
+        log(`Agency subsystem active. Inbox: ${config.agency.inboxPath} | CLI port: ${config.agency.daemonHttpPort}`)
+
+        agencyStop = () => {
+          triggerEngine.stop()
+          clearInterval(bridgeTimer)
+          agencyHttpServer.stop()
+        }
+      }
+
       memoryStop = async () => {
+        if (agencyStop) agencyStop()
         clearInterval(dreamTimer)
         if (pipeline) pipeline.stop()
         if (ordersRuntime) ordersRuntime.stop()
