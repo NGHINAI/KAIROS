@@ -39,6 +39,13 @@ export class AnthropicApiProvider implements LLMProvider {
     return this.client
   }
 
+  warmupTLS(): void {
+    if (!this.isConfigured()) return
+    // Fire-and-forget HEAD to pre-establish TLS to api.anthropic.com.
+    // Errors silently swallowed — purely an optimization.
+    fetch('https://api.anthropic.com', { method: 'HEAD' }).catch(() => { /* ignore */ })
+  }
+
   async complete(model: string, req: CompletionRequest): Promise<CompletionResult> {
     const start = Date.now()
     const resp = await this.getClient().messages.create({

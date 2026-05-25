@@ -42,6 +42,11 @@ export class GeminiProvider implements LLMProvider {
     return this.client
   }
 
+  warmupTLS(): void {
+    if (!this.isConfigured()) return
+    fetch('https://generativelanguage.googleapis.com', { method: 'HEAD' }).catch(() => { /* ignore */ })
+  }
+
   async complete(model: string, req: CompletionRequest): Promise<CompletionResult> {
     const start = Date.now()
     const contents = req.system

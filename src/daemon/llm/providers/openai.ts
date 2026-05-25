@@ -75,6 +75,12 @@ export class OpenAIProvider implements LLMProvider {
     return this.client
   }
 
+  warmupTLS(): void {
+    if (!this.isConfigured()) return
+    const url = this.cfg.base_url ?? 'https://api.openai.com'
+    fetch(url, { method: 'HEAD' }).catch(() => { /* ignore */ })
+  }
+
   async complete(model: string, req: CompletionRequest): Promise<CompletionResult> {
     const start = Date.now()
     const messages: { role: 'system' | 'user'; content: string }[] = []

@@ -30,5 +30,13 @@ export function buildRouter(db: Database, configPath: string): ModelRouter {
     ollama:        new OpenAIProvider('ollama', cfg.providers.ollama),
   }
 
+  // Fire all warmups in background — Clicky-derived pattern (8.4.8 #3).
+  // Skip CLI providers (subprocess-based, no socket pool benefit).
+  for (const p of Object.values(providers)) {
+    if (p && 'warmupTLS' in p && typeof (p as any).warmupTLS === 'function') {
+      (p as any).warmupTLS()
+    }
+  }
+
   return new ModelRouter({ providers, tracker })
 }
