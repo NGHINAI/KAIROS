@@ -49,4 +49,9 @@ export function registerBuiltIns(reg: IntentRegistry): void {
   reg.register(logIntent, logHandler as IntentHandler)
   reg.register(remindInIntent, remindInHandler as IntentHandler)
   reg.register(suspendIntent, suspendHandler as IntentHandler)
+  // setup_for (GREEN) — registered separately because it requires heavyweight deps
+  // (SetupSkillGenerator needs ModelRouter; SetupFlowRuntime needs McpHost, etc.).
+  // Call registerSetupIntent(reg, { generator, runtime }) from daemon boot code
+  // after those objects are constructed.
+  // See: src/daemon/onboarding/setupIntent.ts → registerSetupIntent()
 }
