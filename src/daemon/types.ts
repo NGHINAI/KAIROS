@@ -66,6 +66,11 @@ export type Config = {
     inboxPath: string
     daemonHttpPort: number
   }
+  mcp: {
+    enabled: boolean
+    configPath: string
+    skillsRoot: string
+  }
 }
 
 // ─── Database row types ─────────────────────────────────────────────

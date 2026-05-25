@@ -396,6 +396,7 @@ async function main(): Promise<void> {
 
       // ─── Agency subsystem (Phase C.1) ─────────────────────
       let agencyStop: (() => void) | null = null
+      let mcpStop: (() => Promise<void>) | null = null
       if (config.agency.enabled) {
         db.exec(TRAJECTORY_SCHEMA)
         // Pre-create tables referenced by remindIn and suspend intent handlers
@@ -412,6 +413,28 @@ async function main(): Promise<void> {
 
         const intentRegistry = new IntentRegistry()
         registerBuiltIns(intentRegistry)
+
+        // ─── MCP host (Phase C.2) ─────────────────────────
+        if (config.mcp.enabled) {
+          const { McpHost } = await import('./mcp/mcpHost')
+          const { Keychain } = await import('./mcp/keychain')
+          const { registerMcpToolsAsIntents } = await import('./mcp/toolToIntent')
+          const { SkillLoader } = await import('./mcp/skillLoader')
+
+          const keychain = new Keychain()
+          const mcpHost = new McpHost({ configPath: config.mcp.configPath, keychain })
+          await mcpHost.startAll()
+          registerMcpToolsAsIntents(intentRegistry, mcpHost)
+
+          const skillLoader = new SkillLoader(config.mcp.skillsRoot)
+          const skillCount = skillLoader.listSummaries().length
+          if (skillCount > 0) log(`SkillLoader: ${skillCount} agentskills.io skill(s) available at ${config.mcp.skillsRoot}`)
+
+          log(`MCP host active: ${mcpHost.listServers().length} server(s), ${mcpHost.listAllTools().length} tool(s) registered as intents`)
+
+          mcpStop = async () => { await mcpHost.stopAll() }
+        }
+
         const trajectory = new TrajectoryLog(db)
         const notifier = new NativeNotifier()
         const inbox = new InboxSurface(db, config.agency.inboxPath)
@@ -462,6 +485,7 @@ async function main(): Promise<void> {
       }
 
       memoryStop = async () => {
+        if (mcpStop) await mcpStop()
         if (agencyStop) agencyStop()
         clearInterval(dreamTimer)
         if (pipeline) pipeline.stop()

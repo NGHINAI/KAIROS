@@ -64,6 +64,11 @@ const DEFAULTS: Config = {
     inboxPath: join(process.env.HOME ?? '', '.kairos', 'inbox.md'),
     daemonHttpPort: 9877,
   },
+  mcp: {
+    enabled: true,
+    configPath: join(process.env.HOME ?? '', '.kairos', 'mcp-servers.json'),
+    skillsRoot: join(process.env.HOME ?? '', '.kairos', 'skills'),
+  },
 }
 
 const SANDBOX_OVERRIDES: Partial<Config> = {
