@@ -1,3 +1,59 @@
+## v0.3.3-phase-c2-5 (2026-05-25) — Seamless Onboarding (backend complete)
+
+Phase C.2.5 delivers a complete, tested, end-to-end onboarding subsystem that lets KAIROS set up MCP integrations for the user with a single voice command: "set me up with X". All 12 backend tasks done. Validation gate PASSED.
+
+### What was built (12 tasks)
+
+| Task | Module | What |
+|------|--------|------|
+| 0 | `types.ts` | Core type definitions: SetupSkill, SetupStep (11 step types), FlowState, UserChannel, SetupFlowResult |
+| 1 | `browserOpener.ts` | Safe macOS `open` wrapper — allowlist: https only, probed |
+| 2 | `clipboardPatternWatcher.ts` | Regex watcher on EventBus clipboard events with timeout + cancel |
+| 3 | `oauthCallbackHandler.ts` | Bun.serve ephemeral server for OAuth redirect capture |
+| 4 | `mcpAutoInstaller.ts` | npm/Smithery install with package-name allowlist (no shell injection) |
+| 5 | `mcpConfigMutator.ts` | Atomic JSON read/write/add/remove/snapshot/restore on mcp-servers.json |
+| 6 | `flowStateStore.ts` | SQLite persistence for in-flight and completed flows |
+| 7 | `inboxUserChannel.ts` | File-based UserChannel (appends to onboarding-chat.md, polls for USER: yes/no) |
+| 8 | `setupSkillGenerator.ts` | LLM-driven SetupSkill generator with step-type allowlist validation |
+| 9 | `setupFlowRuntime.ts` | Orchestrator: runs all 11 step types, rollback on failure, persists progress |
+| 10 | `setupIntent.ts` | IntentRegistry bridge: `setup_for` GREEN intent wires generator + runtime |
+| 11 | daemon `index.ts` | Wired into daemon boot inside `if (config.mcp.enabled)` block |
+| 12 | `validate-phase-c2-5.ts` | End-to-end validation gate (this entry) |
+
+### Design highlights
+
+- **Declarative SetupSkill** — LLM outputs a JSON step sequence; runtime executes it. No LLM in the hot path.
+- **Rollback on failure** — McpConfigMutator snapshots config before any mutation; SetupFlowRuntime restores + reloads McpHost on failure.
+- **Idempotent cleanup** — cleanup always runs in `finally` blocks; test leaves no residue.
+- **Two-mode validation** — Mode 1 (scripted, deterministic) is the gate; Mode 2 (LLM-generated, best-effort) measures real-world LLM accuracy.
+
+### Tests
+
+- **48 new unit tests** across 8 onboarding test files (types + all 7 new modules)
+- **312/312 total tests passing** (70 files, 572 expect() calls)
+- All 264 pre-C.2.5 tests still green (no regressions)
+
+### Validation — PASSED (Mode 1, all 7 assertions)
+
+`scripts/validate-phase-c2-5.ts` drives the real SetupFlowRuntime against `@modelcontextprotocol/server-filesystem`:
+
+| Assertion | Result |
+|-----------|--------|
+| result.status === 'success' | PASS ✓ |
+| steps_completed === 6 (all steps) | PASS ✓ |
+| mcp-servers.json has 'fs-validation' entry after configure step | PASS ✓ |
+| listAllTools() has ≥1 fs-validation:: tool | PASS ✓ (14 tools) |
+| smoke_test_tool list_directory returned ok: true | PASS ✓ |
+| after cleanup: 'fs-validation' absent from mcp-servers.json | PASS ✓ |
+| total duration < 120s | PASS ✓ (1.8s) |
+
+**Mode 2 (LLM-generated)**: DIVERGED — LLM chose `smithery` install instead of npm; smithery not installed in this environment. Expected divergence, not a gate failure.
+
+### Note on macOS path resolution
+`/tmp` is a symlink to `/private/tmp` on macOS. The filesystem MCP server resolves the canonical path and uses `/private/tmp` as its allowed-directory root. The validation script uses `/private/tmp` explicitly to avoid "path outside allowed directories" rejections. Phase F's UI should apply `fs.realpathSync` before populating the path argument.
+
+---
+
 ## v0.3.2-phase-c1-5 (2026-05-25) — The Earned Interrupt Architecture
 
 Direct response to the 2026-05-25 incident where the daemon produced 4,454 macOS notifications in 2 hours. KAIROS now has a structural restraint layer that **earns** the right to interrupt the user. Inserted between C.2 and C.3.
