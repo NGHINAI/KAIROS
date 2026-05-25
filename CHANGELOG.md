@@ -1,3 +1,73 @@
+## v0.3.0-phase-c1 (2026-05-25) — Agency Layer, Sub-Phase 1
+
+First of 4 sub-phases comprising the Phase C agency layer (the "bet big" expansion). C.1 closes the perception→action loop: KAIROS can now actually **do things** in response to STANDING_ORDERS-compiled triggers, not just observe + remember.
+
+After C.1, KAIROS can:
+- Surface notifications (macOS native + tail-able `~/.kairos/inbox.md`)
+- Write facts to L3 semantic memory in response to triggers
+- Schedule local reminders
+- Suspend itself per quiet-hours rules
+- Queue 🟠/🔴 tier actions for human approval via inbox + `kairos approve|dismiss <id>` CLI
+- Log every action attempt as a UFO2-format structured trajectory (foundation for AWM crystallization in C.3)
+
+### Added
+
+#### Agency core
+- **Intent registry** with 5 built-in 🟢 GREEN intents: `notify`, `add_to_memory`, `log`, `remind_in`, `suspend`. Each intent self-describes (id + description + tier + arg schema + optional idempotency key); the tier comes from the manifest, not from runtime LLM prompts — structural enforcement per anti-pattern research.
+- **Autonomy tier system** (🟢/🟡/🟠/🔴) with pure-function helpers (`tierEmoji`, `tierRank`, `requiresApproval`, `isAtLeast`)
+- **ActionExecutor** — receives `ActionRequest`s, gates on tier (GREEN/YELLOW execute immediately, ORANGE/RED queue to inbox), enforces 5-min idempotency window for intents with declared keys, retries via `approveItem` flow
+- **UFO2-format trajectory log** (per arXiv:2504.14603) — every action attempt writes a structured step (observation/reasoning/action/result). Two-table SQLite split: `action_trajectories` (header + outcome) + `action_trajectory_steps` (appended incrementally). Foundation for the AWM crystallizer in C.3.
+
+#### Trigger engine
+- **TriggerEngine** subscribes to EventBus + reads `compiled_orders_triggers` from Phase B's orders compiler. C.1 evaluator supports a subset of `when_match` predicates: `"*"`, `text.contains('X')`, `text.isURL()`, `app.equals('X')`, `path.endsWith('X')`. C.4 will expand to the full DSL.
+- **Suspend gating** — respects `agency_suspend_state` rows (scope='all' / 'triggers' / specific source). The `suspend` intent inserts these; quiet-hours STANDING_ORDERS produce them.
+- **PerceptionToTrigger bridge** — polls newly-written L2 episodes, republishes as `episode-written` events on the bus so the TriggerEngine can react to perception output without coupling subsystems
+
+#### Surfaces
+- **`~/.kairos/inbox.md`** — tail-able markdown file showing pending approvals, sorted by tier severity. Regenerated from DB after every change. Each item shows tier emoji, description, args preview, copy-paste `kairos approve <id>` and `kairos dismiss <id>` commands.
+- **macOS native notifier** via `osascript display notification`. Best-effort, never throws (inbox always has the record as fallback). AppleScript single-quote escaping handles edge cases.
+- **CLI `kairos approve` / `kairos dismiss [reason]`** — POSTs to the daemon's `/agency/approve` and `/agency/dismiss` HTTP endpoints. Default port 9877 (9876 is reserved for the main MCP server); overridable via `KAIROS_AGENCY_URL` env.
+- **Daemon HTTP endpoints** at `:9877/agency/approve` and `:9877/agency/dismiss` (Bun.serve), in addition to the existing MCP server.
+
+### Wired into daemon
+- New `agency` config block (enabled/inboxPath/daemonHttpPort)
+- Agency subsystem starts inside the existing `proactive.enabled` block (alongside memory + perception + orders) so it sees `db`, `bus`, `episodic`, `semantic`, `embedder`, `router` already in scope
+- Lifecycle: TriggerEngine subscribed at start; bridge polls at `perception.pipelinePollMs` cadence; shutdown halts trigger engine + bridge timer + HTTP server in the existing `memoryStop` cleanup chain
+
+### Tests
+- **45 new unit tests** across 8 test files (types, autonomyTier, intentRegistry, trajectoryLog, nativeNotifier, inboxSurface, actionExecutor, triggerEngine, perceptionToTrigger, CLI)
+- **160/160 total tests passing** (Phase A 59 + Phase B 60 + C.1 45 — 4 retired, 0 regressions)
+
+### Stats
+- ~2,000 LOC TypeScript + tests added
+- 12 atomic commits (every C.1 task)
+
+### Architecture notes
+- Phase C.1 builds fresh — no reuse of prior-session decisionEngine/taskRunner/discordBot (per 2026-05-25 user decision)
+- C.2 next: MCP host runtime + Smithery dynamic discovery + agentskills.io skill format adoption
+- C.3 follows: Magentic-One dual-ledger orchestrator + smolagents CodeAgent + AWM workflow crystallizer
+- C.4 closes Phase C: STANDING_ORDERS v2 (conditional + cooldown + chaining) + persona-conditioned routing + offline fallback + dry-run + Phase C overall validation gate
+
+### Validation (per Section 8.5)
+
+**Validation script**: `bun run scripts/validate-phase-c1.ts` ($0 cost — pure integration test, no LLM calls)
+
+**Validation PASSED 2026-05-25** — all 5 scenarios:
+
+| # | Tier | Scenario | Observed |
+|---|---|---|---|
+| 1 | 🟢 | clipboard URL → `add_to_memory` (silent) | 1 trajectory, 0 inbox, 1 L3 fact written |
+| 2 | 🟢 | focus-app=Slack → `notify` | Notification captured via probe, 0 inbox |
+| 3 | 🟢 | .ts file → `log` (record-only) | 1 trajectory, 0 inbox |
+| 4 | 🟠 | risky-action → inbox approval | Queued correctly; inbox.md showed readable approve/dismiss commands; `approveItem` resolved to status=completed |
+| 5 | 🟢 | quiet-hours suspend gate | Trajectory count unchanged after suspended event (correctly suppressed) |
+
+Total: 4 trajectories, all `success`, 0 failures, 0 stuck in-progress. Inbox file rendered cleanly with iOS-style emoji tier markers + tail-able approve/dismiss commands.
+
+**Phase C.1 is now both code-complete AND validated-complete.** v0.3.0-phase-c1 stands.
+
+---
+
 ## v0.2.0-phase-b (2026-05-24)
 
 ### Added
