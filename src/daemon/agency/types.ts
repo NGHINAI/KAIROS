@@ -43,6 +43,9 @@ export type ActionStatus =
   | 'failed'                          // error
   | 'cancelled'                       // user dismissed
   | 'dry_run'                         // executed in dry-run mode
+  | 'suppressed'                      // restraint pipeline blocked delivery entirely
+  | 'log_only'                        // scored below surface threshold; trajectory recorded only
+  | 'digest'                          // queued into digest bundle; not delivered immediately
 
 /** UFO2-style structured trajectory step. One per atomic action attempt. */
 export type TrajectoryStep = {

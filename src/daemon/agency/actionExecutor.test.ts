@@ -125,4 +125,31 @@ describe('ActionExecutor', () => {
     expect(cancelled?.override_reason).toBe('user said no')
     rmSync(tmp, { recursive: true })
   })
+
+  it('REGRESSION C.1.5: restraint pipeline can suppress dispatch entirely', async () => {
+    const fakePipeline = {
+      evaluate: async () => ({ mode: 'suppressed' as const, score: null, reason: 'test suppression' }),
+      recordDelivered: () => {},
+    }
+    const exec = new ActionExecutor(db, registry, traj, inbox, ctx, fakePipeline as any)
+    const result = await exec.dispatch(req('test-green', { msg: 'hi' }))
+    expect(result.status).toBe('suppressed')
+    expect(notifyCalls.length).toBe(0)   // handler NOT called
+    rmSync(tmp, { recursive: true })
+  })
+
+  it('REGRESSION C.1.5: restraint dry_run skips handler but records trajectory', async () => {
+    const fakePipeline = {
+      evaluate: async () => ({ mode: 'dry_run' as const, score: null, reason: 'in observation window' }),
+      recordDelivered: () => {},
+    }
+    const exec = new ActionExecutor(db, registry, traj, inbox, ctx, fakePipeline as any)
+    const result = await exec.dispatch(req('test-green', { msg: 'hi' }))
+    expect(result.status).toBe('dry_run')
+    expect(notifyCalls.length).toBe(0)
+    // Trajectory should still be recorded
+    const trajRows = traj.recent(5)
+    expect(trajRows.length).toBeGreaterThanOrEqual(1)
+    rmSync(tmp, { recursive: true })
+  })
 })

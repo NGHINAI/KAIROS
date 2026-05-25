@@ -5,6 +5,11 @@
 //
 // Idempotency: 5-min dedup window for intents that declare a key.
 // Tier enforcement: STRUCTURAL (from intent manifest) — not LLM prompt.
+//
+// Phase C.1.5 (Earned Interrupt): optional RestraintPipeline consulted before
+// dispatch. When present, the pipeline can suppress, dry-run, digest, or log-only
+// the action before it ever reaches the tier gate. Interrupt/surface modes
+// fall through to the normal execution path.
 
 import type { Database } from 'bun:sqlite'
 import { log, logError } from '../logger'
@@ -14,6 +19,7 @@ import type { TrajectoryLog } from './trajectoryLog'
 import type { InboxSurface } from './inboxSurface'
 import type { NativeNotifier } from './nativeNotifier'
 import type { ActionRequest, ActionStatus, TrajectoryStep } from './types'
+import type { RestraintPipeline, EvaluateInputs } from '../restraint/restraintPipeline'
 
 export const EXECUTOR_SCHEMA = `
   CREATE TABLE IF NOT EXISTS agency_pending_actions (
@@ -56,6 +62,8 @@ export class ActionExecutor {
     private trajectory: TrajectoryLog,
     private inbox: InboxSurface,
     private ctx: ActionContext,
+    // Optional — omit to skip restraint (existing callers and tests unaffected)
+    private restraintPipeline?: RestraintPipeline | null,
   ) {
     db.exec(EXECUTOR_SCHEMA)
   }
@@ -67,6 +75,55 @@ export class ActionExecutor {
       this.trajectory.finalize(trajectoryId, 'failure', `unknown intent ${request.intent_id}`)
       return { status: 'failed', details: `unknown intent ${request.intent_id}`, trajectory_id: trajectoryId }
     }
+
+    // ─── Phase C.1.5: Restraint gate ─────────────────────────────────────────
+    // Consult the RestraintPipeline BEFORE idempotency / tier checks.
+    // Default EvaluateInputs are conservative; C.3 will wire intent metadata
+    // and LLM persona checks to refine these per-request.
+    if (this.restraintPipeline) {
+      const inputs: EvaluateInputs = {
+        urgency: 0.5,              // default; trigger metadata overrides in C.3
+        rule_match_strength: 1.0,  // trigger evaluator already confirmed match
+        personal_relevance: 0.5,   // static for C.1.5; LLM persona check in C.3
+        novelty: 1.0,              // default; karma data will lower in future
+        urgent: false,             // explicit flag from caller, default false
+      }
+      const decision = await this.restraintPipeline.evaluate(request, inputs)
+
+      // Modes that bypass execution entirely
+      if (
+        decision.mode === 'suppressed' ||
+        decision.mode === 'log_only' ||
+        decision.mode === 'dry_run' ||
+        decision.mode === 'digest'
+      ) {
+        const trajectoryId = this.trajectory.start(
+          `[${decision.mode}] ${entry.intent.id}: ${request.reasoning.slice(0, 80)}`,
+        )
+        // Record trajectory but do NOT run handler
+        const outcomeMap = {
+          suppressed: 'failure',
+          log_only: 'success',
+          dry_run: 'success',
+          digest: 'partial',
+        } as const
+        this.trajectory.finalize(
+          trajectoryId,
+          outcomeMap[decision.mode as keyof typeof outcomeMap],
+          `restraint: ${decision.reason}`,
+        )
+        log(`ActionExecutor: restraint(${decision.mode}) ${entry.intent.id} — ${decision.reason}`)
+        return {
+          status: decision.mode as ActionStatus,
+          details: decision.reason,
+          trajectory_id: trajectoryId,
+        }
+      }
+
+      // 'interrupt' or 'surface' — fall through to normal execution, then record delivery
+      // (recordDelivered called after executeAndLog below)
+    }
+    // ─────────────────────────────────────────────────────────────────────────
 
     // Idempotency check
     if (entry.intent.idempotencyKey) {
@@ -102,7 +159,17 @@ export class ActionExecutor {
       return { status: 'awaiting_approval', inbox_item_id: inboxItemId, trajectory_id: trajectoryId }
     }
 
-    return await this.executeAndLog(request, trajectoryId)
+    const result = await this.executeAndLog(request, trajectoryId)
+
+    // Notify the restraint pipeline that an interrupt/surface was actually delivered
+    if (this.restraintPipeline && result.status === 'completed') {
+      const triggerId = request.source_trigger_id ?? request.intent_id
+      // We only reach here when restraint returned 'interrupt' or 'surface'
+      // (or when no restraint was applied). The pipeline handles the mode internally.
+      this.restraintPipeline.recordDelivered(triggerId, 'interrupt')
+    }
+
+    return result
   }
 
   async approveItem(inboxItemId: string): Promise<DispatchResult> {
