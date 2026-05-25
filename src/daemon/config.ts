@@ -56,6 +56,9 @@ const DEFAULTS: Config = {
     narratorIntervalMs: 5 * 60_000,
     providerConfigPath: join(process.env.HOME ?? '', '.kairos', 'providers.json'),
   },
+  memory: { enabled: true, dreamIntervalMs: 30 * 60_000 },
+  perception: { enabled: true, pipelinePollMs: 30_000 },
+  orders: { enabled: true, filePath: join(process.env.HOME ?? '', '.kairos', 'STANDING_ORDERS.md') },
 }
 
 const SANDBOX_OVERRIDES: Partial<Config> = {

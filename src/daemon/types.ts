@@ -49,6 +49,18 @@ export type Config = {
     narratorIntervalMs: number
     providerConfigPath: string
   }
+  memory: {
+    enabled: boolean
+    dreamIntervalMs: number
+  }
+  perception: {
+    enabled: boolean
+    pipelinePollMs: number
+  }
+  orders: {
+    enabled: boolean
+    filePath: string
+  }
 }
 
 // ─── Database row types ─────────────────────────────────────────────
