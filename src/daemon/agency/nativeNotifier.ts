@@ -31,9 +31,23 @@ export class NativeNotifier {
   }
 }
 
+/**
+ * Escape a string for safe interpolation into an AppleScript double-quoted
+ * string literal. AppleScript delimits strings with `"`, so we must:
+ *   \  →  \\   (must escape backslashes first)
+ *   "  →  \"
+ *   newlines → spaces (AppleScript literals don't support \n)
+ * Exported for direct testing — caller composes the full script.
+ */
+export function escapeForAppleScript(s: string): string {
+  return s
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/[\r\n]+/g, ' ')
+}
+
 async function defaultProbe(args: { title: string; body: string }): Promise<void> {
-  const esc = (s: string): string => s.replace(/'/g, "'\\''")
-  const script = `display notification "${esc(args.body)}" with title "${esc(args.title)}" sound name "Submarine"`
+  const script = `display notification "${escapeForAppleScript(args.body)}" with title "${escapeForAppleScript(args.title)}" sound name "Submarine"`
   const proc = Bun.spawn(['osascript', '-e', script], { stdout: 'pipe', stderr: 'pipe' })
   const code = await proc.exited
   if (code !== 0) {

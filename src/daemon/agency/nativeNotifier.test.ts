@@ -1,5 +1,30 @@
 import { describe, it, expect } from 'bun:test'
-import { NativeNotifier } from './nativeNotifier'
+import { NativeNotifier, escapeForAppleScript } from './nativeNotifier'
+
+describe('escapeForAppleScript', () => {
+  it('escapes double quotes (the bug that broke real trigger notifications)', () => {
+    expect(escapeForAppleScript('a "quoted" thing')).toBe('a \\"quoted\\" thing')
+  })
+
+  it('escapes backslashes before double quotes', () => {
+    expect(escapeForAppleScript('a \\ b "c"')).toBe('a \\\\ b \\"c\\"')
+  })
+
+  it('flattens newlines to spaces', () => {
+    expect(escapeForAppleScript('line one\nline two\r\nline three')).toBe('line one line two line three')
+  })
+
+  it('leaves single quotes untouched (AppleScript only delimits with double quotes)', () => {
+    expect(escapeForAppleScript("it's a thing")).toBe("it's a thing")
+  })
+
+  it('handles real trigger payload that broke production (JSON in body)', () => {
+    const body = 'focus-app/app_changed: {"app":"Slack"}'
+    const out = escapeForAppleScript(body)
+    expect(out).not.toContain('"app"')   // raw " gone
+    expect(out).toContain('\\"app\\"')
+  })
+})
 
 describe('NativeNotifier', () => {
   it('forwards args to the probe', async () => {

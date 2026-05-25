@@ -1,46 +1,47 @@
 // src/daemon/proactive/observers/browserTabs.ts
+//
+// IMPORTANT — `tell application "Foo"` will LAUNCH the application if it's
+// not already running (the cause of "Chrome opened by itself" reports).
+// Each script must first check `application "Foo" is running` via
+// System Events, and only `tell` if true. The wrapper template handles this.
+
 import { Observer } from './base'
 import type { EventBus } from '../eventBus'
 
 type Probe = () => Promise<{ browser: string; tabs: string[] } | null>
 
+/**
+ * Wrap a browser-specific tabs script so it only runs if the browser is
+ * already running — never launch it as a side effect of polling.
+ */
+function guardedScript(appName: string, tabsBody: string): string {
+  return `
+    tell application "System Events"
+      if not (exists (processes whose name is "${appName}")) then
+        return ""
+      end if
+    end tell
+    tell application "${appName}"
+      ${tabsBody}
+    end tell
+  `
+}
+
+const TABS_BODY = `
+  set urls to {}
+  repeat with w in windows
+    repeat with t in tabs of w
+      set end of urls to URL of t
+    end repeat
+  end repeat
+  set AppleScript's text item delimiters to linefeed
+  return urls as text
+`
+
 const SCRIPTS: Record<string, string> = {
-  Arc: `
-    tell application "Arc"
-      set urls to {}
-      repeat with w in windows
-        repeat with t in tabs of w
-          set end of urls to URL of t
-        end repeat
-      end repeat
-      set AppleScript's text item delimiters to linefeed
-      return urls as text
-    end tell
-  `,
-  'Google Chrome': `
-    tell application "Google Chrome"
-      set urls to {}
-      repeat with w in windows
-        repeat with t in tabs of w
-          set end of urls to URL of t
-        end repeat
-      end repeat
-      set AppleScript's text item delimiters to linefeed
-      return urls as text
-    end tell
-  `,
-  Safari: `
-    tell application "Safari"
-      set urls to {}
-      repeat with w in windows
-        repeat with t in tabs of w
-          set end of urls to URL of t
-        end repeat
-      end repeat
-      set AppleScript's text item delimiters to linefeed
-      return urls as text
-    end tell
-  `,
+  Arc: guardedScript('Arc', TABS_BODY),
+  'Google Chrome': guardedScript('Google Chrome', TABS_BODY),
+  Safari: guardedScript('Safari', TABS_BODY),
 }
 
 export class BrowserTabsObserver extends Observer {
