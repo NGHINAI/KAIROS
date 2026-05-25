@@ -1418,6 +1418,8 @@ This is the ambitious "bet big" phase. KAIROS stops being passive perception + m
 
 Estimated scope: ~4-5 weeks, ~5,000-6,000 LOC TS+tests. The MCP runtime alone is a substantial subsystem; multi-step planning is the other big chunk.
 
+**MCP commitment (2026-05-25 user decision: "maximum bet")**: Phase C ships the MCP host runtime as a first-class subsystem. All cloud connector work routes through it. Smithery integration for one-click connector install. Phase D becomes near-empty (only native macOS connectors EventKit/Contacts that have no MCP path). This is the path that makes "unlimited connectors" real. Risk accepted: 1-2 extra weeks if MCP ecosystem has rough edges.
+
 ### Phase D — Native OAuth Connectors (where MCP doesn't fit)
 - The few connectors where the official MCP server is missing, broken, or insufficient
 - Likely: macOS-native ones (Calendar via EventKit, Contacts via Contacts.framework, possibly iMessage via Messages.app reading)
