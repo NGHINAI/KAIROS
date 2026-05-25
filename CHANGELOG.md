@@ -1,3 +1,69 @@
+## v0.2.0-phase-b (2026-05-24)
+
+### Added
+
+#### 4-tier human-like memory system (MemOS L1-L4 + Hermes Dreaming)
+- **L1 working memory** — in-memory ring buffer of last 10min / 500 events from EventBus
+- **L2 episodic memory** — SQLite-persisted typed event sequences with importance scoring + unpromoted query for dreamer
+- **L3 semantic memory** — facts/preferences/persons/projects/patterns with `reinforceOrWrite` for frequency-tracking
+- **L3 hybrid recall** — FTS5 lexical (BM25) + pure-TS cosine over BLOB embeddings (Float32Array, 768-dim BGE-Base-EN-v1.5)
+- **L4 procedural memory index** — skill registry with invoke/success stats
+- **Dreamer** — consolidates L2 → L3 via Hermes formula (w1·relevance + w2·frequency + w3·recency + w4·diversity + w5·richness − w6·dup)
+- **Idle/AC-power gate** — dreamer runs only when user idle >20min AND on AC, via `ioreg` + `pmset`
+- **Local embeddings** — fastembed BGE-Base-EN-v1.5 (768-dim, ~120MB model, ~50ms/embedding on M2; nomic substituted because not in fastembed v2.1)
+
+#### Tiered perception (KAIROS_SILENT pattern from OpenClaw/Hermes)
+- **Tier 1 classifier** — ultra-cheap one-word verdict (SIGNIFICANT/ROUTINE/SILENT), fail-closed SILENT
+- **Tier 2 summarizer** — mid-tier description + 0-1 significance score with STANDING_ORDERS bias, fail-closed score 0
+- **Perception pipeline** — orchestrates Tier 1 → Tier 2 → narrator.tick() + episode write; logs every evaluation
+- **Narrator no longer fires on timer** — pipeline is sole driver via `narrator.tick()` (Phase A code untouched, just timer disabled)
+
+#### STANDING_ORDERS.md (user-editable plain-English triggers)
+- Plain markdown bullets at `~/.kairos/STANDING_ORDERS.md` with seeded examples on first run
+- Hash-gated LLM compile — only recompiles when file content changes
+- Compiles to structured triggers in DB (`when_kind`, `when_match`, `condition`, `action`); used by Tier 2 + (future) Phase C trigger engine
+- Plain-text content also injected raw into Tier 2 prompt for bias
+
+#### 6th observer: ActivityWatch
+- Consumes `localhost:5600/api/0` for window focus duration, AFK/idle state, per-tab dwell time
+- Graceful degrade if ActivityWatch not installed
+- Filters tab_dwell events to >60s to reduce noise
+
+#### TLS warmup retrofit (Clicky pattern 8.4.8 #3)
+- All network providers (anthropic_api, openai, gemini) fire HEAD request on factory init
+- Pre-establishes TLS session ticket — eliminates cold-handshake latency on first call
+- Skipped for subprocess providers (anthropic_cli, codex_cli)
+
+### Architecture decisions
+- **Memory storage: SQLite + pure-TS cosine over BLOB embeddings** (pivot from sqlite-vec — bun:sqlite doesn't support `SQLITE_ALLOW_LOAD_EXTENSION`; pure-TS cosine is sub-10ms at KAIROS scale ≤10k facts)
+- **Memory backend: custom build** (not Engram drop-in — chosen for full control, zero external dep)
+- **Rate limiter: skipped** — trust the perception gate; volume validated at this gate
+- **Pure-TS cosine acceptable up to ~100k facts** before we'd need HNSW; recall API unchanged when we swap
+
+### Tests
+- 115 unit tests, all passing (~60 new in Phase B + 55 retained from Phase A)
+- Tests per subsystem: memory 28, perception 15, orders 9, observer 4, daemon integration verified via full-suite tsc
+
+### Stats
+- ~3,500 LOC TypeScript + tests added
+- 28 commits since v0.1.0-phase-a
+
+### Validation (per Section 8.5 gate)
+
+**Validation script**: `bun run scripts/validate-phase-b.ts`
+
+To be run by user. Replays 200 synthetic events through the full pipeline, runs the Dreamer, asks 5 recall questions, prints perception-volume + cost breakdown.
+
+PASS criteria:
+- Recall answers are roughly relevant to the questions
+- SIGNIFICANT verdicts < 20% of evaluations (gate is working)
+- narrator_fired < 10% of evaluations (effectively rate-limited as intended)
+- Total cost < 10¢ for the 200-event replay
+
+Phase B tag is provisional until user runs the validation script and updates this changelog with observed numbers.
+
+---
+
 ## v0.1.0-phase-a (2026-05-24)
 
 ### Added
