@@ -71,6 +71,10 @@ export type Config = {
     configPath: string
     skillsRoot: string
   }
+  restraint: {
+    enabled: boolean
+    configPath: string   // ~/.kairos/restraint-config.json
+  }
 }
 
 // ─── Database row types ─────────────────────────────────────────────

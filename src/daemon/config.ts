@@ -69,6 +69,10 @@ const DEFAULTS: Config = {
     configPath: join(process.env.HOME ?? '', '.kairos', 'mcp-servers.json'),
     skillsRoot: join(process.env.HOME ?? '', '.kairos', 'skills'),
   },
+  restraint: {
+    enabled: true,
+    configPath: join(process.env.HOME ?? '', '.kairos', 'restraint-config.json'),
+  },
 }
 
 const SANDBOX_OVERRIDES: Partial<Config> = {

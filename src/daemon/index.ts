@@ -445,7 +445,40 @@ async function main(): Promise<void> {
           embedder: { embed: (text: string) => embedder.embed(text) },
           semantic,
         }
-        const executor = new ActionExecutor(db, intentRegistry, trajectory, inbox, actionCtx)
+        // ─── Restraint subsystem (Phase C.1.5) — The Earned Interrupt architecture ──
+        let restraintPipeline: any = null
+        if (config.restraint.enabled) {
+          const { loadRestraintConfig } = await import('./restraint/configLoader')
+          const restraintCfg = loadRestraintConfig(config.restraint.configPath)
+          const { FocusDetector } = await import('./restraint/focusDetector')
+          const { KarmaStore } = await import('./restraint/karma')
+          const { CooldownTracker } = await import('./restraint/cooldownTracker')
+          const { RateLimiter } = await import('./restraint/rateLimiter')
+          const { ActionScorer } = await import('./restraint/actionScorer')
+          const { DeliveryRouter } = await import('./restraint/deliveryRouter')
+          const { DigestComposer } = await import('./restraint/digestComposer')
+          const { DryRunMode } = await import('./restraint/dryRunMode')
+          const { UrgencyFloor } = await import('./restraint/urgencyFloor')
+          const { RestraintPipeline } = await import('./restraint/restraintPipeline')
+
+          const focus = new FocusDetector(restraintCfg)
+          const karma = new KarmaStore(db, restraintCfg)
+          const cooldown = new CooldownTracker(restraintCfg.default_trigger_cooldown_sec * 1000)
+          const rateLimiter = new RateLimiter(db, restraintCfg)
+          const scorer = new ActionScorer(restraintCfg)
+          const router = new DeliveryRouter(restraintCfg)
+          const digest = new DigestComposer(db)
+          const dryRun = new DryRunMode(db, restraintCfg)
+          const urgencyFloor = new UrgencyFloor({ user_handles: ['nirmal', 'nghinai'] })
+
+          restraintPipeline = new RestraintPipeline({
+            config: restraintCfg, urgencyFloor, focus, karma, cooldown, rateLimiter,
+            scorer, router, digest, dryRun,
+          })
+          log('Restraint subsystem active — Earned Interrupt enabled')
+        }
+
+        const executor = new ActionExecutor(db, intentRegistry, trajectory, inbox, actionCtx, restraintPipeline)
         const triggerEngine = new TriggerEngine(db, bus, (req) => executor.dispatch(req))
         const bridge = new PerceptionToTrigger(bus, episodic)
 
