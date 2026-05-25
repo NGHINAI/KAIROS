@@ -1,3 +1,73 @@
+## v0.3.1-phase-c2 (2026-05-25) — MCP Host Runtime + Bespoke Connectors
+
+Second of 4 sub-phases comprising Phase C. KAIROS now **speaks MCP** — connecting to any of 20,000+ community MCP servers via the official `@modelcontextprotocol/sdk` TypeScript client. Every connected tool auto-registers as an Intent in the agency layer with structural tier assignment.
+
+After C.2, the connector ecosystem is no longer "what KAIROS implements" — it's "what the MCP world has built". Add to `~/.kairos/mcp-servers.json`, restart, you've added a connector.
+
+### Added
+
+#### MCP host runtime
+- **McpClient** — single-server stdio connection wrapping `@modelcontextprotocol/sdk`'s `Client` + `StdioClientTransport`. Connect, list tools, call tool, disconnect.
+- **McpHost** — multi-server orchestrator. Loads `~/.kairos/mcp-servers.json`, starts enabled servers in parallel, exposes a unified tool list namespaced as `serverId::toolName`.
+- **toolToIntent bridge** — auto-registers each MCP tool as an agency `Intent`. Tier comes from `tier_policy` in the server config (`default` + per-tool `overrides`) — structural enforcement, not LLM-prompt-overridable.
+- **Keychain wrapper** — `/usr/bin/security` CLI shell-out for storing API keys per server. No native binding; no secrets touch disk. Resolved at McpHost startup and injected into server subprocess env.
+
+#### Skill ecosystem
+- **agentskills.io SKILL.md loader** — adopts the open standard (35+ agents use it: Cursor, Goose, Letta, Claude Code, Gemini CLI, OpenHands…). Each skill = a folder with YAML frontmatter + markdown body + optional `scripts/`. Progressive disclosure: `listSummaries()` reads frontmatter only; `load()` reads full body + scripts.
+- **Skills root**: `~/.kairos/skills/` — drop in agentskills.io-compatible directories and they auto-discover at daemon start.
+
+#### Dynamic discovery
+- **SmitheryCli wrapper** — shell-wraps `@smithery/cli` for `search` (catalog query) and `add` (install). Graceful degrade when smithery not on PATH — daemon doesn't crash.
+
+#### Bespoke macOS connector (the first .mcpb bundle)
+- **`connectors/macos-reminders/`** — full bespoke MCP server packaged as `.mcpb` bundle. Three tools via AppleScript:
+  - `list_reminders` (GREEN) — pull incomplete reminders from default list
+  - `add_reminder` (YELLOW) — add new with optional ISO due date
+  - `complete_reminder` (ORANGE — requires approval) — mark by title
+- Proves the `.mcpb` bundle path works. No third-party API; runs anywhere with macOS Reminders.app.
+
+#### Daemon wire-up
+- New `mcp` config block (`enabled`, `configPath`, `skillsRoot`)
+- Dynamic imports (`await import('./mcp/...')`) keep daemon cold-start fast when `mcp.enabled=false` — the SDK doesn't load unless needed
+- `mcpStop` lifecycle hooked into existing shutdown chain
+
+### Tests
+- **26+ new unit tests** across 8 test files (types, keychain, mcpClient with real echo-server fixture, mcpHost with multi-server tests, toolToIntent, smithery, skillLoader, reminders wrapper)
+- **198/198 total tests passing** (Phase A 59 + B 60 + C.1 45 + C.2 26 + cross-cutting — 8 retired, 0 regressions)
+
+### Stats
+- ~2,200 LOC TypeScript + tests + bespoke connector code
+- 10 atomic commits
+
+### Validation (per Section 8.5)
+
+**Validation PASSED 2026-05-25** — 5/5 scenarios:
+
+| # | Scenario | Result |
+|---|---|---|
+| 1 | Echo MCP server starts, tool registered as Intent | ✅ `echo-test::echo` tier=GREEN |
+| 2 | Invoke echo-test::echo via ActionExecutor | ✅ status=completed, `{"msg":"C.2 validation alive"}` echoed |
+| 3 | macos-reminders bundle starts, 3 tools registered with correct tiers | ✅ list=GREEN, add=YELLOW, complete=ORANGE |
+| 4 | add_reminder via Intent → AppleScript → Reminders.app | ✅ Status=completed; "KAIROS C.2 test — 2026-05-25T08:48:33" item created |
+| 5 | Smithery CLI graceful degrade | ✅ NO (smithery not installed on this Mac), no crash |
+
+**Phase C.2 is both code-complete AND validated-complete.** v0.3.1-phase-c2 stands.
+
+### What unlocks now
+
+The single biggest capability jump in the roadmap. KAIROS can now:
+- **Call any tool on any connected MCP server** as a triggered action
+- **Hot-add new connectors** by editing `~/.kairos/mcp-servers.json` + restart
+- **Discover the catalog** via Smithery CLI (when installed)
+- **Ship bespoke connectors** in `.mcpb` format for anything macOS-native (Contacts, Calendar, Notes, Reminders, Mail, etc.)
+- **Load skills** in the agentskills.io standard from `~/.kairos/skills/`
+
+### Next: Phase C.3
+
+Magentic-One dual-ledger orchestrator + smolagents CodeAgent + AWM workflow crystallizer. Multi-step plans that chain MCP tools, plus learning from successful trajectories.
+
+---
+
 ## v0.3.0-phase-c1 (2026-05-25) — Agency Layer, Sub-Phase 1
 
 First of 4 sub-phases comprising the Phase C agency layer (the "bet big" expansion). C.1 closes the perception→action loop: KAIROS can now actually **do things** in response to STANDING_ORDERS-compiled triggers, not just observe + remember.
