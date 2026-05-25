@@ -1420,6 +1420,31 @@ Estimated scope: ~4-5 weeks, ~5,000-6,000 LOC TS+tests. The MCP runtime alone is
 
 **MCP commitment (2026-05-25 user decision: "maximum bet")**: Phase C ships the MCP host runtime as a first-class subsystem. All cloud connector work routes through it. Smithery integration for one-click connector install. Phase D becomes near-empty (only native macOS connectors EventKit/Contacts that have no MCP path). This is the path that makes "unlimited connectors" real. Risk accepted: 1-2 extra weeks if MCP ecosystem has rough edges.
 
+#### Phase C concrete patterns (research-confirmed, 2026-05-25)
+
+Full research at `docs/research/2026-05-25-phase-c-agency-layer.md` (20,000+ MCP servers confirmed). Phase C implements:
+
+| Capability | Pattern source | Implementation note |
+|---|---|---|
+| **MCP host runtime** | Official `@modelcontextprotocol/sdk` TypeScript host | Embed in daemon; don't fork. Same SDK Claude Desktop/Code use. |
+| **Dynamic connector discovery** | Smithery CLI (`smithery mcp search/add`) | Shell-invoke from daemon. CLI is thin enough to wrap. |
+| **Bespoke macOS connectors** | Anthropic `.mcpb` bundle format | Package Contacts/Calendar/Reminders/Notes as portable bundles. |
+| **Multi-step orchestrator** | Magentic-One dual-ledger (arXiv:2411.04468) | Task ledger (outer) + progress ledger (inner). ~400 LOC native — no LangGraph dep. |
+| **Single-step actions** | smolagents CodeAgent (LLM writes code snippets, not JSON tool calls) | 30% fewer LLM turns. Used for simple triggers. |
+| **Skill format** | agentskills.io standard (35+ adopting agents) | `SKILL.md` + YAML frontmatter + progressive disclosure. Cross-compatible with Cursor/Goose/Claude Code skills. |
+| **Behavior crystallization** | Agent Workflow Memory (AWM, ICML 2025, +51% WebArena) | Background worker scans successful trajectories; induces parameterized workflows. |
+| **Trajectory log format** | UFO2 ExperienceFlow (arXiv:2504.14603) | `{task_goal, steps:[{obs,reasoning,action,result}], outcome, override_reason}`. Cheap now, expensive to retrofit. |
+| **Ambient-agent reference architecture** | LangChain ambient agents blog | Event-stream activation; persistent state; 3 HITL modes (Notify/Question/Review) → maps to 🟢🟡🟠🔴 tiers; cron as fallback sweep. |
+| **HITL tier enforcement** | Structural (per Allen Chan anti-pattern analysis) | Risk tag in skill/tool manifest, NOT in LLM prompt. Orchestrator halts on ORANGE/RED without `approved` signal from HUD. |
+
+Anti-patterns to actively avoid (also from research):
+- **Chat-wrapper** (no persistent state, fake event-driven)
+- **Cron-loop polling** (use SQLite WAL + FSEvents-like push from EventBus)
+- **Hardcoded trigger list** (STANDING_ORDERS LLM-compiled rules stay primary)
+- **All-or-nothing autonomy** (tier enforcement structurally, not via prompts)
+- **Invisible state** (orchestrator state in SQLite row, not LLM context)
+- **Topology research-paper chasing** (simplest orchestrator first; don't reach for Swarm/CodeAct/LLM-as-Judge to fix scoping problems)
+
 ### Phase D — Native OAuth Connectors (where MCP doesn't fit)
 - The few connectors where the official MCP server is missing, broken, or insufficient
 - Likely: macOS-native ones (Calendar via EventKit, Contacts via Contacts.framework, possibly iMessage via Messages.app reading)
