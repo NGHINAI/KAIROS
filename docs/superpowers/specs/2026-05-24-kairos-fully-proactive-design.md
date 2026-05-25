@@ -1243,6 +1243,73 @@ Failure mode: if ActivityWatch isn't installed, observer disables itself gracefu
 - **Per-phase validation gate** — unchanged (Section 8.5)
 - **9 build phases (A-I)** — same scope, refined implementation per above
 
+### 8.4.9 — Phase F UI/UX commitments (2026-05-25 user lock-in)
+
+Phase F (custom-glassmorphism SwiftUI HUD) commits to **7 specific viral/PLG features**, all in the macOS glassmorphism aesthetic from Section 6. These complement the 6-pillar HUD architecture (menu bar + floating HUD + voice hotkey) with concrete capabilities the user can demo, share, and grow the product through.
+
+#### F.1 — The Living Oval (visual identity foundation)
+
+The bottom-center HUD oval is a *presence with emotion*, not a status pill. Color + motion physics reflect internal state:
+- **Idle**: gentle breathing pulse, mint-green
+- **Listening**: rapid ripple, white-cyan shimmer
+- **Thinking**: slow rotational wave, lavender
+- **Speaking**: word-synced glow ripples outward (heartbeat synced to TTS)
+- **Tier escalation**: live color shift — green flick (silent), amber bob (notify), red urgent throb
+- **Dim**: long pause → near-invisible, wakes on hotkey
+
+SwiftUI Canvas + spring physics (`interpolatingSpring(stiffness: 280, damping: 22)`), Metal shaders for glow ripples, desktop wallpaper color sampling for subtle tint refraction.
+
+#### F.7 — Glass Compose Stream
+
+When KAIROS drafts a message via `action_compose`, the oval expands into a floating glass card showing LLM tokens streaming in real-time. Tap to cancel mid-stream. Apple-native ambient interaction.
+
+#### F.9 — Conversational STANDING_ORDERS authoring
+
+Open a glass chat surface, say *"when calendar has a meeting in 10 min remind me"*. KAIROS confirms understanding, shows the compiled trigger as a preview card. Tap "ship it" → rule lands in STANDING_ORDERS.md. Markdown editing still works for power users but **conversational is the default authoring path**. Directly addresses "make it as easy as possible" goal.
+
+#### F.10 — Inline Reply Composer
+
+When KAIROS surfaces *"John just DM'd you, want me to reply?"*, the glass card has a textarea right there + pre-filled draft. Edit, voice-correct, or hit Send. No app switch. **This is the rich-notification surface** that replaces macOS native notifications for interactive prompts (the "we don't want macOS notifications, we want a KAIROS app surface" requirement from 2026-05-25).
+
+#### F.A — AI co-worker custom name + avatar (PLG)
+
+First-run wizard: name your KAIROS (e.g. "Cypress", "Atlas", "Iris") + generate a custom visual avatar via DALL-E from a user-written prompt. Avatar lives inside The Living Oval — pulses with the same physics but with the user's identity.
+
+**PLG mechanic**: every screenshot the user takes includes their named/visual AI. "Meet Cypress" tweets seed brand recognition organically. Scope: ~3 days (DALL-E call, asset caching, avatar render layer).
+
+#### F.C — Shareable STANDING_ORDERS as community deck (PLG)
+
+Every rule becomes shareable via a unique URL (`kairos.so/rule/abc123`). Click → preview the rule + tap "install" → it lands in the user's STANDING_ORDERS.md. Communities form around rule packs ("morning routine", "deep work mode", "vendor management"). **Top creators get recognition; network effect baked in.**
+
+**PLG mechanic**: this is the multiplier. Every shared rule = a new user funnel. Power users become evangelists. Scope: ~1.5 weeks (URL generation + remote rule store + install flow + small web preview page at kairos.so domain).
+
+#### F.F — Voice Easter eggs (cult-following hook)
+
+Hidden phrases trigger unique cinematic glass responses:
+- *"hey KAIROS, are you alive?"* → unique TTS response with custom visual
+- *"what's the meaning of life?"* → another
+- *"who are you?"* → personalized intro from your named/avatared KAIROS
+
+Hunters find them. Reddit threads of discovered eggs. Lore. The Apple Easter-egg tradition. Scope: ~2 days (small registry of phrase → response patterns).
+
+#### Phase F deferred to a future iteration ("F+" or beyond)
+
+Discussed during brainstorming but not committed to Phase F:
+- **Memory Garden 3D constellation** — gorgeous but expensive (Three.js/SceneKit + UMAP). Ship after enough data exists to be meaningful (6+ months of use).
+- **Decision Lineage Cards** — explainable AI cards flipping to show reasoning trace. Free with C.1's UFO2 trajectory data — easy to add as a v2 enhancement once core HUD ships.
+- **Drag-to-Bind** — spatial entity-binding by dragging Slack avatars onto the oval. Add when MCP catalog is mature.
+- **Voice Clone Personality (full ElevenLabs Voice Lab)** — clone-your-own-voice tier. Cost concern (~$22/mo per user); ship after monetization in place.
+- **Trajectory Replay Timeline** — cinematic horizontal day-scrub. Add when there's enough action density to make a compelling reel.
+- **Trust Dial per Service** — settings UI with vertical autonomy slider per connector. Lower urgency; useful for power users in v2.
+- **Status as Gradient Wallpaper** — ambient desktop tinting based on KAIROS state. Add as toggle in Settings.
+- **Weekly Agent Moments share-card** — recurring Sunday auto-generated glass card. Higher-effort weekly mechanic; add after retention is established.
+- **30-day cinematic video summary** — monthly milestone tweet. Requires 30 days of usage data first.
+- **Live multiplayer "agent meeting"** — two KAIROS users' agents talking via voice. **Kept in inventory** — most viral video opportunity in the entire product but ~3 wks scope. Revisit after Phase F ships.
+
+This deferred list is **explicit roadmap fuel**, not abandoned ideas. Each gets re-evaluated after Phase F ships + early user feedback comes in.
+
+---
+
 ### 8.4.8 — Clicky-derived patterns (2026-05-24)
 
 Deep dive on farzaa/clicky (6k stars, MIT, macOS voice companion) — full report at `docs/research/2026-05-24-clicky-deep-dive.md`. Clicky is **not proactive** (it's a better Siri button), but its engineering of voice + macOS + spatial grounding is production-quality and 5 patterns are worth adopting verbatim:
