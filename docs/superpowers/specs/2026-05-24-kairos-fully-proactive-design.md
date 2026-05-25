@@ -1362,58 +1362,105 @@ Plus: design work for icons, animations, marketing copy, legal.
 
 ## Build phases (incremental shipping)
 
-### Phase A — Local Observer Network (Week 1-2)
-- Implement Tier 1 observers (focus-app, browser-tabs, files, clipboard, calendar)
-- World state aggregator + narrative summarizer
-- Foundation for everything else
+> **Phase ordering corrected 2026-05-25** to match actual execution. Original spec had memory + UI before triggers; we shipped memory in Phase B alongside perception and pushed UI later. The new ordering reflects what's been built and what comes next.
 
-### Phase B — First UI Surface (Week 3-4)
-- SwiftUI menu bar app + dropdown
-- WebSocket connection to daemon
-- Cards rendering, basic interaction
-- First visible "KAIROS is alive" demo
+### Phase A — Local Observer Network + Multi-LLM Router ✅ **SHIPPED** (`v0.1.0-phase-a`)
+- 5 OS observers (focus-app, browser-tabs, clipboard, file-events, calendar-local)
+- Event bus + state snapshot + narrator
+- Multi-LLM ModelRouter with 7 providers (Anthropic CLI, Codex CLI, Anthropic API, OpenAI, Gemini, Kimi, Ollama)
+- Validated via `scripts/smoke-proactive.ts`
 
-### Phase C — Memory System (Week 5-6)
-- Episodic + semantic stores
-- GBrain integration
-- Dream consolidation
-- Replaces MEMORY.md with proper brain
+### Phase B — Human-Like Memory + Tiered Perception + STANDING_ORDERS ✅ **SHIPPED** (`v0.2.0-phase-b`)
+- 4-tier memory (MemOS L1-L4 + Hermes Dreaming scoring + idle/AC-power gate)
+- Tiered perception (KAIROS_SILENT pattern wrapping the narrator)
+- STANDING_ORDERS.md hybrid English-to-structured-trigger compiler
+- ActivityWatch 6th observer
+- TLS warmup retrofit (Clicky pattern)
+- Validation pending: `scripts/validate-phase-b.ts`
 
-### Phase D — First Cloud Connector + Voice (Week 7-8)
-- Gmail OAuth flow + observer + actions
-- Global hotkey + Whisper integration
-- Action Bus + autonomy tiers
-- First real proactive demo (drafted email replies)
+### Phase C — Agency Layer: Trigger Engine + MCP Connectors + Multi-Step Planning ⏳ **PLANNING**
 
-### Phase E — Trigger Engine (Week 9-10)
-- Built-in trigger catalog
-- Interruption budget
-- Learned trigger discovery
-- "Right moment" intelligence
+This is the ambitious "bet big" phase. KAIROS stops being passive perception + memory and becomes a **co-worker that acts**. Built fresh (no reuse of prior-session decisionEngine/taskRunner/discordBot).
 
-### Phase F — Floating HUD with Liquid Glass (Week 11-12)
-- The visual centerpiece
-- Spring physics animations
-- Live narrative pill
-- The unique-feeling surface
+**Core (must-ship)**
+- **Trigger engine** consumes compiled STANDING_ORDERS triggers + perception output; matches against world events
+- **Tiered autonomy** (🟢 silent / 🟡 one-tap / 🟠 preview / 🔴 blocked) with per-action default + per-context override
+- **Action execution layer** with idempotency keys, retry, audit log
+- **Approval queue** as a minimal `~/.kairos/inbox.md` (tail-able from any terminal) + macOS native notifications until Phase F UI lands
+- **Phase C validation gate** — 5 scripted scenarios (calendar reminder, clipboard URL handling, file repeat pattern, mock-message reply draft, quiet-hours suspension)
 
-### Phase G — Self-Evolution Loop (Week 13-14)
-- Skill-from-success
-- In-use skill iteration
-- Dialectic user model
-- Subagent spawning
+**Bet-big extensions (the "unlimited connectors + true co-worker" layer)**
 
-### Phase H — Remaining Connectors (Week 15-16)
-- Slack, GitHub, Google Calendar
-- Notion, Linear (if needed)
-- MCP server integration
+- **MCP host runtime** — KAIROS becomes an MCP client speaking to any MCP server. Skips per-service OAuth boilerplate for ~100+ existing MCP servers (Slack, Notion, Linear, GitHub, Postgres, Stripe, Gmail-via-MCP, etc.). Includes:
+  - Dynamic discovery (Smithery / Anthropic registry)
+  - Auto-install via Smithery CLI
+  - Per-server auth (OAuth / API key / none) via keychain
+  - Sandboxed execution (each server in its own subprocess)
+  - This is what makes "connectors are unlimited" real
 
-### Phase I — Commercial Polish (Week 17-20)
-- Stripe billing
-- Onboarding wizard
-- Auto-updater
-- App Store submission
+- **Multi-step action composition** — triggers can fire a *plan*, not just a single action. Plan = LLM-composed sequence of intent calls with conditional branches. Inspired by LangGraph / AutoGen but ambient (no user prompt). Plans:
+  - Compose via mid-tier LLM (`task_type: action_compose`)
+  - Execute step-by-step with checkpoint between steps
+  - Stop on failure or user dismiss; resume on rerun
+  - Logged as a "plan" episode in L2 memory
+
+- **Intent registry** — every action handler self-describes (name, args schema, autonomy tier, idempotency rules). New intents register declaratively. MCP servers register their tools as intents automatically.
+
+- **Behavior cloning seed** — when KAIROS observes the user doing the same workflow 3+ times within a week, it proposes "should I do this for you next time?" → adds as candidate skill/standing-order. Lighter version of full Hermes self-evolution (which is Phase G).
+
+- **Counterfactual audit log** — every fired trigger writes both what KAIROS did AND what it considered but rejected. Enables the user to audit reasoning + helps tune the perception gates.
+
+- **Dry-run mode** — `STANDING_ORDERS.md` can include `--dry-run` directives that fire the full trigger + plan composition but stop short of execution. Result goes to inbox as "would have done X". Used during onboarding + as a safety net for unfamiliar triggers.
+
+- **Persona-conditioned routing** — actions bias on L3 semantic facts about user preferences. "John prefers concise replies" feeds into the action_compose prompt automatically when drafting.
+
+- **Local model fallback for offline ops** — if cloud LLM unreachable, trigger eval falls back to Ollama Qwen3:8b (already configured in router); narrative simple actions still work.
+
+Estimated scope: ~4-5 weeks, ~5,000-6,000 LOC TS+tests. The MCP runtime alone is a substantial subsystem; multi-step planning is the other big chunk.
+
+### Phase D — Native OAuth Connectors (where MCP doesn't fit)
+- The few connectors where the official MCP server is missing, broken, or insufficient
+- Likely: macOS-native ones (Calendar via EventKit, Contacts via Contacts.framework, possibly iMessage via Messages.app reading)
+- Most "cloud services" that were originally in Phase D scope now come via Phase C's MCP layer
+
+### Phase E — Voice Layer (Wispr-style hotkey + Whisper + ElevenLabs TTS)
+- Fork kwindla/macos-local-voice-agents
+- Hold-to-speak (Ctrl+Shift+4) + double-tap-Control hands-free
+- Silero VAD + WhisperKit (local) + ElevenLabs/OpenAI TTS (human-realistic voice)
+- Proactive voice — KAIROS initiates speech via the oval HUD without user input
+- Per Phase F dependency: oval HUD must exist; can be Phase F-light (just the oval) before full HUD
+
+### Phase F — Custom Glassmorphism HUD (SwiftUI)
+- The visible centerpiece — iOS-18-Control-Center aesthetic
+- Custom NSPanel + heavy frosted blur + stacked glass tiles + spring physics
+- Live narrative pill (always-on minimal oval)
+- Action card surface for approval queue
+- WebSocket connection to daemon for live updates
+- Settings panel for hotkeys / connectors / triggers / memory browsing
+
+### Phase G — Self-Evolution Loop (Hermes patterns)
+- Skill-from-success (auto-distill successful action sequences into reusable skills)
+- In-use skill iteration (mid-execution refinement)
+- Dialectic user model (KAIROS proposes claims about user, confirms or invalidates over time)
+- Source patch proposals (modify own code with user approval)
+- Subagent spawning for parallel investigation
+- Builds on Phase C's behavior cloning seed
+
+### Phase H — Multi-Modal Vision
+- Screenshot capture + Vision LLM understanding
+- "What's on my screen?" voice queries
+- Visual triggers (specific UI element appears → notify)
+- Multi-monitor support
+- Could include the Clicky-style `[POINT:x,y]` spatial protocol if useful (currently dropped — revisit if user requests)
+
+### Phase I — Commercial Packaging
+- Stripe billing (4 tiers: free / $20 / $40 / $50)
+- Onboarding wizard (provider setup + permissions + first STANDING_ORDERS)
+- Sparkle auto-updater
+- Code signing + notarization
+- Distribution: direct download + Mac App Store Lite version
 - Marketing site
+- Cloudflare Worker for key proxying (Clicky pattern with HMAC auth)
 
 ---
 
