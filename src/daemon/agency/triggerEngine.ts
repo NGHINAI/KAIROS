@@ -93,8 +93,18 @@ export class TriggerEngine {
    *   "text.isURL()"             — payload.text matches a URL regex
    *   "app.equals('Slack')"      — payload.app equals 'Slack'
    *   "path.endsWith('.ts')"     — payload.path ends with '.ts'
-   * Anything more sophisticated → falls back to true (caller's condition
-   * field can do further filtering). C.4 replaces this with a full DSL.
+   *
+   * FAIL-CLOSED: unsupported predicates (compound expressions, pattern.repeats,
+   * event.startsIn, etc) return false — the trigger does not fire.
+   *
+   * History: this used to return true on fallthrough, which caused a 2026-05-25
+   * incident where the LLM compiler emitted `pattern.repeats(3, 10min, sameFile)`
+   * for a file-events trigger. Our evaluator didn't know that predicate so it
+   * fell through to true, matching every file change. Result: 4,454 macOS
+   * notifications in 2 hours. The fail-closed default makes unsupported
+   * predicates SAFE (they never fire) instead of DANGEROUS (they always fire).
+   *
+   * C.4 expands the supported predicate DSL.
    */
   private matchesPayload(whenMatch: string, payload: Record<string, unknown>): boolean {
     if (!whenMatch || whenMatch.trim() === '*') return true
@@ -116,7 +126,7 @@ export class TriggerEngine {
       return typeof payload.path === 'string' && payload.path.endsWith(pathEnds[1]!)
     }
 
-    return true
+    return false   // fail-closed
   }
 
   /** Stub for C.1 — just true. C.4 adds NOT focus_app.is_video etc. */

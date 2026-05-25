@@ -84,4 +84,40 @@ describe('TriggerEngine', () => {
     await engine.evaluateEvent({ id: 2, ts: Date.now(), source: 'file-events', kind: 'modified', payload: { path: '/foo.txt' } } as any)
     expect(dispatched.length).toBe(1)
   })
+
+  // Regression test for the 2026-05-25 "4,454 notifications" incident.
+  // The LLM compiler can emit predicates the C.1 evaluator doesn't understand
+  // (compound expressions, pattern.repeats(), event.startsIn(), etc).
+  // Old behavior: unknown predicates fell through to `return true`, matching
+  // every event of that source. That caused 4,454 notify fires in 2 hours.
+  // Fixed behavior: unknown predicates return false (fail-closed), trigger
+  // does not fire until C.4's expanded DSL supports them.
+  it('FAIL-CLOSED: unsupported predicates do NOT fire (regression for 4,454-notif incident)', async () => {
+    // Each of these predicates was emitted by the LLM compiler from the seed
+    // STANDING_ORDERS.md rules — the original cause of the notification storm.
+    const unsupportedPredicates = [
+      'pattern.repeats(3, 10min, sameFile)',                  // file-repeated-open-suggest-pr
+      "app.equals('Slack') AND dm.contains('urgent')",        // compound expression
+      'event.startsIn(10min)',                                // calendar predicate
+      "time.dayOfWeek('Sunday').before(11:00)",               // time-of-day predicate
+      'something.unrelated.method()',                         // wholly unknown
+    ]
+    for (const [i, pred] of unsupportedPredicates.entries()) {
+      addTrigger({
+        id: `unsupp-${i}`,
+        when_kind: 'file-events',
+        when_match: pred,
+        action: 'notify',
+      })
+    }
+    // Fire 10 file-events events. With the old (broken) fallthrough this would
+    // produce 50 notify dispatches (5 triggers × 10 events). Fixed: zero.
+    for (let i = 0; i < 10; i++) {
+      await engine.evaluateEvent({
+        id: i, ts: Date.now(), source: 'file-events', kind: 'modified',
+        payload: { path: `/tmp/file${i}.ts` },
+      } as any)
+    }
+    expect(dispatched.length).toBe(0)
+  })
 })
