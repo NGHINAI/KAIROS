@@ -17,17 +17,31 @@ The shift: **"ask → answer" becomes "observe → act."** The model prompts the
 
 ## Vision
 
-A proactive AI assistant that:
+A proactive AI **co-worker** (not assistant) that:
 
 - **Lives on your Mac**, not in your browser
 - **Observes continuously** across local apps and 4-6 cloud services
-- **Maintains layered memory** (working, episodic, semantic, procedural) at the scale of years of use
+- **Maintains human-like layered memory** (working, episodic, semantic, procedural) at the scale of years of use
 - **Acts on its own** at the right autonomy tier — small reversible actions silently, moderate actions with one-tap approval, irreversible actions with full preview
-- **Talks back** via voice when you press a hotkey (Wispr Flow pattern)
+- **Talks back** via voice when you press a hotkey OR **initiates voice unprompted** — "hey, John just messaged you on Slack about the auth bug, want me to draft a reply?"
+- **Voice-driven delegation** — you say "remind me in 10 min" / "draft a reply" / "tell him I'm in a meeting" and KAIROS executes
+- **Drafts in your voice** — replies use your tone, your phrases, your prior responses to that person as style guide
 - **Self-improves continuously** — writes new skills from successful workflows (Hermes pattern), iterates skills mid-execution, evolves prompts and source code with user approval
-- **Looks like an Apple product** — Liquid Glass HUD, native macOS feel, motion physics
+- **Looks like an Apple product** — custom-glassmorphism HUD (iOS-18 Control Center aesthetic), native macOS feel, motion physics
 - **Is private by architecture** — data never leaves the user's machine; brain is local markdown + SQLite
 - **Scales commercially** with high margins because compute runs on the user's machine
+
+### The "co-worker not assistant" distinction (added 2026-05-24 per user clarification)
+
+KAIROS doesn't wait to be asked. It:
+1. **Reads** your incoming Slack/Gmail/Discord/WhatsApp messages as they arrive
+2. **Decides** whether each one warrants interruption (Tier 1/2 gates from 8.4.1)
+3. **Speaks** the relevant ones via TTS — "John sent: 'can you review my PR?' He's mentioned this twice today."
+4. **Listens** for your verbal response: "not now, remind me in 10" / "draft a yes, ask when he needs it" / "snooze until 3pm"
+5. **Executes** the response — sets reminder, drafts message in your voice, sends after preview confirmation
+6. **Learns** from the exchange — your preferences, John's communication style, what topics you defer vs handle immediately
+
+This is the central UX paradigm. The triangle-cursor model (Clicky) is explicitly NOT what KAIROS is — KAIROS doesn't fly around the screen pointing at things. KAIROS lives in your ear and in your message threads, with a glass HUD that surfaces what it's thinking and waiting on.
 
 ---
 
@@ -677,16 +691,22 @@ Click → dropdown (380px wide):
 
 Stable, scannable, always there. Cards color-coded by autonomy tier.
 
-### Surface 2: Liquid Glass Floating HUD
+### Surface 2: Liquid Glass Floating HUD — Wispr-Flow-style oval
 
 The "alive" surface — floats on top of all windows. **This is what makes KAIROS feel different.**
 
+The default footprint is a **small horizontal oval pinned to the bottom-center of the screen**, ~240×40px, matching Wispr Flow's minimal visual footprint. It expands only when KAIROS speaks, listens, or surfaces an action card — otherwise it's a quiet pill showing one-line state. The user can drag to reposition; it remembers per-display location.
+
 ```
-Idle state (~280×80 px, always visible):
-┌──────────────────────────────────────┐
-│ ⚡ ●─●─●  watching VS Code · auth.ts │  ← Liquid Glass material
-│ ⏰ Standup in 23m · 3 DMs unread     │     vibrancy + refraction
-└──────────────────────────────────────┘
+Idle state (~240×40 px oval, pinned bottom-center):
+        ╭───────────────────────────────────╮
+        │ ⚡  VS Code · auth.ts · standup 23m │  ← Liquid Glass oval
+        ╰───────────────────────────────────╯       glass blur + refraction
+
+Compact mode (when nothing notable — minimum footprint):
+        ╭──────╮
+        │  ⚡  │       ← collapses to a single glass dot
+        ╰──────╯
 
 Trigger fires (expands ~360×220 with spring animation):
 ┌──────────────────────────────────────────────┐
@@ -720,20 +740,31 @@ Listening state (during voice capture):
 - Right-click → preferences
 - Animations via SwiftUI spring physics
 
-### Surface 3: Voice + Global Hotkey
+### Surface 3: Voice + Global Hotkey — Wispr-style hold + hands-free toggle
+
+Two hotkey modes matching Wispr Flow's interaction model — every binding is user-configurable in Settings.
 
 ```
-Default hotkey: ⌃⌥Space. Configurable.
+Mode 1 — HOLD-TO-SPEAK (default: ⌃⇧4 / Control+Shift+4)
+  Press and hold → audio capture starts (oval pulses, glass shimmer)
+  Speak naturally → live transcript scrolls inside oval
+  Release → transcription finalizes → routed to KAIROS
 
-Hold hotkey → audio capture starts (HUD shows listening state)
-Speak naturally → live transcript in HUD
-Release hotkey → transcription finalizes → fed to KAIROS
+Mode 2 — DOUBLE-TAP HANDS-FREE (default: tap Control twice quickly)
+  Double-tap Control → enters hands-free conversation mode (oval stays expanded)
+  Speak whenever → VAD detects utterance boundaries
+  KAIROS responds via TTS through the oval
+  Double-tap Control again → exits hands-free mode
 
-KAIROS responds:
-  - Always: visible reply in HUD (text)
-  - Optional: spoken response via TTS
-  - If action included: action card appears, awaits confirmation
+Mode 3 — PAUSE everything (default: ⌃⌥⌘Space)
+  Instant freeze of all observers + collapse HUD to invisible
 ```
+
+**KAIROS responds**:
+- **Always** through the oval (text + animation)
+- **By default** via TTS so the response is hands-free
+- If an action is included → action card expands, awaits confirmation
+- **Critically, KAIROS can also initiate** — proactive triggers cause the oval to chime + expand + speak ("Heads up, your standup starts in 2 minutes") without the user pressing anything. This is the "AI comes with you" behavior.
 
 **Transcription**:
 - **Local Whisper.cpp** — runs on-device, free, ~500ms latency
@@ -741,9 +772,15 @@ KAIROS responds:
 - **Default**: local Whisper with API fallback if slow
 
 **TTS** (when KAIROS speaks back):
-- macOS native `say` — free, fast, robotic
+- macOS native `say` — free, fast, slightly robotic
 - ElevenLabs API — best quality, $5-22/month
-- OpenAI TTS — middle ground
+- OpenAI TTS — middle ground, $0.015/1k chars
+- **Default**: macOS `say` for short utterances (chimes, confirmations), ElevenLabs for proactive speech if user subscribes
+
+**Voice Activity Detection** (for hands-free mode):
+- `webrtcvad` or Silero VAD (both local, free)
+- Endpoints utterances when ~800ms of silence detected
+- Skip if last utterance was KAIROS's own TTS (so it doesn't loop on itself)
 
 ### Notifications
 
@@ -969,11 +1006,14 @@ KAIROS must NOT be locked to Anthropic. Every LLM call goes through a single **M
 |---|---|---|---|
 | **Anthropic** (subscription) | Claude Haiku/Sonnet/Opus via `claude -p` CLI | Pro/Max subscription | $0 incremental (subscription) |
 | **Anthropic** (API) | Same models via API | API key | Pay-per-token |
-| **OpenAI** | GPT-4o, GPT-4o-mini, GPT-5, o-series | API key | Pay-per-token |
+| **OpenAI Codex** (subscription) | GPT-5-Codex / o-series via `codex exec` CLI | ChatGPT Plus/Pro subscription | $0 incremental (subscription) |
+| **OpenAI** (API) | GPT-4o, GPT-4o-mini, GPT-5, o-series | API key | Pay-per-token |
 | **Google Gemini** | Gemini 2.5 Flash Lite, Flash, Pro | API key | Pay-per-token (Flash Lite is cheapest viable model) |
 | **Moonshot (Kimi)** | Kimi K2, K2 Turbo | API key (OpenAI-compatible) | Very cheap |
 | **Local (Ollama)** | Qwen3, Llama-3.3, Mistral, any local | None (localhost) | $0 |
 | **OpenRouter** (optional) | Any model on OpenRouter | API key | Marked up but unified |
+
+**Subscription-first principle:** the two $0-incremental paths (Anthropic CLI via Pro/Max, OpenAI Codex CLI via ChatGPT Plus/Pro) are the cheapest tier of all when configured. They route ahead of paid APIs for any task the subscription model can handle. This is the highest-leverage cost optimization in the system.
 
 ### Task-type → model tier mapping (default policy)
 
@@ -1045,11 +1085,12 @@ User configures providers in settings UI OR via `~/.kairos/providers.json`:
 {
   "providers": {
     "anthropic_cli": { "enabled": true, "priority": 1 },
+    "codex_cli":     { "enabled": true, "priority": 1 },
     "anthropic_api": { "enabled": false },
-    "openai": { "enabled": true, "api_key_env": "OPENAI_API_KEY", "priority": 2 },
-    "gemini": { "enabled": true, "api_key_env": "GEMINI_API_KEY", "priority": 3 },
-    "kimi": { "enabled": false },
-    "ollama": { "enabled": true, "base_url": "http://localhost:11434", "priority": 4 }
+    "openai":        { "enabled": true, "api_key_env": "OPENAI_API_KEY", "priority": 3 },
+    "gemini":        { "enabled": true, "api_key_env": "GEMINI_API_KEY", "priority": 4 },
+    "kimi":          { "enabled": false },
+    "ollama":        { "enabled": true, "base_url": "http://localhost:11434", "priority": 5 }
   },
   "default_policy": "cost_optimized",  // or "quality_optimized" or "latency_optimized"
   "monthly_budget_usd": 50
@@ -1060,12 +1101,224 @@ User configures providers in settings UI OR via `~/.kairos/providers.json`:
 
 - Custom thin router using each provider's official SDK (no Vercel AI SDK dependency)
 - Anthropic: existing `claude -p` subprocess for CLI mode, `@anthropic-ai/sdk` for API mode
+- **Codex CLI: `codex exec "<prompt>" -m <model>` subprocess** (similar wrapper pattern to `claude -p`); detects installation via `which codex`; degrades to disabled if absent
 - OpenAI: `openai` package
 - Gemini: `@google/genai`
 - Kimi: `openai` package with `baseURL` override (OpenAI-compatible API)
 - Ollama: `openai` package with `baseURL: http://localhost:11434/v1` (also OpenAI-compatible)
 
-~600 lines total. One file per provider adapter, one router orchestrator.
+~700 lines total. One file per provider adapter, one router orchestrator.
+
+---
+
+## Section 8.4: Research-Driven Architecture Refinements (2026-05-24)
+
+Background research surveyed 15+ proactive-agent projects and 4 academic papers. Full report at `docs/research/2026-05-24-proactive-agent-landscape.md`. The following refinements are now part of the architecture:
+
+### 8.4.1 — Tiered perception (KAIROS_SILENT pattern)
+
+The original Section 1 loop has the Narrator firing every 2-5 minutes unconditionally. **This is the cron-as-proactivity anti-pattern**. The refined loop:
+
+```
+EVENT BATCH arrives in EventBus
+        ↓
+TIER 1 — Cheap classifier (Haiku/Gemini Flash Lite, ~200 tokens, ~$0.00005)
+         Returns: SIGNIFICANT | ROUTINE | SILENT
+        ↓ (only if SIGNIFICANT)
+TIER 2 — Lightweight summarizer (mid-tier, ~500 tokens)
+         Returns: short description + significance score 0-1
+        ↓ (only if score > 0.6)
+TIER 3 — Full Narrator (mid-tier, ~1500 tokens) → publish 'narrator/summary'
+        ↓ (only if trigger threshold met)
+TIER 4 — Trigger Engine → Action composition → User-visible
+```
+
+**Effect**: ~95% of event batches are silently dropped at Tier 1. Cost per active hour drops from ~$0.30 to ~$0.02. Crucially, the agent stops producing routine summaries that train the user to ignore notifications — the failure mode that has killed every shipped "ambient AI" product.
+
+**Implementation note**: Phase A's current timer-driven Narrator becomes Tier 3. Phase B adds Tiers 1 + 2. The narrator's invocation flips from "fire every 5 min" to "fire when Tier 2 promotes the event batch."
+
+### 8.4.2 — STANDING_ORDERS.md (user-editable trigger rules)
+
+A plain markdown file at `~/.kairos/STANDING_ORDERS.md` that the user edits to declare what the daemon should watch for. Examples:
+
+```markdown
+- If my calendar has a meeting starting in 10 min and I'm not on a video call, remind me.
+- If my Spotify changes to a song I haven't heard before, note it in memory.
+- If someone DMs me on Slack and I haven't responded in 30 min, draft a reply.
+- Never proactively message me on Sunday before 11am.
+```
+
+The Tier 2 classifier reads STANDING_ORDERS.md on every significant batch and biases its score toward matches. Standing orders are first-class triggers, on par with the built-in catalog. This is the killer feature for power users — KAIROS becomes user-programmable in plain English.
+
+### 8.4.3 — Rate limiter: NONE (USER DECISION 2026-05-24)
+
+**Decision**: skip the rate limiter. Trust the Tier 1 + Tier 2 significance gate to filter signal from noise. If the perception tiers do their job, no hard cap is needed.
+
+**Risk acknowledged**: if Tier 1/2 are tuned too permissively in early Phase B, notification volume could spike. Mitigation: validate notification rate during Phase B validation gate (target: <10 unsolicited surfaces/day in normal usage). If Tier gates leak, tighten thresholds rather than adding a cap.
+
+The research warned this is a high-risk choice; the user accepts the risk to preserve flexibility for power-user usage.
+
+### 8.4.4 — Memory backend: CUSTOM BUILD (USER DECISION 2026-05-24)
+
+Keep Section 3's custom-build plan. Build KAIROS's own memory layers on top of GBrain patterns + pgvector hybrid retrieval. Reasons:
+- Full control of event schema (KAIROS's `world_state_events` table has a specific shape Engram doesn't know about)
+- Zero external runtime dependency
+- Long-term maintenance surface offset by zero version-skew risk
+- Hermes Dreaming and ContextAgent patterns can be implemented directly without adapter shims
+
+Phase B effort estimate revises upward (~2-3 weeks vs ~3 days with Engram), worth it for the control.
+
+**Still adopt** (these are patterns, not dependencies):
+- **Hermes Dreaming scoring formula**: `score = w1·relevance + w2·frequency + w3·recency + w4·diversity + w5·richness - w6·duplication`. Promote above threshold to semantic; prune below.
+- **Idle-triggered consolidation** (not cron): consolidation runs only when user idle >20 min AND on AC power. Use `IOPMAssertionCreateWithName` to detect.
+- **4-tier layout from MemOS**: L1 raw traces → L2 typed episodes → L3 semantic facts/notes → L4 crystallized skills.
+
+### 8.4.5 — Voice pipeline (USER DECISION 2026-05-24)
+
+**Decision**: Fork **kwindla/macos-local-voice-agents** as Phase E starter. Adapt for KAIROS's event bus + ModelRouter. Keep the proven low-latency stack.
+
+**Pipeline** (from kwindla):
+- **Silero VAD** (1ms/chunk, MIT) for voice activity detection
+- **WhisperKit** (Apple Silicon CoreML) for local STT
+- **WebRTC over UDP** (NOT WebSocket — too much jitter for <1s voice-to-voice loop)
+- **Barge-in handling** native via Pipecat: VAD mid-TTS cancels speech + LLM gen
+
+**TTS quality requirement (CRITICAL)**: Voice MUST feel realistic and human. Kokoro is acceptable for short confirmations/chimes, but proactive speech and conversational responses MUST use a top-tier TTS — KAIROS is a companion, not a robot. Provider order:
+1. **ElevenLabs** (default for proactive speech if user subscribes) — best-in-class natural voice, $5/mo starter tier handles realistic personal-use volume. Custom voice cloning available.
+2. **OpenAI TTS-1-HD** (default if no ElevenLabs key) — `nova` / `onyx` voices, ~$0.030/1k chars, very natural, fast.
+3. **Kokoro local** (only for sub-1-second confirmations, NOT for proactive narration) — free but obviously synthetic at length.
+4. **macOS native `say`** — fallback only, never the default. Robotic, not companion-grade.
+
+A "voice quality validation" task is part of Phase E's validation gate: 10 sample proactive utterances must be rated "would sound natural in conversation" by the user. If TTS feels robotic, default provider escalates to ElevenLabs.
+
+**Hotkey + overlay** (USER DECISION 2026-05-24): **Study** VocaMac's CGEventTap + MenuBarExtra + floating-indicator pattern, but **reimplement** for KAIROS (don't fork code). Reason: KAIROS's hotkey UX diverges (double-tap Control for hands-free, custom-glassmorphism oval rendering, different state machine), and inheriting VocaMac visuals would clash with the custom-glassmorphism direction in 8.4.6.
+
+References to study (don't fork):
+- VocaMac (https://github.com/jatinkrmalik/vocamac) — push-to-talk with Right Option hold; clean SwiftUI + CGEventTap implementation
+- OkClaw (https://okclaw.app) — overlay-on-hold pattern with smooth transitions
+
+### 8.4.6 — UI shell: SwiftUI required, but CUSTOM glassmorphism (not Apple's default)
+
+**Clarification from user 2026-05-24**: SwiftUI is the right shell technology, BUT KAIROS should NOT settle for Apple's default `.glassEffect(.regular)` material. The aesthetic target is "designer-grade glassmorphism" matching the visual richness of iOS-18-style Control Center: heavy frosted blur, stacked floating glass tiles with rounded pill shapes, vibrant colored backgrounds bleeding through, custom inner highlights + outer shadows giving real depth.
+
+**Rendering recipe** (custom, not stock):
+- **Base layer**: `NSVisualEffectView` with `.hudWindow` material AND a higher-than-default blur radius (custom CIFilter chain if needed)
+- **Glass tile pattern**: stacked rounded-rectangle layers per UI element (NOT one panel) — each tile is its own `NSPanel` or a SwiftUI shape with `.background(.ultraThinMaterial)` and additional gradient overlays
+- **Inner highlight**: linear gradient on top edge (`white opacity 0.15 → transparent`) inside each tile for the "lit edge" effect
+- **Outer shadow**: deep + diffuse drop shadow (`radius: 24, opacity: 0.25, offset: 0,12`) under each tile for floating-above-surface feel
+- **Pill corner radius**: 24-32px for cards, fully circular for action buttons
+- **Color refraction**: tiles slightly tinted toward the dominant color of the wallpaper behind them (sample with `NSScreen.mainScreen.colorSpace`)
+- **Motion**: spring physics with bouncy settle (SwiftUI `interpolatingSpring(stiffness: 280, damping: 22)`)
+
+**Why still SwiftUI** (and not Tauri/Electron):
+- Native blur runs at 120Hz on Apple Silicon; web `backdrop-filter: blur()` caps at ~30fps under load
+- True wallpaper color sampling needs native `CGWindowListCopyWindowInfo` access
+- 24/7 daemon RAM matters: SwiftUI shell ~15MB; Tauri ~50MB; Electron ~250MB
+- Direct `NSPanel.level = .floating` + `.canJoinAllSpaces` for always-on-top behavior
+- Tauri's WebKit cannot access `liquidGlass` material; matching the screenshot aesthetic in web would require canvas/Metal fallbacks defeating the cross-platform argument
+
+**OS targeting**: macOS 26+ native for full effect; macOS 14-25 fallback uses NSVisualEffectView + manual SwiftUI gradients (looks ~85% as good).
+
+**Reference screenshots from user**: iOS Control Center stacked glass tiles + nested glassmorphism cards with deep frosted blur. Aesthetic target is more "iOS-18 Control Center" than "macOS 26 Tahoe default." The HUD oval at the bottom of screen follows the same rendering recipe — small pill version of the same glass material.
+
+### 8.4.7 — ActivityWatch as 6th observer in Phase B (USER DECISION 2026-05-24)
+
+**Decision**: Add ActivityWatch as Phase B's 6th observer. Phase B includes:
+- Install/setup helper (detect ActivityWatch, prompt to install if missing — Homebrew formula exists)
+- New `src/daemon/proactive/observers/activityWatch.ts` consuming the REST API at `localhost:5600/api/0`
+- Polls window focus durations + AFK state + per-browser-tab time-on-site every 30s
+- Feeds enriched events into the bus alongside the 5 core observers
+
+Why valuable:
+- Tier 1 classifier benefits from "user has been on this app for 47 minutes" (signals deep work; suppress interruption) vs "user is bouncing between apps every 30s" (signals scattered; could benefit from a nudge)
+- AFK detection prevents triggers firing when user is away from desk
+- Per-tab dwell time enables "noticed you've been re-reading docs/auth.md three times in 10 min — open the related PRs?" triggers
+
+Failure mode: if ActivityWatch isn't installed, observer disables itself gracefully (no daemon crash).
+
+### What did NOT change
+
+- **5-stage loop semantics** — still OBSERVE → AGGREGATE → NARRATE → TRIGGER → ACT, but NARRATE is now gated by Tiers 1+2
+- **Multi-LLM router** — unchanged (Section 8). The Tier 1 classifier and Tier 2 summarizer ARE router calls, just to cheap tiers.
+- **Per-phase validation gate** — unchanged (Section 8.5)
+- **9 build phases (A-I)** — same scope, refined implementation per above
+
+### 8.4.8 — Clicky-derived patterns (2026-05-24)
+
+Deep dive on farzaa/clicky (6k stars, MIT, macOS voice companion) — full report at `docs/research/2026-05-24-clicky-deep-dive.md`. Clicky is **not proactive** (it's a better Siri button), but its engineering of voice + macOS + spatial grounding is production-quality and 5 patterns are worth adopting verbatim:
+
+**Steal (with phase mapping):**
+
+1. **Voice system prompt design** (`CompanionManager.swift:544-577`) → **Phase E**. The best TTS-aware LLM prompt structure in any open repo. Rules: "write for the ear not the eye", ban lists/bullets/markdown/symbols, spell out numbers ("for example" not "e.g."), default concise but escape hatch to go long, "plant a seed" instead of dead-end yes/no closer, never say "simply"/"just". KAIROS voice prompts inherit this verbatim.
+
+2. **Cloudflare Worker key-proxy** (`worker/src/index.ts`, ~142 lines) → **Phase E + Phase I**. Three routes: `/chat` → Anthropic, `/tts` → ElevenLabs, `/transcribe-token` → short-lived AssemblyAI token. Daemon binary holds zero API keys. Adopt for KAIROS voice + commercial packaging. **MUST add HMAC-SHA256 signed-request auth** (Clicky's anti-pattern — their open Worker burns credits when URL leaks).
+
+3. **TLS warmup HEAD request** (`ClaudeAPI.swift`, `warmUpTLSConnectionIfNeeded()`) → **Phase B retrofit candidate**. Fire background `HEAD /` at daemon start to pre-warm TLS session tickets. Eliminates cold-handshake latency on first real LLM call. ~10ms background cost, big perceived-latency win for narrator first tick.
+
+4. **Shared `URLSession` for WebSocket pools** → **Phase E (STT)**. Document FIRST in code: `URLSession` MUST be shared across AssemblyAI/streaming-STT sessions, NEVER recreated per-session. Clicky discovered the OS connection pool corrupts otherwise ("Socket is not connected" after rapid reconnects). This is the kind of footgun worth pre-empting.
+
+5. **`[POINT:x,y:label:screenN]` spatial grounding protocol** (`CompanionManager.swift:640-690`, `CompanionScreenCaptureUtility.swift`) → **Phase H (multi-modal) + Phase F (HUD)**. Production-tested LLM → pixel-coordinate protocol across multi-monitor setups. Coordinate system: screenshot pixels → display points → AppKit global, with per-display scaling + `isCursorScreen` prioritization. If KAIROS adds "show me where" capability (Phase H), this is the protocol.
+
+**Avoid (Clicky anti-patterns):**
+
+1. **Non-streaming TTS** — Clicky downloads full ElevenLabs audio before play (1-3s dead silence). KAIROS Phase E MUST stream TTS bytes to audio player as they arrive.
+2. **No memory architecture** — Clicky's #1 GitHub Issue. Phase B fixes this for KAIROS (custom memory layers).
+3. **Open unauthenticated proxy** — Clicky Worker has no auth, anyone burns their credits. KAIROS Worker MUST sign requests.
+4. **Polling timer for cursor position** — Clicky uses 16ms `Timer` for `NSEvent.mouseLocation`. Use `NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved)` instead.
+5. **Hardcoded hotkey** — Clicky's `Ctrl+Option` is uneditable, top UX complaint. KAIROS exposes hotkey binding from day-1 (Phase E config or STANDING_ORDERS.md).
+6. **No cancellation mid-TTS** — When user starts new utterance, Clicky has awkward gap. KAIROS Phase E: explicit cancellation + immediate mic activation (barge-in, native in Pipecat — already locked in 8.4.5).
+
+### Final decision summary (2026-05-24 user sign-off)
+
+| Pivot | Decision |
+|---|---|
+| Tiered perception (KAIROS_SILENT) | **Adopted** — Phase B implements Tiers 1+2 wrapping Phase A's narrator (Phase A code unchanged) |
+| Rate limiter | **Skipped** — trust the significance gate; validate volume during Phase B gate |
+| STANDING_ORDERS.md | **Adopted** — plain markdown, first-class trigger source |
+| STANDING_ORDERS grammar | **Hybrid** — free-form English authoring + LLM compile step → structured triggers stored in DB |
+| Memory backend tech | **SQLite + sqlite-vec extension** — single embedded DB, FTS5 lexical + vector semantic hybrid retrieval. "Human-like" memory comes from the SCHEMA layered on top (4-tier MemOS L1-L4 + Hermes Dreaming consolidation + decay/forgetting curves), not the engine. |
+| TLS warmup retrofit | **Adopted in Phase B** — 10-line `HEAD /` background fire at daemon start in each network provider adapter (skip anthropic_cli, codex_cli — subprocess-based, no socket reuse benefit) |
+| Voice pipeline (Phase E) | **Fork kwindla** for low-latency stack; voice must feel human-realistic (ElevenLabs / OpenAI TTS-1-HD primary; Kokoro/say only for sub-1s confirmations) |
+| Hotkey + overlay (Phase E) | **Study VocaMac, reimplement** — custom glassmorphism direction precludes fork |
+| Voice prompt design (Phase E) | **Adopt Clicky's voice system prompt** verbatim (8.4.8 #1) |
+| Cloudflare Worker proxy (Phase E + I) | **Adopt with HMAC auth** — Clicky's open Worker is the anti-pattern to avoid |
+| UI shell (Phase F) | **SwiftUI required** for performance + native blur; **custom glassmorphism** rendering (not stock `.glassEffect`), matching iOS-18-Control-Center aesthetic from user's reference screenshots |
+| Screen pointing (Clicky-style) | **DROPPED** — KAIROS lives in your ear + messages, not as a cursor flying around the screen |
+| ActivityWatch (Phase B) | **Adopted** as 6th observer |
+
+---
+
+## Section 8.5: Per-Phase Validation Gate (NEW)
+
+**Every phase ships with explicit validation BEFORE its tag is cut.** No phase is "done" merely because its tests pass — each must demonstrate the user-visible capability working in the real environment.
+
+### Validation requirements per phase
+
+| Phase | Validation type | What "validated" looks like |
+|---|---|---|
+| **A** (Local observers + router) | Smoke test script + manual app/tab switch | `bun run scripts/smoke-proactive.ts` runs 5 min; observed events for every observer; ≥1 narrative produced; cost stays under 1¢ |
+| **B** (Memory layers) | Replay test + LLM-judged recall quality | Replay 7 days of events; verify episodic→semantic consolidation; ask 5 recall questions, judge accuracy |
+| **C** (Trigger Engine + Autonomy) | Trigger catalog walkthrough | Each built-in trigger fires correctly in a scripted scenario; autonomy gates approve/deny correctly per tier |
+| **D** (OAuth connectors) | Live round-trip on each connector | Send + receive on Gmail/Slack/GitHub/Calendar with real OAuth tokens; verify rate limits respected |
+| **E** (Voice — Wispr-style) | Hands-on hotkey test | Hold-to-speak transcribes; double-tap toggles hands-free; AI speaks back via TTS; oval HUD shows recording state |
+| **F** (Liquid Glass UI) | Visual review on real macOS | Menu bar item + floating HUD render with glass blur; matches Wispr Flow's minimal footprint; hotkey overlay summons HUD |
+| **G** (Self-evolution Hermes-style) | 24h autonomous run | Daemon runs unattended; produces ≥1 self-generated skill; gap detector flags ≥1 missing capability; no cost overruns |
+| **H** (Multi-modal vision) | Screen-shot interpretation test | Capture screenshots from 5 apps; vision model produces accurate descriptions; integrates with narrator |
+| **I** (Commercial packaging) | Install on clean Mac | Pkg installs via Sparkle; provider config wizard works; Stripe sign-up + tier gating verified |
+
+### Validation gate enforcement
+
+1. Validation script lives in `scripts/validate-phase-<X>.sh` (or `.ts`)
+2. Validation runs at the END of each phase plan as its FINAL task
+3. If validation fails: the phase is NOT tagged. We diagnose, fix, re-validate.
+4. Validation results are recorded in `CHANGELOG.md` under the phase entry — what was tested, observed numbers, any caveats
+5. UI phases (F, parts of E) require a **manual visual review** that the user signs off on. Other phases can be fully automated.
+
+### Why this matters
+
+Tests prove code correctness. Validation proves **feature correctness**. KAIROS is a user-facing AI companion; "55 tests pass" doesn't prove a user can actually talk to it. Every phase ends with "demo it to yourself before declaring victory."
+
+This rule applies retroactively: Phase A's tag (`v0.1.0-phase-a`) is provisional until the user runs `scripts/smoke-proactive.ts` and the CHANGELOG is updated with observed event counts + narratives. Phase A is "code-complete" but not "validated-complete" until that runs.
 
 ---
 

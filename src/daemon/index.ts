@@ -35,6 +35,31 @@ import { MemoryStore } from './memory'
 import { Voice } from './voice'
 import { sendMacNotification, setSandboxDir as setNotifySandboxDir } from './notify'
 import { postToDiscord, isDiscordConfigured } from './discord'
+import { buildRouter } from './llm'
+import { EventBus } from './proactive/eventBus'
+import { StateSnapshot } from './proactive/stateSnapshot'
+import { ObserverRegistry } from './proactive/observerRegistry'
+import { Narrator } from './proactive/narrator'
+import { FocusAppObserver } from './proactive/observers/focusApp'
+import { BrowserTabsObserver } from './proactive/observers/browserTabs'
+import { ClipboardObserver } from './proactive/observers/clipboard'
+import { FileEventsObserver } from './proactive/observers/fileEvents'
+import { CalendarLocalObserver } from './proactive/observers/calendarLocal'
+import { initMemorySchema } from './memory/schema'
+import { Embedder } from './memory/embeddings'
+import { WorkingMemory } from './memory/workingMemory'
+import { EpisodicMemory } from './memory/episodicMemory'
+import { SemanticMemory } from './memory/semanticMemory'
+import { Dreamer } from './memory/dreamer'
+import { IdleDetector } from './memory/idleDetector'
+import { Tier1Classifier } from './perception/tier1Classifier'
+import { Tier2Summarizer } from './perception/tier2Summarizer'
+import { PerceptionPipeline } from './perception/perceptionPipeline'
+import { OrdersParser } from './orders/parser'
+import { OrdersCompiler } from './orders/compiler'
+import { OrdersRuntime } from './orders/runtime'
+import { ensureSeedFile } from './orders/seedFile'
+import { ActivityWatchObserver } from './proactive/observers/activityWatch'
 
 const VERSION = '0.2.0'
 
@@ -296,6 +321,86 @@ async function main(): Promise<void> {
   // 10. Start the tick scheduler
   scheduler.start()
 
+  // 10b. Proactive subsystem (ModelRouter + EventBus + observers + Narrator)
+  let proactiveStop: (() => Promise<void>) | null = null
+  if (config.proactive.enabled) {
+    const router = buildRouter(db, config.proactive.providerConfigPath)
+    const bus = new EventBus(db)
+    const snapshot = new StateSnapshot(bus)
+    const registry = new ObserverRegistry(bus)
+
+    registry.register(new FocusAppObserver(bus))
+    registry.register(new BrowserTabsObserver(bus))
+    registry.register(new ClipboardObserver(bus))
+    registry.register(new FileEventsObserver(bus))
+    registry.register(new CalendarLocalObserver(bus))
+    registry.register(new ActivityWatchObserver(bus))
+
+    await registry.startAll()
+    const narrator = new Narrator(bus, snapshot, router, {
+      intervalMs: Number.MAX_SAFE_INTEGER, // Phase B: pipeline drives narrator.tick() instead
+    })
+    // DO NOT call await narrator.start() — leave the timer dormant.
+    // The PerceptionPipeline (added below) calls narrator.tick() directly.
+    log(`Proactive subsystem active: ${registry.list().length} observers + narrator`)
+
+    // ── Phase B: Memory + Perception + Orders subsystems ──────────────
+    let memoryStop: (() => Promise<void>) | null = null
+    if (config.memory.enabled) {
+      initMemorySchema(db)
+      const embedder = new Embedder()
+      const working = new WorkingMemory(bus, { windowMs: 10 * 60_000, maxEvents: 500 })
+      const episodic = new EpisodicMemory(db)
+      const semantic = new SemanticMemory(db)
+      const dreamer = new Dreamer(db, episodic, semantic, router, { embedder: (t: string) => embedder.embed(t) })
+      const idle = new IdleDetector()
+
+      const dreamTimer = setInterval(async () => {
+        try {
+          if (await idle.shouldDream()) {
+            await dreamer.consolidate({ maxEpisodes: 50 })
+          }
+        } catch (err) { logError('Dreamer tick failed', err) }
+      }, config.memory.dreamIntervalMs)
+
+      // Standing orders subsystem
+      let ordersRuntime: OrdersRuntime | null = null
+      if (config.orders.enabled) {
+        ensureSeedFile(config.orders.filePath)
+        const ordersParser = new OrdersParser(config.orders.filePath)
+        const ordersCompiler = new OrdersCompiler(db, router)
+        ordersRuntime = new OrdersRuntime(ordersParser, ordersCompiler, { pollMs: 5000 })
+        await ordersRuntime.start()
+      }
+
+      // Perception pipeline
+      let pipeline: PerceptionPipeline | null = null
+      if (config.perception.enabled) {
+        const tier1 = new Tier1Classifier(router)
+        const tier2 = new Tier2Summarizer(router)
+        pipeline = new PerceptionPipeline(
+          db, working, tier1, tier2, narrator, episodic,
+          () => ordersRuntime?.text() ?? '',
+          { pollMs: config.perception.pipelinePollMs },
+        )
+        pipeline.start()
+        log('Perception pipeline active: Tier1 → Tier2 → Narrator')
+      }
+
+      memoryStop = async () => {
+        clearInterval(dreamTimer)
+        if (pipeline) pipeline.stop()
+        if (ordersRuntime) ordersRuntime.stop()
+      }
+    }
+
+    proactiveStop = async () => {
+      await narrator.stop()
+      await registry.stopAll()
+      if (memoryStop) await memoryStop()
+    }
+  }
+
   // 11. Write ready flag (shim watches for this)
   writeReadyFlag(config.sandboxDir)
 
@@ -303,6 +408,7 @@ async function main(): Promise<void> {
   setupSignalHandlers(() => {
     discordBot?.stop()
     scheduler.stop()
+    if (proactiveStop) void proactiveStop()
     gracefulShutdown({ sandboxDir: config.sandboxDir, db, server })
   })
 

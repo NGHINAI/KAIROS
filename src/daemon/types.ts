@@ -44,6 +44,23 @@ export type Config = {
     collectionIntervalTicks: number
     metricsWindowHours: number
   }
+  proactive: {
+    enabled: boolean
+    narratorIntervalMs: number
+    providerConfigPath: string
+  }
+  memory: {
+    enabled: boolean
+    dreamIntervalMs: number
+  }
+  perception: {
+    enabled: boolean
+    pipelinePollMs: number
+  }
+  orders: {
+    enabled: boolean
+    filePath: string
+  }
 }
 
 // ─── Database row types ─────────────────────────────────────────────
