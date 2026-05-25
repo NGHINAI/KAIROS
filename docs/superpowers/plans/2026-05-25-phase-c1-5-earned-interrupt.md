@@ -19,6 +19,58 @@
 
 **Sequencing note:** This sub-phase inserts BETWEEN C.2 (just shipped) and C.3 (planned next). Phase F therefore moves ~2 weeks later, accepted because shipping more capability without restraint would compound the C.1 incident.
 
+**C.3 commitment (added 2026-05-25 per user)**: The C.3 plan will include the **Persona-Awareness Loop** — an LLM call that fills the `personal_relevance` score component by asking "given everything KAIROS knows about this user, is this thing they want to be told about?" using L3 semantic memory facts. For C.1.5 we use a static 0.5 default for that component; C.3 wires the live LLM check.
+
+---
+
+## ⚠️ Critical safeguards — never lose important notifications
+
+Restraint without safeguards is censorship. These 6 protections ensure C.1.5 NEVER swallows something the user genuinely needed to see. Each is implemented as part of the relevant task below; they're listed here together so the design intent is unambiguous.
+
+### Safeguard 1: Hard urgency floor (explicit list)
+
+Certain event classes are ALWAYS urgent regardless of any score computation. The `UrgencyFloor` module (new — see Task 6.5) maintains an explicit list:
+
+- **Calendar event starting in < 5 min** → force urgent
+- **Clipboard matches password/API-key/private-key regex** → force urgent
+- **Active task in flight just errored** → force urgent
+- **Direct @mention of the user** in any incoming message → force urgent
+- **STANDING_ORDER rule body literally contains "urgent" / "ASAP" / "now"** → force urgent
+- **Trigger explicitly marked `always_interrupt: true`** by the user → force urgent
+- **System critical** (low disk, security event, screen recording detected) → force urgent
+
+When `UrgencyFloor.classify(request)` returns `true`, the request bypasses karma suspension, cooldown, focus check, AND rate-limit checks. It goes straight to `interrupt` mode regardless of the computed score. This is the "fire alarm" path.
+
+### Safeguard 2: Karma protection for high-value triggers
+
+A trigger that the user has ACTED ON multiple times must not auto-suspend just because they dismissed it a few times. The auto-suspend rule becomes:
+
+```
+auto_suspend_if: (dismissed_in_window >= 3) AND (acted_on_total < dismissed_in_window × 2)
+```
+
+Concretely: if user dismissed 3 times but acted on 6 times, do NOT suspend — the trigger is net-valuable. KarmaStore.maybeAutoSuspend() (Task 2) implements this check.
+
+### Safeguard 3: Manual `always_interrupt` override per trigger
+
+Add `always_interrupt BOOLEAN` field to `compiled_orders_triggers`. User can set via STANDING_ORDERS authoring ("**ALWAYS** notify me when X") or via the inbox UI (when a trigger fires, user can right-click "always interrupt me with this"). UrgencyFloor consults this field.
+
+### Safeguard 4: Reactivation prompt after auto-suspend
+
+When KarmaStore auto-suspends a trigger, write a "needs review" entry to the inbox surface that prompts the user once: *"I've stopped firing the 'X' trigger after 3 dismissals. Want me to reactivate it?"* Don't silently keep it off forever.
+
+### Safeguard 5: Dismissal sense check for high-urgency items
+
+If the user dismisses an item with `urgency >= 0.8`, ActionExecutor surfaces a follow-up: *"That looked time-sensitive. Want me to suspend or keep alerting?"* Captures whether the dismissal was accidental.
+
+### Safeguard 6: Always-visible badge for queued digest items
+
+Digest tier items shouldn't be invisible until the scheduled delivery time. The HUD oval shows a small badge count (`📬 5 waiting`) for any items in the queue. User can long-press or click to preview the queued items at any moment.
+
+These 6 safeguards are non-negotiable. Each is a "fail safe" against the over-correction failure mode.
+
+
+
 ---
 
 ## File Structure
@@ -693,11 +745,25 @@ export class KarmaStore {
     const recent = (this.db.query(
       'SELECT COUNT(*) as n FROM restraint_dismissal_log WHERE trigger_id = ? AND ts > ?',
     ).get(triggerId, cutoff) as { n: number }).n
-    if (recent >= this.config.auto_suspend_after_dismissals) {
-      // Suspend for 7 days; user can manually clear via CLI/HUD
-      const suspendUntil = Date.now() + 7 * 24 * 3600_000
-      this.db.run('UPDATE restraint_karma SET suspended_until = ? WHERE trigger_id = ?', [suspendUntil, triggerId])
+
+    if (recent < this.config.auto_suspend_after_dismissals) return
+
+    // Safeguard 2: karma protection. If the trigger has been ACTED ON
+    // enough times to justify continued firing, don't suspend even when
+    // dismissal threshold is crossed. Net-valuable triggers must survive
+    // sporadic dismissals.
+    const k = this.get(triggerId)
+    const actedOnTotal = k?.acted_on ?? 0
+    if (actedOnTotal >= recent * 2) {
+      // High-value trigger — don't suspend. Log a "reviewed" flag for
+      // tuning visibility but allow continued firing.
+      return
     }
+
+    // Suspend for 7 days; user can manually clear via CLI/HUD/reactivation
+    // prompt (Safeguard 4) surfaces in inbox.
+    const suspendUntil = Date.now() + 7 * 24 * 3600_000
+    this.db.run('UPDATE restraint_karma SET suspended_until = ? WHERE trigger_id = ?', [suspendUntil, triggerId])
   }
 }
 ```
@@ -1119,6 +1185,208 @@ git commit -m "feat(restraint): RateLimiter — hard caps with urgent-override b
 ```
 
 Expected: 5/5 tests pass.
+
+---
+
+## Task 5.5: Urgency floor (the "fire alarm" path) [Safeguard 1, 3]
+
+**Files:**
+- Create: `src/daemon/restraint/urgencyFloor.ts`
+- Test:  `src/daemon/restraint/urgencyFloor.test.ts`
+
+The `UrgencyFloor` module maintains an EXPLICIT list of conditions that ALWAYS produce an urgent interrupt regardless of any other gating. This is the safety valve — without it, restraint becomes censorship. The pipeline consults UrgencyFloor FIRST, before any suppression check. If urgent → bypass karma/cooldown/focus/rate-limit, go straight to interrupt mode.
+
+### Test
+
+```typescript
+// src/daemon/restraint/urgencyFloor.test.ts
+import { describe, it, expect } from 'bun:test'
+import { UrgencyFloor } from './urgencyFloor'
+import type { ActionRequest } from '../agency/types'
+
+function req(intent: string, args: Record<string, unknown> = {}, extras: Partial<ActionRequest> = {}): ActionRequest {
+  return {
+    request_id: 'r', intent_id: intent, args, reasoning: '',
+    requested_at: Date.now(), ...extras,
+  }
+}
+
+describe('UrgencyFloor', () => {
+  it('returns false for ordinary request', () => {
+    const f = new UrgencyFloor()
+    expect(f.classify(req('notify', { title: 'hi' }))).toBe(false)
+  })
+
+  it('returns true when intent is system_critical', () => {
+    const f = new UrgencyFloor()
+    expect(f.classify(req('system_critical', { kind: 'low_disk' }))).toBe(true)
+  })
+
+  it('returns true when request marks always_interrupt', () => {
+    const f = new UrgencyFloor()
+    expect(f.classify(req('notify', {}, { always_interrupt: true } as any))).toBe(true)
+  })
+
+  it('detects calendar event starting in < 5 min', () => {
+    const f = new UrgencyFloor()
+    const soon = Date.now() + 3 * 60_000   // 3 min from now
+    expect(f.classify(req('notify', { kind: 'calendar', starts_at: soon }))).toBe(true)
+  })
+
+  it('does not flag calendar event > 5 min away', () => {
+    const f = new UrgencyFloor()
+    const later = Date.now() + 30 * 60_000   // 30 min
+    expect(f.classify(req('notify', { kind: 'calendar', starts_at: later }))).toBe(false)
+  })
+
+  it('detects password-like content in clipboard payload', () => {
+    const f = new UrgencyFloor()
+    // SK_-style API key
+    expect(f.classify(req('add_to_memory', { kind: 'clipboard', body: 'sk-proj-AbCdEf1234567890XyZ12345678' }))).toBe(true)
+    // GitHub PAT
+    expect(f.classify(req('add_to_memory', { kind: 'clipboard', body: 'ghp_AbCdEf1234567890XyZ12345678901234' }))).toBe(true)
+    // SSH private key marker
+    expect(f.classify(req('add_to_memory', { kind: 'clipboard', body: '-----BEGIN PRIVATE KEY-----' }))).toBe(true)
+    // Plain text — not urgent
+    expect(f.classify(req('add_to_memory', { kind: 'clipboard', body: 'hello world' }))).toBe(false)
+  })
+
+  it('detects direct @mention of user', () => {
+    const f = new UrgencyFloor({ user_handles: ['nirmal', 'nghinai'] })
+    expect(f.classify(req('notify', { body: 'Hey @nirmal can you check this?' }))).toBe(true)
+    expect(f.classify(req('notify', { body: 'Hey @somebody-else check this' }))).toBe(false)
+  })
+
+  it('detects urgent keyword in reasoning', () => {
+    const f = new UrgencyFloor()
+    expect(f.classify(req('notify', {}, { reasoning: 'URGENT: server is down' }))).toBe(true)
+    expect(f.classify(req('notify', {}, { reasoning: 'ASAP please review' }))).toBe(true)
+    expect(f.classify(req('notify', {}, { reasoning: 'fyi at some point' }))).toBe(false)
+  })
+
+  it('detects active-task error pattern', () => {
+    const f = new UrgencyFloor()
+    expect(f.classify(req('notify', { kind: 'task_error', task_id: 't1', error: 'something failed' }))).toBe(true)
+  })
+})
+```
+
+### Implementation
+
+```typescript
+// src/daemon/restraint/urgencyFloor.ts
+// Explicit list of conditions that ALWAYS produce an urgent interrupt
+// regardless of any score, suspension, cooldown, or focus state.
+//
+// This is the safety valve against the over-correction failure mode of
+// the restraint architecture. Without UrgencyFloor, an over-tuned
+// restraint stack can silence genuinely important things.
+//
+// Categories (each is an opt-in classifier):
+//   - System-critical intents (low_disk, security, error)
+//   - Explicit `always_interrupt` flag on the request
+//   - Calendar events starting in < 5 min
+//   - Password / API key / private key in clipboard
+//   - Direct @mention of the user in any message body
+//   - URGENT / ASAP keyword in reasoning
+//   - Active-task errors
+//
+// Adding to this list should require explicit deliberation. Each addition
+// is a NEW way the restraint stack can be bypassed.
+
+import type { ActionRequest } from '../agency/types'
+
+export type UrgencyFloorOptions = {
+  user_handles?: string[]      // for @mention detection (e.g., ['nirmal', 'nghinai'])
+  imminent_meeting_window_ms?: number  // default 5 min
+}
+
+const SYSTEM_CRITICAL_INTENTS = new Set([
+  'system_critical',
+  'security_alert',
+  'task_error',
+])
+
+const URGENT_KEYWORDS = /\b(urgent|asap|now|critical|emergency|immediately)\b/i
+
+// Common secret patterns — extend conservatively
+const SECRET_PATTERNS: RegExp[] = [
+  /sk-[a-zA-Z0-9_-]{20,}/,                          // OpenAI / Anthropic API key
+  /ghp_[a-zA-Z0-9]{20,}/,                           // GitHub personal access token
+  /github_pat_[a-zA-Z0-9_]{20,}/,                   // GitHub fine-grained PAT
+  /xox[bpoa]-[a-zA-Z0-9-]+/,                        // Slack token
+  /-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----/,  // SSH/PGP private keys
+  /AIza[0-9A-Za-z_-]{35}/,                          // Google API key
+  /AKIA[A-Z0-9]{16}/,                               // AWS access key id
+]
+
+export class UrgencyFloor {
+  private userHandles: string[]
+  private imminentWindowMs: number
+
+  constructor(opts?: UrgencyFloorOptions) {
+    this.userHandles = opts?.user_handles ?? []
+    this.imminentWindowMs = opts?.imminent_meeting_window_ms ?? 5 * 60_000
+  }
+
+  classify(request: ActionRequest): boolean {
+    // 1. Explicit always_interrupt flag on request OR trigger config
+    if ((request as any).always_interrupt === true) return true
+
+    // 2. System-critical intent class
+    if (SYSTEM_CRITICAL_INTENTS.has(request.intent_id)) return true
+
+    // 3. Calendar event imminent
+    const kind = (request.args as any)?.kind
+    if (kind === 'calendar') {
+      const startsAt = (request.args as any)?.starts_at
+      if (typeof startsAt === 'number' && startsAt - Date.now() < this.imminentWindowMs && startsAt > Date.now()) {
+        return true
+      }
+    }
+
+    // 4. Active-task error
+    if (kind === 'task_error') return true
+
+    // 5. Password / API key / private key in clipboard
+    if (kind === 'clipboard') {
+      const body = (request.args as any)?.body ?? (request.args as any)?.text ?? ''
+      if (typeof body === 'string') {
+        for (const re of SECRET_PATTERNS) {
+          if (re.test(body)) return true
+        }
+      }
+    }
+
+    // 6. Direct @mention of user in any body
+    if (this.userHandles.length > 0) {
+      const body = (request.args as any)?.body ?? ''
+      if (typeof body === 'string') {
+        for (const h of this.userHandles) {
+          // Word-boundary match on @handle to avoid partial-name false positives
+          const re = new RegExp(`@${h}\\b`, 'i')
+          if (re.test(body)) return true
+        }
+      }
+    }
+
+    // 7. URGENT/ASAP keyword in reasoning
+    if (URGENT_KEYWORDS.test(request.reasoning)) return true
+
+    return false
+  }
+}
+```
+
+### Run + commit
+
+```bash
+bun test src/daemon/restraint/urgencyFloor.test.ts
+git add src/daemon/restraint/urgencyFloor.ts src/daemon/restraint/urgencyFloor.test.ts
+git commit -m "feat(restraint): UrgencyFloor — explicit fire-alarm path (Safeguards 1, 3)"
+```
+
+Expected: 9/9 tests pass.
 
 ---
 
@@ -1758,8 +2026,9 @@ describe('RestraintPipeline', () => {
     const router = new DeliveryRouter(cfg)
     const digest = new DigestComposer(db)
     const dryRun = new DryRunMode(db, cfg)
+    const urgencyFloor = new (require('./urgencyFloor').UrgencyFloor)()
 
-    pipeline = new RestraintPipeline({ config: cfg, focus, karma, cooldown, rateLimiter, scorer, router, digest, dryRun })
+    pipeline = new RestraintPipeline({ config: cfg, urgencyFloor, focus, karma, cooldown, rateLimiter, scorer, router, digest, dryRun })
   })
 
   it('high-urgency request → interrupt', async () => {
@@ -1829,6 +2098,50 @@ describe('RestraintPipeline', () => {
     expect(overflow.mode).toBe('suppressed')
     expect(overflow.reason).toMatch(/rate/i)
   })
+
+  // SAFEGUARD 1 REGRESSION: urgency floor must bypass ALL gates, even
+  // suspension + cooldown + rate-limit + deep focus. The fire-alarm path.
+  it('SAFEGUARD: urgency-floor request bypasses karma suspension', async () => {
+    const karma = (pipeline as any).deps.karma as KarmaStore
+    karma.recordDismissal('trig-fire'); karma.recordDismissal('trig-fire'); karma.recordDismissal('trig-fire')
+    expect(karma.isSuspended('trig-fire')).toBe(true)
+    // Send a system_critical request — UrgencyFloor recognizes this
+    const decision = await pipeline.evaluate(
+      { request_id: 'r', intent_id: 'system_critical', args: { kind: 'low_disk' }, source_trigger_id: 'trig-fire', reasoning: 'disk full', requested_at: Date.now() },
+      { urgency: 1.0, rule_match_strength: 1.0, personal_relevance: 1.0, novelty: 1.0, urgent: false },
+    )
+    expect(decision.mode).toBe('interrupt')
+    expect(decision.reason).toMatch(/urgency floor/i)
+  })
+
+  it('SAFEGUARD: urgency-floor request bypasses cooldown', async () => {
+    const r1 = makeReq('notify', 'trig-x')
+    const d1 = await pipeline.evaluate(r1, { urgency: 1.0, rule_match_strength: 1.0, personal_relevance: 1.0, novelty: 1.0, urgent: false })
+    pipeline.recordDelivered('trig-x', d1.mode)
+    // Immediate retry: ordinary request would be cooldown-suppressed
+    const ordinary = await pipeline.evaluate(makeReq('notify', 'trig-x'), { urgency: 1.0, rule_match_strength: 1.0, personal_relevance: 1.0, novelty: 1.0, urgent: false })
+    expect(ordinary.mode).toBe('suppressed')
+    // But urgency-floor (URGENT in reasoning) breaks through
+    const urgent = await pipeline.evaluate(
+      { ...makeReq('notify', 'trig-x'), reasoning: 'URGENT: server down' },
+      { urgency: 1.0, rule_match_strength: 1.0, personal_relevance: 1.0, novelty: 1.0, urgent: false },
+    )
+    expect(urgent.mode).toBe('interrupt')
+  })
+
+  it('SAFEGUARD: urgency-floor request bypasses deep focus', async () => {
+    const deepFocus = new FocusDetector(cfg, {
+      now: () => new Date('2026-05-25T10:00:00').getTime(),
+      probeFocusedApp: async () => ({ app: 'VS Code', duration_sec: 1800 }),
+      probeMeeting: async () => false,
+    })
+    const p = new RestraintPipeline({ ...((pipeline as any).deps), focus: deepFocus })
+    const decision = await p.evaluate(
+      { request_id: 'r', intent_id: 'task_error', args: { kind: 'task_error', task_id: 't1', error: 'oops' }, reasoning: 'task failed', requested_at: Date.now() },
+      { urgency: 1.0, rule_match_strength: 1.0, personal_relevance: 1.0, novelty: 1.0, urgent: false },
+    )
+    expect(decision.mode).toBe('interrupt')
+  })
 })
 ```
 
@@ -1839,6 +2152,7 @@ describe('RestraintPipeline', () => {
 // The orchestrator. Wires all restraint layers in order.
 //
 // Order matters:
+//   0. URGENCY FLOOR check — if urgent → bypass ALL gates → interrupt
 //   1. Dry-run check (intercept before any side effects)
 //   2. Karma suspension check (drop suspended triggers entirely)
 //   3. Cooldown check (per-trigger debounce)
@@ -1849,6 +2163,8 @@ describe('RestraintPipeline', () => {
 //   8. Karma record fire
 //
 // Each step can short-circuit to 'suppressed' or 'dry_run' or 'log_only'.
+// Step 0 is the SAFEGUARD: explicit urgency always wins. Never silence
+// something genuinely important.
 
 import type { ActionRequest } from '../agency/types'
 import type { DeliveryDecision, RestraintConfig, ScoreComponents } from './types'
@@ -1861,8 +2177,11 @@ import type { DeliveryRouter } from './deliveryRouter'
 import type { DigestComposer } from './digestComposer'
 import type { DryRunMode } from './dryRunMode'
 
+import type { UrgencyFloor } from './urgencyFloor'
+
 export type RestraintDeps = {
   config: RestraintConfig
+  urgencyFloor: UrgencyFloor    // NEW — the fire-alarm path
   focus: FocusDetector
   karma: KarmaStore
   cooldown: CooldownTracker
@@ -1887,6 +2206,19 @@ export class RestraintPipeline {
 
   async evaluate(request: ActionRequest, inputs: EvaluateInputs): Promise<DeliveryDecision> {
     const triggerId = request.source_trigger_id ?? request.intent_id
+
+    // 0. URGENCY FLOOR — explicit fire-alarm path. If this classifier
+    // returns true, bypass karma/cooldown/focus/rate-limit entirely and
+    // route straight to interrupt. This is Safeguard 1 — never silence
+    // something genuinely important even when restraint says otherwise.
+    if (this.deps.urgencyFloor.classify(request)) {
+      this.deps.karma.recordFire(triggerId)
+      return {
+        mode: 'interrupt',
+        score: null,
+        reason: 'urgency floor matched — bypassing restraint gates',
+      }
+    }
 
     // 1. Dry-run check
     if (this.deps.dryRun.isInDryRun(triggerId)) {
