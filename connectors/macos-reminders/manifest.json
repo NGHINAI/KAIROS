@@ -1,0 +1,17 @@
+{
+  "dxt_version": "0.1",
+  "name": "macos-reminders",
+  "display_name": "macOS Reminders",
+  "version": "0.1.0",
+  "description": "List, add, and complete reminders in the default macOS Reminders list",
+  "author": { "name": "KAIROS" },
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.ts"
+  },
+  "tools": [
+    { "name": "list_reminders", "description": "List incomplete reminders" },
+    { "name": "add_reminder", "description": "Add a new reminder" },
+    { "name": "complete_reminder", "description": "Mark a reminder completed" }
+  ]
+}
