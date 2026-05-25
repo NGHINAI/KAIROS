@@ -1,3 +1,93 @@
+## v0.3.2-phase-c1-5 (2026-05-25) — The Earned Interrupt Architecture
+
+Direct response to the 2026-05-25 incident where the daemon produced 4,454 macOS notifications in 2 hours. KAIROS now has a structural restraint layer that **earns** the right to interrupt the user. Inserted between C.2 and C.3.
+
+**The principle (now inviolable in spec)**: Silence is the default. Every notification opts IN to firing. The agent measures its own annoyance (dismissal rate) and adapts.
+
+### Added — the 8-layer restraint stack + 6 safeguards
+
+#### Restraint pipeline (`src/daemon/restraint/`)
+- **FocusDetector** — deep work (>25min single-app) / meeting / quiet hours (10pm-7am) / manual pause via hotkey
+- **KarmaStore** — tracks fires, deliveries, dismissals, actions per trigger. **Auto-suspends triggers dismissed 3 times in 7 days** — UNLESS they've been acted on ≥ 2× more than dismissed (Safeguard #2: high-value trigger protection)
+- **Coalescer** — collapses N events from same source within 60s into 1 batch (kills the "git push = 100 file-events" amplification)
+- **CooldownTracker** — per-trigger debounce, default 5 min, per-id overridable
+- **RateLimiter** — hard caps: 8 interrupts/day, 2/hour, 6 surfaces/hour. SQLite-backed delivery log. Urgent bypasses caps.
+- **ActionScorer** — weighted significance computation with explainable components (rule_match × urgency × personal_relevance × context_availability × novelty − dismissal_penalty), clamped [0,1]
+- **DeliveryRouter** — score → interrupt (≥0.9) / surface (≥0.7) / digest (≥0.4) / log_only. Digest items routed to morning / lunch / evening slots based on time of day.
+- **DigestComposer** — Apple-style notification summary. Bundles low-mid-score items into morning/lunch/evening glass cards.
+- **DryRunMode** — new STANDING_ORDERS rules observe for 24h before going live. Counts would-have-fired. Prevents the "add rule, get 100 notifs" experience.
+
+#### The 6 safeguards (ensures restraint NEVER loses important notifications)
+
+1. **UrgencyFloor module** (the "fire alarm" path) — explicit list of conditions that ALWAYS produce interrupt regardless of any gate:
+   - System-critical intent (`system_critical`, `security_alert`, `task_error`)
+   - Calendar event starting in < 5 min
+   - Password / API key / private-key regex in clipboard (sk-/ghp_/AIza/AKIA/BEGIN PRIVATE KEY)
+   - Direct `@user_handle` mention in any incoming message
+   - URGENT / ASAP / critical / emergency / immediately keyword in reasoning
+   - Explicit `always_interrupt` flag on trigger
+   
+   Bypasses karma + cooldown + focus + rate-limit. Routes straight to interrupt. **3 regression tests prove the bypass.**
+
+2. **High-value trigger protection** in KarmaStore — `acted_on ≥ dismissed × 2` prevents net-valuable triggers from being silenced by sporadic dismissals.
+
+3. **Manual `always_interrupt` per trigger** (compiled_orders_triggers gets new field). User authoring "ALWAYS notify me when X" sets this.
+
+4. **Reactivation prompt after auto-suspend** — inbox surface shows "I stopped firing X. Reactivate?" once. No silent permanent disable.
+
+5. **Dismissal sense check on urgent items** — high-urgency dismissals prompt "looked time-sensitive — keep alerting?" Captures accidental dismissals.
+
+6. **Always-visible digest badge** on HUD oval — queued items aren't invisible. User can preview anytime.
+
+#### Pipeline orchestrator
+- **RestraintPipeline** wires all 9 modules in strict order: UrgencyFloor (step 0) → DryRun → KarmaSuspension → Cooldown → Focus → Score → Route → RateLimit → recordFire.
+- **Step 0 is non-negotiable**: UrgencyFloor runs before every suppression check. If urgent → bypass everything → interrupt.
+
+### Wired into daemon
+- ActionExecutor accepts optional `RestraintPipeline` 6th constructor param. When present, dispatch routes through restraint pipeline first. Modes `suppressed` / `dry_run` / `log_only` / `digest` skip handler execution but still record trajectory. Modes `interrupt` / `surface` proceed normally + record delivery.
+- New `restraint` config block in `Config` (enabled, configPath)
+- Daemon startup dynamically imports + assembles all 9 restraint modules + RestraintPipeline
+- All restraint config tunable via `~/.kairos/restraint-config.json` (thresholds, weights, caps, quiet hours, durations)
+
+### Tests
+- **66 new unit tests** across 11 restraint test files
+- **264/264 total tests passing** (A 59 + B 60 + C.1 47 + C.2 26 + C.1.5 66 + cross-cutting + 6 expected fail-path log lines that are not failures)
+- Includes 2 regression tests in ActionExecutor confirming restraint can suppress dispatch entirely + 3 regression tests in RestraintPipeline confirming urgency-floor bypasses karma/cooldown/focus
+
+### Stats
+- ~3,200 LOC TypeScript + tests
+- 14 atomic commits (every C.1.5 task)
+
+### Validation — REPLAYED the 4,454-notification scenario, PASSED ALL CRITERIA
+
+`scripts/validate-phase-c1-5.ts` simulates the SAME load that caused the incident:
+- 10,000 file-events (git churn)
+- 500 focus-app switches to Slack
+- 200 clipboard changes (noise + 10 real URLs)
+- 5 task_error events (must always fire)
+- 3 URGENT-keyword events (must always fire)
+- 2 API-key-in-clipboard events (must always fire)
+
+**Result:**
+
+| Metric | Threshold | Observed |
+|---|---|---|
+| Interrupts | ≤ 18 (8 base + 10 urgency-floor) | **10** ✅ |
+| Surfaces | ≤ 20 | **0** ✅ |
+| Digest queue | (no cap) | **10,700** (all routine noise correctly batched) |
+| Urgency-floor 10/10 | must pass through | **10** ✅ — all task_errors, URGENT keywords, and API keys reached interrupt |
+| Unexpected throws | 0 | **0** ✅ |
+
+**99.8% reduction in interrupt-tier notifications.** 4,454 → 10.
+
+The architectural foundation is now baked in for every future phase. C.3 MCP-tool invocations, C.4 STANDING_ORDERS v2, D voice replies, E proactive speech, F HUD popups — all inherit restraint structurally.
+
+### Next: Phase C.3
+
+Magentic-One dual-ledger orchestrator + smolagents CodeAgent + AWM workflow crystallizer + **Persona-Awareness Loop** (LLM call that fills `personal_relevance` score component using L3 semantic memory facts).
+
+---
+
 ## v0.3.1-phase-c2 (2026-05-25) — MCP Host Runtime + Bespoke Connectors
 
 Second of 4 sub-phases comprising Phase C. KAIROS now **speaks MCP** — connecting to any of 20,000+ community MCP servers via the official `@modelcontextprotocol/sdk` TypeScript client. Every connected tool auto-registers as an Intent in the agency layer with structural tier assignment.
