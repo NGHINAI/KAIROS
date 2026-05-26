@@ -2,7 +2,9 @@
 import { describe, it, expect, beforeEach } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import { initMemorySchema } from './schema'
-import { EpisodicMemory } from './episodicMemory'
+import { EpisodicMemory, EpisodicStore } from './episodicMemory'
+import { LocalEmbedder } from './vector/embedder'
+import { VectorIndex } from './vector/vectorIndex'
 
 describe('EpisodicMemory', () => {
   let db: Database
@@ -50,5 +52,37 @@ describe('EpisodicMemory', () => {
     const work = mem.byType('work_session', 10)
     expect(work.length).toBe(1)
     expect(work[0]?.title).toBe('a')
+  })
+})
+
+describe('EpisodicStore hybrid recall', () => {
+  it('uses semantic + keyword fusion when vectorIndex is provided', async () => {
+    const db = new Database(':memory:')
+    const embedder = new LocalEmbedder()
+    await embedder.warmup()
+    const vec = new VectorIndex(db, embedder, { tableName: 'episodic_vec' })
+    await vec.init()
+    const store = new EpisodicStore(db, vec)
+
+    await store.record({ source: 'observation', text: 'opened the calendar to plan tomorrow' })
+    await store.record({ source: 'observation', text: 'shopping list was updated' })
+    await store.record({ source: 'observation', text: 'reviewed agenda for next day meetings' })
+
+    const results = await store.recall('checking the schedule', 3)
+    // Calendar + agenda relate to schedule semantically; shopping doesn't
+    const texts = results.map(r => r.text).join(' | ')
+    expect(texts).toMatch(/calendar|agenda/)
+    // shopping list should NOT be the top result for this query
+    expect(results[0]!.text).not.toMatch(/shopping/)
+  }, 120_000)
+
+  it('preserves existing keyword-only behavior when vectorIndex is omitted', async () => {
+    const db = new Database(':memory:')
+    const store = new EpisodicStore(db)   // legacy signature — no vectorIndex
+    await store.record({ source: 'observation', text: 'github webhook fired' })
+    await store.record({ source: 'observation', text: 'no relation at all' })
+    const results = await store.recall('github', 5)
+    expect(results.length).toBeGreaterThan(0)
+    expect(results[0]!.text).toMatch(/github/)
   })
 })
