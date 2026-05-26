@@ -2,6 +2,7 @@
 state/
 runtime/
 bin/
+local_cache/
 
 # Bun / Node
 node_modules/
