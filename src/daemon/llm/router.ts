@@ -5,27 +5,109 @@
 // are silently skipped (not counted as failures).
 
 import { logError } from '../logger'
-import { defaultCandidates, type Candidate } from './policy'
+import { defaultCandidates, tierForTask, type Candidate } from './policy'
 import { CostTracker } from './costTracker'
 import type {
-  CompletionRequest, CompletionResult, LLMProvider, ProviderId, TaskType,
+  CompletionRequest, CompletionResult, LLMProvider, ProviderId, TaskType, Tier,
 } from './types'
+
+export type KairosMode = 'byo' | 'hosted' | 'local'
+
+// Mode-aware provider preference tables.
+// Tiers: ultra_cheap = cheap, mid = standard, heavy = heavy.
+// Provider IDs must match ProviderId in types.ts.
+type ModePrefs = Record<Tier, Candidate[]>
+
+const MODE_PREFS: Record<KairosMode, ModePrefs> = {
+  byo: {
+    ultra_cheap: [
+      { provider: 'anthropic_cli', model: 'claude-haiku-4-5-20251001' },
+      { provider: 'ollama',        model: 'qwen3:8b' },
+      { provider: 'openai',        model: 'gpt-4o-mini' },
+    ],
+    mid: [
+      { provider: 'anthropic_cli', model: 'claude-sonnet-4-6' },
+      { provider: 'codex_cli',     model: 'gpt-4o' },
+      { provider: 'openai',        model: 'gpt-4o-mini' },
+    ],
+    heavy: [
+      { provider: 'anthropic_cli', model: 'claude-opus-4-7' },
+      { provider: 'codex_cli',     model: 'o1' },
+      { provider: 'anthropic_api', model: 'claude-sonnet-4-6' },
+    ],
+  },
+  hosted: {
+    ultra_cheap: [
+      { provider: 'openai',  model: 'gpt-4o-mini' },
+      { provider: 'gemini',  model: 'gemini-1.5-flash' },
+      { provider: 'kimi',    model: 'moonshot-v1-8k' },
+    ],
+    mid: [
+      { provider: 'openai',        model: 'gpt-4o' },
+      { provider: 'gemini',        model: 'gemini-1.5-pro' },
+      { provider: 'anthropic_api', model: 'claude-sonnet-4-6' },
+    ],
+    heavy: [
+      { provider: 'anthropic_api', model: 'claude-sonnet-4-6' },
+      { provider: 'openai',        model: 'gpt-4o' },
+      { provider: 'gemini',        model: 'gemini-1.5-pro' },
+    ],
+  },
+  local: {
+    ultra_cheap: [
+      { provider: 'ollama', model: 'qwen3:8b' },
+    ],
+    mid: [
+      { provider: 'ollama', model: 'qwen3:32b' },
+    ],
+    heavy: [
+      { provider: 'ollama', model: 'qwen3:32b' },
+    ],
+  },
+}
 
 export type ModelRouterOptions = {
   providers: Partial<Record<ProviderId, LLMProvider>>
   tracker: CostTracker
   candidates?: (taskType: TaskType) => Candidate[]
+  mode?: KairosMode
 }
 
 export class ModelRouter {
   private providers: Partial<Record<ProviderId, LLMProvider>>
   private tracker: CostTracker
   private candidatesFn: (t: TaskType) => Candidate[]
+  private mode: KairosMode
 
   constructor(opts: ModelRouterOptions) {
     this.providers = opts.providers
     this.tracker = opts.tracker
+    this.mode = opts.mode ?? 'byo'
+    // If a custom candidates fn is supplied AND no mode override, use it as-is.
+    // When mode is explicitly set (or candidates not supplied), build from MODE_PREFS.
     this.candidatesFn = opts.candidates ?? defaultCandidates
+  }
+
+  /** Synchronously pick the first available (provider, model) for a task.
+   *  Returns undefined if none available. */
+  pickProviderForTask(req: Pick<CompletionRequest, 'task_type'>): Candidate {
+    const tier = tierForTask(req.task_type)
+    const candidates = MODE_PREFS[this.mode][tier]
+    for (const cand of candidates) {
+      const provider = this.providers[cand.provider]
+      if (provider && provider.isConfigured()) {
+        return cand
+      }
+    }
+    if (this.mode === 'local') {
+      throw new Error(
+        'ModelRouter (local mode): no Ollama provider is available. ' +
+        'Ensure Ollama is running and the ollama provider is configured.',
+      )
+    }
+    throw new Error(
+      `ModelRouter: no provider available for task=${req.task_type} in mode=${this.mode}`,
+    )
   }
 
   async complete(req: CompletionRequest): Promise<CompletionResult> {

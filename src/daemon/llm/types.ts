@@ -23,6 +23,8 @@ export type TaskType =
   | 'source_patch'       // heavy: modify own TS source
   | 'dream'              // mid: consolidate episodic → semantic memory
   | 'classify'           // ultra-cheap: tag an event
+  | 'observe_classify'   // ultra-cheap: classify an observation
+  | 'agency_judge'       // mid: judge an agent action
 
 export type Tier = 'ultra_cheap' | 'mid' | 'heavy'
 

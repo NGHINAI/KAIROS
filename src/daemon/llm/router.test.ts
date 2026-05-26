@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'bun:test'
 import { Database } from 'bun:sqlite'
-import { ModelRouter } from './router'
+import { ModelRouter, type KairosMode } from './router'
 import { CostTracker } from './costTracker'
 import type {
   CompletionRequest, CompletionResult, LLMProvider, ProviderId, Tier,
@@ -121,5 +121,50 @@ describe('ModelRouter', () => {
     })
     const result = await router.complete({ task_type: 'narrative', prompt: 'hi', max_cost_cents: 9999 })
     expect(result.cost_cents).toBe(100)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Helper: build a router with a controlled availability list for mode tests
+// ---------------------------------------------------------------------------
+function createTestRouter(opts: { mode: KairosMode; available: ProviderId[] }) {
+  const db = new Database(':memory:')
+  const tracker = new CostTracker(db, 50)
+  const providers: Partial<Record<ProviderId, LLMProvider>> = {}
+  for (const pid of opts.available) {
+    providers[pid] = fakeProvider(pid, { configured: true })
+  }
+  return new ModelRouter({ providers, tracker, mode: opts.mode })
+}
+
+describe('ModelRouter mode preferences', () => {
+  it('byo mode: prefers Anthropic CLI when available', () => {
+    const router = createTestRouter({ mode: 'byo', available: ['anthropic_cli', 'openai'] })
+    const chosen = router.pickProviderForTask({ task_type: 'agency_judge' as any })
+    expect(chosen.provider).toBe('anthropic_cli')
+  })
+
+  it('hosted mode: prefers gpt-4o-mini for cheap tier', () => {
+    const router = createTestRouter({ mode: 'hosted', available: ['anthropic_cli', 'openai', 'gemini'] })
+    const chosen = router.pickProviderForTask({ task_type: 'observe_classify' as any })
+    expect(chosen.provider).toBe('openai')
+    expect(chosen.model).toBe('gpt-4o-mini')
+  })
+
+  it('hosted mode: falls back to gemini if OpenAI unavailable', () => {
+    const router = createTestRouter({ mode: 'hosted', available: ['gemini', 'kimi'] })
+    const chosen = router.pickProviderForTask({ task_type: 'observe_classify' as any })
+    expect(['gemini', 'kimi']).toContain(chosen.provider)
+  })
+
+  it('local mode: only Ollama, never API providers', () => {
+    const router = createTestRouter({ mode: 'local', available: ['anthropic_cli', 'openai', 'ollama'] })
+    const chosen = router.pickProviderForTask({ task_type: 'agency_judge' as any })
+    expect(chosen.provider).toBe('ollama')
+  })
+
+  it('local mode + no Ollama: throws clear error', () => {
+    const router = createTestRouter({ mode: 'local', available: ['anthropic_cli'] })
+    expect(() => router.pickProviderForTask({ task_type: 'agency_judge' as any })).toThrow(/local mode|ollama/i)
   })
 })
