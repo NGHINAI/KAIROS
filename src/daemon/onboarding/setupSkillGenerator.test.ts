@@ -49,4 +49,31 @@ describe('SetupSkillGenerator', () => {
     const gen = new SetupSkillGenerator(router)
     await expect(gen.generate('x')).rejects.toThrow(/unknown step type/i)
   })
+
+  it('rejects steps with wrong field names (e.g. message instead of text)', async () => {
+    const router = fakeRouter({
+      service_name: 'x', service_display_name: 'X', auth_type: 'none', estimated_minutes: 1,
+      steps: [{ type: 'speak', message: 'wrong field name' } as any],
+    })
+    const gen = new SetupSkillGenerator(router)
+    await expect(gen.generate('x')).rejects.toThrow(/text|field validation/i)
+  })
+
+  it('rejects smoke_test_tool with split server_name + tool_name', async () => {
+    const router = fakeRouter({
+      service_name: 'x', service_display_name: 'X', auth_type: 'none', estimated_minutes: 1,
+      steps: [{ type: 'smoke_test_tool', server_name: 'foo', tool_name: 'bar' } as any],
+    })
+    const gen = new SetupSkillGenerator(router)
+    await expect(gen.generate('x')).rejects.toThrow(/qualified_id|field validation/i)
+  })
+
+  it('rejects install_mcp_server with wrong via value', async () => {
+    const router = fakeRouter({
+      service_name: 'x', service_display_name: 'X', auth_type: 'none', estimated_minutes: 1,
+      steps: [{ type: 'install_mcp_server', via: 'pip', package: 'foo' } as any],
+    })
+    const gen = new SetupSkillGenerator(router)
+    await expect(gen.generate('x')).rejects.toThrow(/via|field validation/i)
+  })
 })
