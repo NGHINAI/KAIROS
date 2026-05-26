@@ -76,6 +76,9 @@ import { FlowStateStore } from './onboarding/flowStateStore'
 import { InboxUserChannel } from './onboarding/inboxUserChannel'
 import { SetupSkillGenerator } from './onboarding/setupSkillGenerator'
 import { SetupFlowRuntime } from './onboarding/setupFlowRuntime'
+import { ServiceResolver } from './onboarding/serviceResolver'
+import { NpmRegistryClient } from './onboarding/npmRegistryClient'
+import { McpCatalogClient } from './onboarding/mcpCatalogClient'
 import { registerSetupIntent } from './onboarding/setupIntent'
 
 const VERSION = '0.2.0'
@@ -458,8 +461,11 @@ async function main(): Promise<void> {
             mcpHost,
             userChannel: new InboxUserChannel({ path: onboardingChatPath }),
           })
+          const setupNpm = new NpmRegistryClient()
+          const setupCatalog = new McpCatalogClient()
+          const setupResolver = new ServiceResolver({ npm: setupNpm, catalog: setupCatalog })
           registerSetupIntent(intentRegistry, {
-            generator: new SetupSkillGenerator(router),
+            generator: new SetupSkillGenerator(router, setupResolver),
             runtime: setupRuntime,
           })
           log('Onboarding subsystem active — setup_service intent registered')

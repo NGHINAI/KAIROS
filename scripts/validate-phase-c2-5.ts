@@ -39,6 +39,9 @@ import { OAuthCallbackHandler } from '../src/daemon/onboarding/oauthCallbackHand
 import { InboxUserChannel } from '../src/daemon/onboarding/inboxUserChannel'
 import { SetupFlowRuntime } from '../src/daemon/onboarding/setupFlowRuntime'
 import { SetupSkillGenerator } from '../src/daemon/onboarding/setupSkillGenerator'
+import { ServiceResolver } from '../src/daemon/onboarding/serviceResolver'
+import { NpmRegistryClient } from '../src/daemon/onboarding/npmRegistryClient'
+import { McpCatalogClient } from '../src/daemon/onboarding/mcpCatalogClient'
 import { createSetupIntent } from '../src/daemon/onboarding/setupIntent'
 import { buildRouter } from '../src/daemon/llm'
 import type { SetupSkill, SetupFlowResult } from '../src/daemon/onboarding/types'
@@ -276,7 +279,10 @@ async function runMode2(): Promise<{ passed: boolean; error?: string; durationMs
     userChannel: nullUserChannel,
   })
 
-  const generator = new SetupSkillGenerator(router)
+  const npm = new NpmRegistryClient()
+  const catalog = new McpCatalogClient()
+  const resolver = new ServiceResolver({ npm, catalog })
+  const generator = new SetupSkillGenerator(router, resolver)
   const intent = createSetupIntent({ generator, runtime })
 
   try {

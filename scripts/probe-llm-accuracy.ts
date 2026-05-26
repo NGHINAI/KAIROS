@@ -23,6 +23,9 @@ import { Database } from 'bun:sqlite'
 
 import { buildRouter } from '../src/daemon/llm'
 import { SetupSkillGenerator } from '../src/daemon/onboarding/setupSkillGenerator'
+import { ServiceResolver } from '../src/daemon/onboarding/serviceResolver'
+import { NpmRegistryClient } from '../src/daemon/onboarding/npmRegistryClient'
+import { McpCatalogClient } from '../src/daemon/onboarding/mcpCatalogClient'
 import type { SetupSkill, SetupStep } from '../src/daemon/onboarding/types'
 
 // ─── Catalog ──────────────────────────────────────────────────────────────────
@@ -534,7 +537,10 @@ if (EST_COST_USD > 1.00) {
 }
 console.log()
 
-const generator = new SetupSkillGenerator(router)
+const npm = new NpmRegistryClient()
+const catalog = new McpCatalogClient()
+const resolver = new ServiceResolver({ npm, catalog })
+const generator = new SetupSkillGenerator(router, resolver)
 
 // ── Run with concurrency=3 ──
 const results = await runBatch(
