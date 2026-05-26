@@ -75,6 +75,12 @@ export type Config = {
     enabled: boolean
     configPath: string   // ~/.kairos/restraint-config.json
   }
+  mode?: 'byo' | 'hosted' | 'local'
+  embedding?: {
+    enabled?: boolean
+    cache_dir?: string
+    model?: string
+  }
 }
 
 // ─── Database row types ─────────────────────────────────────────────

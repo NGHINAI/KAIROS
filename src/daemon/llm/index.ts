@@ -11,12 +11,13 @@ import { CodexCliProvider } from './providers/codexCli'
 import { GeminiProvider } from './providers/gemini'
 import { OpenAIProvider } from './providers/openai'
 import type { LLMProvider, ProviderId } from './types'
+import type { KairosMode } from './router'
 
 export * from './types'
 export { ModelRouter } from './router'
 export { CostTracker } from './costTracker'
 
-export function buildRouter(db: Database, configPath: string): ModelRouter {
+export function buildRouter(db: Database, configPath: string, mode?: KairosMode): ModelRouter {
   const cfg = loadProviderConfig(configPath)
   const tracker = new CostTracker(db, cfg.monthly_budget_usd)
 
@@ -38,5 +39,5 @@ export function buildRouter(db: Database, configPath: string): ModelRouter {
     }
   }
 
-  return new ModelRouter({ providers, tracker })
+  return new ModelRouter({ providers, tracker, mode })
 }

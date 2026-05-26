@@ -35,7 +35,7 @@ import { MemoryStore } from './memory'
 import { Voice } from './voice'
 import { sendMacNotification, setSandboxDir as setNotifySandboxDir } from './notify'
 import { postToDiscord, isDiscordConfigured } from './discord'
-import { buildRouter } from './llm'
+import { buildRouter, ModelRouter } from './llm'
 import { EventBus } from './proactive/eventBus'
 import { StateSnapshot } from './proactive/stateSnapshot'
 import { ObserverRegistry } from './proactive/observerRegistry'
@@ -49,7 +49,13 @@ import { initMemorySchema } from './memory/schema'
 import { Embedder } from './memory/embeddings'
 import { WorkingMemory } from './memory/workingMemory'
 import { EpisodicMemory } from './memory/episodicMemory'
+import { EpisodicStore } from './memory/episodicMemory'
 import { SemanticMemory } from './memory/semanticMemory'
+import { SemanticStore } from './memory/semanticMemory'
+import { LocalEmbedder } from './memory/vector/embedder'
+import { VectorIndex } from './memory/vector/vectorIndex'
+import { MemoryInjector } from './memory/memoryInjector'
+import { homedir } from 'os'
 import { Dreamer } from './memory/dreamer'
 import { IdleDetector } from './memory/idleDetector'
 import { Tier1Classifier } from './perception/tier1Classifier'
@@ -344,7 +350,7 @@ async function main(): Promise<void> {
   // 10b. Proactive subsystem (ModelRouter + EventBus + observers + Narrator)
   let proactiveStop: (() => Promise<void>) | null = null
   if (config.proactive.enabled) {
-    const router = buildRouter(db, config.proactive.providerConfigPath)
+    const router = buildRouter(db, config.proactive.providerConfigPath, config.mode ?? 'byo')
     const bus = new EventBus(db)
     const snapshot = new StateSnapshot(bus)
     const registry = new ObserverRegistry(bus)
@@ -373,6 +379,47 @@ async function main(): Promise<void> {
       const episodic = new EpisodicMemory(db)
       const semantic = new SemanticMemory(db)
       const dreamer = new Dreamer(db, episodic, semantic, router, { embedder: (t: string) => embedder.embed(t) })
+
+      // ── C.2.6: LocalEmbedder + VectorIndex + EpisodicStore + SemanticStore + MemoryInjector ──
+      let localEmbedder: LocalEmbedder | undefined
+      let l2VectorIndex: VectorIndex | undefined
+      let l3VectorIndex: VectorIndex | undefined
+      let memoryInjector: MemoryInjector | undefined
+
+      if (config.embedding?.enabled !== false) {
+        localEmbedder = new LocalEmbedder({
+          cacheDir: config.embedding?.cache_dir ?? join(homedir(), '.kairos', 'cache', 'huggingface'),
+          model: config.embedding?.model,
+        })
+        log('[embedder] downloading/loading model (first run takes ~30s)...')
+        await localEmbedder.warmup()
+        log('[embedder] ready')
+
+        l2VectorIndex = new VectorIndex(db, localEmbedder, { tableName: 'episodic_vec' })
+        l3VectorIndex = new VectorIndex(db, localEmbedder, { tableName: 'semantic_vec' })
+        await Promise.all([l2VectorIndex.init(), l3VectorIndex.init()])
+      }
+
+      // EpisodicStore and SemanticStore are new free-text observation/fact stores
+      // with optional vector recall. Constructed alongside existing EpisodicMemory /
+      // SemanticMemory (structured stores) — those are NOT removed.
+      const episodicStore = new EpisodicStore(db, l2VectorIndex)
+      const semanticStore = new SemanticStore(db, l3VectorIndex)
+
+      // ProceduralMemory adapter to satisfy ProceduralStore interface for MemoryInjector
+      const proceduralAdapter = {
+        activeSkills: async () => {
+          try {
+            const { ProceduralMemory } = await import('./memory/proceduralMemory')
+            const proc = new ProceduralMemory(db)
+            return proc.topUsed(20).map(s => ({ id: s.skill_id, text: s.description }))
+          } catch { return [] }
+        },
+      }
+
+      memoryInjector = new MemoryInjector({ l2: episodicStore, l3: semanticStore, l4: proceduralAdapter })
+      ;(globalThis as { __kairosMemoryInjector?: MemoryInjector }).__kairosMemoryInjector = memoryInjector
+      log(`C.2.6 memory subsystem active — vector-augmented recall ${localEmbedder ? 'enabled' : 'disabled (keyword-only)'}`)
       const idle = new IdleDetector()
 
       const dreamTimer = setInterval(async () => {

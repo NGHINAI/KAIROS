@@ -73,6 +73,11 @@ const DEFAULTS: Config = {
     enabled: true,
     configPath: join(process.env.HOME ?? '', '.kairos', 'restraint-config.json'),
   },
+  mode: (process.env.KAIROS_MODE as 'byo' | 'hosted' | 'local' | undefined) ?? 'byo',
+  embedding: {
+    enabled: process.env.KAIROS_EMBED_ENABLED === 'false' ? false : true,
+    cache_dir: process.env.KAIROS_EMBED_CACHE_DIR ?? join(process.env.HOME ?? '', '.kairos', 'cache', 'huggingface'),
+  },
 }
 
 const SANDBOX_OVERRIDES: Partial<Config> = {
