@@ -1,3 +1,52 @@
+## v0.3.4-phase-c2-6 (2026-05-26) — Cost & Recall (prompt caching + semantic vector memory)
+
+### Validation gate: PASS ✓
+
+Both assertions passed (`scripts/validate-phase-c2-6.ts`):
+
+**Assertion A — Caching works (LIVE, Anthropic API)**
+- Provider: `AnthropicApiProvider` / `claude-haiku-4-5-20251001`
+- System prompt: ~12,482 tokens (≥4096 threshold), `cache_hint: 'long'`
+- 5 identical calls; calls 2-5 served 12,466 tokens from cache (cache_read at 0.1× base rate)
+- Naive cost (uncached, 5×): $0.10
+- Actual cost (with caching): $0.05
+- **Savings: 50.0%** (target: ≥50%)
+
+**Assertion B — Hybrid recall beats keyword-only (LIVE, LocalEmbedder)**
+- 20 episodic memories inserted; 10 semantic queries with zero keyword overlap
+- Embedder: `Xenova/bge-small-en-v1.5` (384-dim, q8, in-process ONNX)
+- Hybrid recall@5 (FTS5 + vector RRF): **0.97**
+- Keyword-only recall@5 (FTS5 only): **0.00**
+- **Ratio: ∞** (target: ≥1.5×) — semantic queries have zero lexical overlap with memories
+
+### What shipped in C.2.6
+
+#### Prompt caching (all providers)
+- `PromptAssembler` — stable-sorts blocks by `cache_hint` (long → short → none) before provider dispatch, ensuring the cacheable prefix is always identical across calls
+- `AnthropicApiProvider` — emits `cache_control: {type: 'ephemeral'}` on the last `long` and last `short` block (≤2 breakpoints per Anthropic spec); reads `cache_creation_input_tokens` + `cache_read_input_tokens` from usage; prices cache_write at 1.25× and cache_read at 0.10× base
+- `OpenAIProvider` — places stable (non-volatile) blocks first in the system message, volatile blocks prepended to user message; reads `prompt_tokens_details.cached_tokens`; prices cache hits at 50% of base input rate
+- `GeminiProvider` — context-cache resource creation for `long` blocks (Gemini implicit caching)
+- `CostTracker` — `cached_input_tokens` + `cache_creation_tokens` logged per call; `summaryFor()` reports `cache_hit_rate`
+
+#### Semantic vector memory
+- `LocalEmbedder` — Xenova/bge-small-en-v1.5 via Transformers.js ONNX (q8); in-process, no network; model cached under `~/.kairos/cache/huggingface/`
+- `VectorIndex` — BLOB-stored 384-dim Float32Array; cosine similarity via pure-TS dot product (unit-normalized vectors); full-scan acceptable at KAIROS scale (≤100K memories)
+- `HybridRetriever` — Reciprocal Rank Fusion (RRF, k=60) over FTS5 BM25 + vector cosine; `EpisodicStore.recall()` uses hybrid when `VectorIndex` present, falls back to keyword-only
+- `EpisodicStore` — auto-embeds on `record()`; `recall()` dispatches to hybrid or keyword path based on presence of `VectorIndex`
+
+#### Mode-aware router
+- `ModelRouter` — `MODE_PREFS` table drives provider/model selection per mode (byo/hosted/local) × tier (ultra_cheap/mid/heavy); `pickProviderForTask()` finds first configured provider
+
+#### Daemon wired
+- Daemon startup creates `LocalEmbedder + VectorIndex + EpisodicStore` when memory enabled
+- All post-call memory recording goes through `EpisodicStore.record()` → auto-embedded
+
+### Stats
+- Wall time (validation): 7.1s
+- Test mode: LIVE (real Anthropic API + real ONNX embedder, no mocks)
+
+---
+
 ## v0.3.3-phase-c2-5-patch2 (2026-05-26) — Grounded SetupSkillGenerator (package hallucination eliminated)
 
 Wired `ServiceResolver` (commit f95f585) into `SetupSkillGenerator.generate()` so the LLM receives real candidate packages in its prompt instead of guessing.
