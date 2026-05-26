@@ -14,6 +14,9 @@
 import type {
   CompletionRequest, CompletionResult, LLMProvider, ProviderConfig, Tier,
 } from '../types'
+import { PromptAssembler } from '../cache/promptAssembler'
+
+const assembler = new PromptAssembler()
 
 const MODELS_BY_TIER: Record<Tier, string[]> = {
   ultra_cheap: ['gpt-5-mini'],
@@ -48,9 +51,18 @@ export class CodexCliProvider implements LLMProvider {
 
     const start = Date.now()
 
-    // codex exec takes a positional prompt and --model flag.
-    // System prompt is prepended inline since `codex exec` has no --system flag.
-    const fullPrompt = req.system ? `${req.system}\n\n${req.prompt}` : req.prompt
+    // Normalise legacy { system, prompt } shape or new system_blocks shape.
+    const normalised = (req.system_blocks && req.system_blocks.length > 0)
+      ? req
+      : PromptAssembler.fromLegacy(req)
+    const assembled = assembler.assemble(normalised)
+
+    // codex exec has no --system flag; prepend all blocks (system + context)
+    // as plain text before the user prompt.
+    const systemText = assembled.layered.map(b => b.text).join('\n\n')
+    const fullPrompt = systemText
+      ? `${systemText}\n\n${assembled.user_prompt}`
+      : assembled.user_prompt
 
     // Invocation: codex exec "<prompt>" --model <model>
     const args = ['exec', fullPrompt, '--model', model]
@@ -86,6 +98,8 @@ export class CodexCliProvider implements LLMProvider {
       fallback_count: 0,
       input_tokens: Math.ceil(fullPrompt.length / 4),
       output_tokens: Math.ceil(text.length / 4),
+      cached_input_tokens: undefined,   // CLI caching is opaque — can't observe
+      cache_creation_tokens: 0,
     }
   }
 

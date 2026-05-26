@@ -6,6 +6,9 @@
 import type {
   CompletionRequest, CompletionResult, LLMProvider, ProviderConfig, Tier,
 } from '../types'
+import { PromptAssembler } from '../cache/promptAssembler'
+
+const assembler = new PromptAssembler()
 
 const MODELS_BY_TIER: Record<Tier, string[]> = {
   ultra_cheap: ['claude-haiku-4-5-20251001'],
@@ -29,8 +32,22 @@ export class AnthropicCliProvider implements LLMProvider {
   async complete(model: string, req: CompletionRequest): Promise<CompletionResult> {
     const start = Date.now()
 
-    const args = ['-p', req.prompt, '--model', model, '--output-format', 'json']
-    if (req.system) args.push('--append-system-prompt', req.system)
+    // Normalise legacy { system, prompt } shape or new system_blocks shape.
+    const normalised = (req.system_blocks && req.system_blocks.length > 0)
+      ? req
+      : PromptAssembler.fromLegacy(req)
+    const assembled = assembler.assemble(normalised)
+
+    // Flatten all blocks into a single system string for the CLI.
+    const systemText = assembled.layered.map(b => b.text).join('\n\n')
+
+    // Volatile (cache_hint:'none') blocks are already in assembled.layered;
+    // their content was sorted last — but for a CLI provider they all go in
+    // as plain system text (no native caching).  User prompt stays separate.
+    const fullUserPrompt = assembled.user_prompt
+
+    const args = ['-p', fullUserPrompt, '--model', model, '--output-format', 'json']
+    if (systemText) args.push('--append-system-prompt', systemText)
 
     const proc = Bun.spawn(['claude', ...args], {
       env: { ...process.env, KAIROS_SUBPROCESS: '1' },  // prevent recursion via shim
@@ -62,8 +79,10 @@ export class AnthropicCliProvider implements LLMProvider {
       cost_cents: 0,
       latency_ms: Date.now() - start,
       fallback_count: 0,
-      input_tokens: Math.ceil(req.prompt.length / 4),
+      input_tokens: Math.ceil(fullUserPrompt.length / 4),
       output_tokens: Math.ceil(text.length / 4),
+      cached_input_tokens: undefined,   // CLI caching is opaque — can't observe
+      cache_creation_tokens: 0,
     }
   }
 }
