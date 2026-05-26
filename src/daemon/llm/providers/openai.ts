@@ -6,23 +6,26 @@ import OpenAI from 'openai'
 import type {
   CompletionRequest, CompletionResult, LLMProvider, ProviderConfig, ProviderId, Tier,
 } from '../types'
+import { PromptAssembler } from '../cache/promptAssembler'
 
 type Variant = Extract<ProviderId, 'openai' | 'kimi' | 'ollama'>
 
-const PRICING: Record<Variant, Record<string, { input: number; output: number }>> = {
+// USD per million tokens
+// cached_input: OpenAI charges 50% of base input for cache hits; cache writes are FREE.
+const PRICING: Record<Variant, Record<string, { input: number; output: number; cached_input: number }>> = {
   openai: {
-    'gpt-4o-mini': { input: 0.15, output: 0.60 },
-    'gpt-4o':      { input: 2.50, output: 10.00 },
-    'gpt-5':       { input: 5.00, output: 15.00 },
+    'gpt-4o-mini': { input: 0.15,  output: 0.60,  cached_input: 0.075 },
+    'gpt-4o':      { input: 2.50,  output: 10.00, cached_input: 1.25  },
+    'gpt-5':       { input: 5.00,  output: 15.00, cached_input: 2.50  },
   },
   kimi: {
-    'moonshot-v1-8k':  { input: 0.15, output: 0.60 },
-    'moonshot-v1-32k': { input: 0.30, output: 1.20 },
+    'moonshot-v1-8k':  { input: 0.15, output: 0.60, cached_input: 0 },
+    'moonshot-v1-32k': { input: 0.30, output: 1.20, cached_input: 0 },
   },
   ollama: {
-    'qwen3:8b':   { input: 0, output: 0 },
-    'qwen3:32b':  { input: 0, output: 0 },
-    'llama3.3':   { input: 0, output: 0 },
+    'qwen3:8b':   { input: 0, output: 0, cached_input: 0 },
+    'qwen3:32b':  { input: 0, output: 0, cached_input: 0 },
+    'llama3.3':   { input: 0, output: 0, cached_input: 0 },
   },
 }
 
@@ -44,11 +47,18 @@ const TIER_MODELS: Record<Variant, Record<Tier, string[]>> = {
   },
 }
 
+export type OpenAIProviderConfig = ProviderConfig & {
+  /** Injected fetch — used in tests to intercept HTTP calls. */
+  _fetch?: typeof fetch
+}
+
+const assembler = new PromptAssembler()
+
 export class OpenAIProvider implements LLMProvider {
   readonly id: Variant
   private client: OpenAI | null = null
 
-  constructor(id: Variant, private cfg: ProviderConfig) {
+  constructor(id: Variant, private cfg: OpenAIProviderConfig) {
     this.id = id
   }
 
@@ -65,13 +75,18 @@ export class OpenAIProvider implements LLMProvider {
   }
 
   pricePerMillion(model: string): { input: number; output: number } {
-    return PRICING[this.id][model] ?? { input: 0, output: 0 }
+    const p = PRICING[this.id][model]
+    return p ? { input: p.input, output: p.output } : { input: 0, output: 0 }
   }
 
   private getClient(): OpenAI {
     if (this.client) return this.client
     const apiKey = this.cfg.api_key_env ? (process.env[this.cfg.api_key_env] ?? 'ollama') : 'ollama'
-    this.client = new OpenAI({ apiKey, baseURL: this.cfg.base_url })
+    this.client = new OpenAI({
+      apiKey,
+      baseURL: this.cfg.base_url,
+      ...(this.cfg._fetch ? { fetch: this.cfg._fetch as any } : {}),
+    })
     return this.client
   }
 
@@ -83,9 +98,36 @@ export class OpenAIProvider implements LLMProvider {
 
   async complete(model: string, req: CompletionRequest): Promise<CompletionResult> {
     const start = Date.now()
+
+    // Normalize to block-based form
+    const normalised = (req.system_blocks && req.system_blocks.length > 0)
+      ? req
+      : PromptAssembler.fromLegacy(req)
+
+    const assembled = assembler.assemble(normalised)
+
+    // Build system string: non-volatile blocks (long first, then short) concatenated.
+    // OpenAI caches the prompt prefix automatically — stable ordering ensures cache hits.
+    const systemParts: string[] = []
+    const volatileParts: string[] = []
+    for (const block of assembled.layered) {
+      if (block.cache_hint === 'none') {
+        volatileParts.push(block.text)
+      } else {
+        systemParts.push(block.text)
+      }
+    }
+
     const messages: { role: 'system' | 'user'; content: string }[] = []
-    if (req.system) messages.push({ role: 'system', content: req.system })
-    messages.push({ role: 'user', content: req.prompt })
+    if (systemParts.length > 0) {
+      messages.push({ role: 'system', content: systemParts.join('\n\n') })
+    }
+
+    // Volatile blocks prepended to user message
+    const userContent = volatileParts.length > 0
+      ? `${volatileParts.join('\n\n')}\n\n${assembled.user_prompt}`
+      : assembled.user_prompt
+    messages.push({ role: 'user', content: userContent })
 
     const completion = await this.getClient().chat.completions.create({
       model,
@@ -97,10 +139,20 @@ export class OpenAIProvider implements LLMProvider {
     const text = completion.choices[0]?.message?.content ?? ''
     const inputTok = completion.usage?.prompt_tokens ?? 0
     const outputTok = completion.usage?.completion_tokens ?? 0
-    const price = this.pricePerMillion(model)
-    const costCents = Math.ceil(
-      ((inputTok / 1_000_000) * price.input + (outputTok / 1_000_000) * price.output) * 100,
-    )
+    const cachedTok = (completion.usage as any)?.prompt_tokens_details?.cached_tokens ?? 0
+
+    const pricingEntry = PRICING[this.id][model]
+    const inputPrice  = pricingEntry?.input        ?? 0
+    const outputPrice = pricingEntry?.output       ?? 0
+    const cachedPrice = pricingEntry?.cached_input ?? inputPrice * 0.5
+
+    // Cost: (input - cached) at full rate + cached at discounted rate + output
+    const nonCachedTok = inputTok - cachedTok
+    const costCents = Math.ceil((
+      (nonCachedTok / 1_000_000) * inputPrice  +
+      (cachedTok    / 1_000_000) * cachedPrice +
+      (outputTok    / 1_000_000) * outputPrice
+    ) * 100)
 
     let parsed: unknown = undefined
     if (req.structured) {
@@ -117,6 +169,8 @@ export class OpenAIProvider implements LLMProvider {
       fallback_count: 0,
       input_tokens: inputTok,
       output_tokens: outputTok,
+      cached_input_tokens: cachedTok,
+      cache_creation_tokens: 0,
     }
   }
 }
