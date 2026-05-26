@@ -1,3 +1,60 @@
+## v0.3.4.1 (2026-05-26) — Cheap-model migration (hosted mode: gpt-5-nano primary, no Sonnet/Opus)
+
+### Hosted-mode routing overhaul
+
+**Old** hosted mode routed to `gpt-4o-mini` (cheap), `gpt-4o` (mid), `claude-sonnet-4-6` (heavy).
+**New** hosted mode routes exclusively to cheap/nano models:
+
+| Tier | Primary | Fallback 1 | Fallback 2 |
+|------|---------|------------|------------|
+| ultra_cheap | `gpt-5-nano` ($0.000164/call) | `gemini-2.5-flash-lite` ($0.000248/call) | `gpt-5.4-nano` ($0.000586/call) |
+| mid | `gpt-5-nano` | `gemini-2.5-flash` | `gpt-5-mini` |
+| heavy | `gpt-5-mini` ($0.000820/call) | `kimi-k2.5` | `gpt-4.1-mini` |
+
+**Cost projection at 15K calls/month (heavy KAIROS user):**
+- Old heavy-tier (Sonnet): ~$270/mo per user
+- New heavy-tier (gpt-5-mini): ~$3/mo per user — 90× cheaper
+
+Sonnet/Opus remain in `byo` mode only (Claude Pro CLI subscription, $0 marginal cost).
+
+### Deprecation purge
+
+**Removed from `openai.ts` PRICING:**
+- `gpt-5` (phantom model ID — never existed in the API; was an erroneous entry)
+- `moonshot-v1-8k`, `moonshot-v1-32k` (removed from kimi TIER_MODELS routing; kept in PRICING as reference)
+- `kimi-k2-0711-preview`, `kimi-k2-0905-preview` (EOL May 25 2026 — removed)
+
+**Added to `openai.ts` PRICING:**
+- `gpt-5-nano` ($0.05/M in, $0.005/M cached, $0.40/M out)
+- `gpt-5-mini` ($0.25/M in, $0.025/M cached, $2.00/M out)
+- `gpt-5.4-nano` ($0.20/M in, $0.02/M cached, $1.25/M out)
+- `gpt-5.4-mini` ($0.75/M in, $0.075/M cached, $4.50/M out)
+- `gpt-4.1-mini` ($0.40/M in, $0.10/M cached, $1.60/M out)
+- `kimi-k2.5` ($0.60/M in, $0.10/M cached, $3.00/M out)
+- `kimi-k2.6` ($0.95/M in, $0.16/M cached, $4.00/M out)
+
+**Removed from `gemini.ts` PRICING + CACHE_SUPPORTED_MODELS:**
+- `gemini-1.5-flash` (shut down — no longer on Google pricing page)
+- `gemini-1.5-pro` (shut down — no longer on Google pricing page)
+
+**Added to `gemini.ts` PRICING + CACHE_SUPPORTED_MODELS:**
+- `gemini-3.1-flash-lite` ($0.25/M in, ~$0.025/M cached est., $1.50/M out) — GA May 7 2026
+- `gemini-3.5-flash` ($1.50/M in, $0.15/M cached, $9.00/M out) — GA May 19 2026
+
+**Kimi base URL:** Changed from `api.moonshot.cn` (legacy) to `api.moonshot.ai` (canonical) in `src/daemon/llm/config.ts`.
+
+**gemini-2.0-flash:** Not present in any code path (confirmed clean). Research docs note it shuts down June 1 2026.
+
+### Files changed
+- `src/daemon/llm/router.ts` — hosted MODE_PREFS updated
+- `src/daemon/llm/providers/openai.ts` — PRICING + TIER_MODELS updated
+- `src/daemon/llm/providers/gemini.ts` — PRICING + TIER_MODELS + CACHE_SUPPORTED_MODELS updated; GeminiApiProvider default model changed from gemini-1.5-flash to gemini-2.5-flash-lite
+- `src/daemon/llm/config.ts` — kimi base URL .cn → .ai
+- `src/daemon/llm/providers/openai.test.ts` — test fixtures updated to new model names
+- `src/daemon/llm/router.test.ts` — hosted-mode assertion updated for gpt-5-nano
+
+---
+
 ## v0.3.4-phase-c2-6 (2026-05-26) — Cost & Recall (prompt caching + semantic vector memory)
 
 ### Validation gate: PASS ✓
