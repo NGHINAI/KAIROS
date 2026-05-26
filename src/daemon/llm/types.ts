@@ -3,6 +3,9 @@
 // constructs a CompletionRequest, hands it to ModelRouter.complete(),
 // and receives a CompletionResult with provenance + cost.
 
+import type { SystemBlock, ContextBlock } from './cache/cacheHints'
+export type { SystemBlock, ContextBlock } from './cache/cacheHints'
+
 export type ProviderId =
   | 'anthropic_cli'
   | 'anthropic_api'
@@ -25,13 +28,30 @@ export type Tier = 'ultra_cheap' | 'mid' | 'heavy'
 
 export type CompletionRequest = {
   task_type: TaskType
-  prompt: string
+
+  // NEW: structured blocks with cache hints
+  system_blocks?: SystemBlock[]
+  context_blocks?: ContextBlock[]
+
+  // LEGACY: kept temporarily during migration. Task 14 removes.
+  /** @deprecated use system_blocks instead */
   system?: string
+
+  prompt: string
   max_cost_cents?: number          // refuse if all providers exceed
   latency_target?: 'realtime' | 'standard' | 'background'
   fallback_chain?: ProviderId[]    // optional override
   structured?: boolean             // require parseable JSON
   max_output_tokens?: number
+}
+
+export type LegacyCompletionRequest = {
+  task_type: TaskType
+  system?: string
+  prompt: string
+  structured?: boolean
+  max_output_tokens?: number
+  latency_target?: 'realtime' | 'standard' | 'background'
 }
 
 export type CompletionResult = {
@@ -44,6 +64,8 @@ export type CompletionResult = {
   fallback_count: number           // how many providers tried before this
   input_tokens: number
   output_tokens: number
+  cached_input_tokens?: number     // NEW: tokens served from provider cache
+  cache_creation_tokens?: number   // NEW: tokens written to provider cache
 }
 
 export type ProviderError = {

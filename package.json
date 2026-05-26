@@ -15,10 +15,12 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.98.0",
     "@google/genai": "^2.6.0",
+    "@huggingface/transformers": "^3",
     "@modelcontextprotocol/sdk": "^1.0.4",
     "fastembed": "^2.1.0",
     "googleapis": "^171.4.0",
-    "openai": "^6.39.0"
+    "openai": "^6.39.0",
+    "sqlite-vec": "^0.1"
   },
   "devDependencies": {
     "@types/bun": "latest"
