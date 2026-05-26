@@ -48,7 +48,7 @@ export class Narrator {
     try {
       const result = await this.router.complete({
         task_type: 'narrative',
-        system: SYSTEM_PROMPT,
+        system_blocks: [{ text: SYSTEM_PROMPT, cache_hint: 'long' }],
         prompt: `Current world state:\n${JSON.stringify(view, null, 2)}`,
         max_output_tokens: 300,
         latency_target: 'background',

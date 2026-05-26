@@ -68,7 +68,7 @@ export class Dreamer {
       try {
         const result = await this.router.complete({
           task_type: 'dream',
-          system: SYSTEM_PROMPT,
+          system_blocks: [{ text: SYSTEM_PROMPT, cache_hint: 'long' }],
           prompt: `Episode:\nType: ${ep.episode_type}\nTitle: ${ep.title}\nSummary: ${ep.summary}\nDuration: ${(ep.ended_at - ep.started_at) / 60_000}min`,
           structured: true,
           max_output_tokens: 400,

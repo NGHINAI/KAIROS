@@ -74,7 +74,7 @@ export class OrdersCompiler {
       const prompt = `Rules:\n${rules.map((r, i) => `${i + 1}. ${r}`).join('\n')}\n\nProduce the JSON.`
       const result = await this.router.complete({
         task_type: 'action_compose',
-        system: SYSTEM_PROMPT,
+        system_blocks: [{ text: SYSTEM_PROMPT, cache_hint: 'long' }],
         prompt,
         structured: true,
         max_output_tokens: 1200,

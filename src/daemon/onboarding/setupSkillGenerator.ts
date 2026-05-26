@@ -194,7 +194,7 @@ export class SetupSkillGenerator {
     // 2. LLM call with grounding injected
     const result = await this.router.complete({
       task_type: 'skill_generate',
-      system: SYSTEM_PROMPT,
+      system_blocks: [{ text: SYSTEM_PROMPT, cache_hint: 'long' }],
       prompt: `Service to set up: ${serviceName}${groundingBlock}\n\nProduce the SetupSkill JSON.`,
       structured: true,
       max_output_tokens: 2000,

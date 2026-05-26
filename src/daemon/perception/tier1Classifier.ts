@@ -32,7 +32,7 @@ export class Tier1Classifier {
       const prompt = this.formatEvents(events)
       const result = await this.router.complete({
         task_type: 'classify',
-        system: SYSTEM_PROMPT,
+        system_blocks: [{ text: SYSTEM_PROMPT, cache_hint: 'long' }],
         prompt,
         max_output_tokens: 10,
         latency_target: 'realtime',
