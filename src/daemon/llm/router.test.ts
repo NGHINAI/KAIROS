@@ -144,11 +144,11 @@ describe('ModelRouter mode preferences', () => {
     expect(chosen.provider).toBe('anthropic_cli')
   })
 
-  it('hosted mode: prefers gpt-4o-mini for cheap tier', () => {
+  it('hosted mode: prefers gpt-5-nano for cheap tier', () => {
     const router = createTestRouter({ mode: 'hosted', available: ['anthropic_cli', 'openai', 'gemini'] })
     const chosen = router.pickProviderForTask({ task_type: 'observe_classify' as any })
     expect(chosen.provider).toBe('openai')
-    expect(chosen.model).toBe('gpt-4o-mini')
+    expect(chosen.model).toBe('gpt-5-nano')
   })
 
   it('hosted mode: falls back to gemini if OpenAI unavailable', () => {

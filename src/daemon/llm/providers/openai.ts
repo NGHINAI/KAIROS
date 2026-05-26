@@ -14,13 +14,24 @@ type Variant = Extract<ProviderId, 'openai' | 'kimi' | 'ollama'>
 // cached_input: OpenAI charges 50% of base input for cache hits; cache writes are FREE.
 const PRICING: Record<Variant, Record<string, { input: number; output: number; cached_input: number }>> = {
   openai: {
-    'gpt-4o-mini': { input: 0.15,  output: 0.60,  cached_input: 0.075 },
-    'gpt-4o':      { input: 2.50,  output: 10.00, cached_input: 1.25  },
-    'gpt-5':       { input: 5.00,  output: 15.00, cached_input: 2.50  },
+    // Current cheap-tier models (2026-05-26)
+    'gpt-5-nano':   { input: 0.05,  output: 0.40,  cached_input: 0.005  },
+    'gpt-5-mini':   { input: 0.25,  output: 2.00,  cached_input: 0.025  },
+    'gpt-5.4-nano': { input: 0.20,  output: 1.25,  cached_input: 0.02   },
+    'gpt-5.4-mini': { input: 0.75,  output: 4.50,  cached_input: 0.075  },
+    'gpt-4.1-mini': { input: 0.40,  output: 1.60,  cached_input: 0.10   },
+    // Legacy models — still active in API, kept for BYO mode compatibility
+    'gpt-4o-mini':  { input: 0.15,  output: 0.60,  cached_input: 0.075  },
+    'gpt-4o':       { input: 2.50,  output: 10.00, cached_input: 1.25   },
   },
   kimi: {
-    'moonshot-v1-8k':  { input: 0.15, output: 0.60, cached_input: 0 },
-    'moonshot-v1-32k': { input: 0.30, output: 1.20, cached_input: 0 },
+    // kimi-k2.x series — support context caching, competitive under KAIROS 80% cache profile
+    'kimi-k2.5':    { input: 0.60,  output: 3.00,  cached_input: 0.10   },
+    'kimi-k2.6':    { input: 0.95,  output: 4.00,  cached_input: 0.16   },
+    // moonshot-v1 series — no caching; kept for reference only, not used in hosted mode
+    'moonshot-v1-8k':   { input: 0.20, output: 2.00, cached_input: 0 },
+    'moonshot-v1-32k':  { input: 1.00, output: 3.00, cached_input: 0 },
+    'moonshot-v1-128k': { input: 2.00, output: 5.00, cached_input: 0 },
   },
   ollama: {
     'qwen3:8b':   { input: 0, output: 0, cached_input: 0 },
@@ -31,14 +42,14 @@ const PRICING: Record<Variant, Record<string, { input: number; output: number; c
 
 const TIER_MODELS: Record<Variant, Record<Tier, string[]>> = {
   openai: {
-    ultra_cheap: ['gpt-4o-mini'],
-    mid:         ['gpt-4o'],
-    heavy:       ['gpt-5'],
+    ultra_cheap: ['gpt-5-nano'],
+    mid:         ['gpt-5-nano', 'gpt-5-mini'],
+    heavy:       ['gpt-5-mini', 'gpt-4.1-mini'],
   },
   kimi: {
-    ultra_cheap: ['moonshot-v1-8k'],
-    mid:         ['moonshot-v1-32k'],
-    heavy:       ['moonshot-v1-32k'],
+    ultra_cheap: ['kimi-k2.5'],
+    mid:         ['kimi-k2.5'],
+    heavy:       ['kimi-k2.5', 'kimi-k2.6'],
   },
   ollama: {
     ultra_cheap: ['qwen3:8b'],
@@ -124,10 +135,16 @@ export class OpenAIProvider implements LLMProvider {
       : assembled.user_prompt
     messages.push({ role: 'user', content: userContent })
 
+    // OpenAI newer models (o1, o3, gpt-5 series) require max_completion_tokens.
+    // Kimi (Moonshot) and Ollama OpenAI-compatible APIs use the legacy max_tokens field.
+    const tokenParam = this.id === 'openai'
+      ? { max_completion_tokens: req.max_output_tokens }
+      : { max_tokens: req.max_output_tokens }
+
     const completion = await this.getClient().chat.completions.create({
       model,
       messages,
-      max_tokens: req.max_output_tokens,
+      ...tokenParam,
       response_format: req.structured ? { type: 'json_object' } : undefined,
     })
 

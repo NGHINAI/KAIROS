@@ -12,7 +12,7 @@ export function defaultProviderConfig(): RouterConfig {
       anthropic_api: empty({ api_key_env: 'ANTHROPIC_API_KEY' }),
       openai:        empty({ api_key_env: 'OPENAI_API_KEY' }),
       gemini:        empty({ api_key_env: 'GEMINI_API_KEY' }),
-      kimi:          empty({ api_key_env: 'MOONSHOT_API_KEY', base_url: 'https://api.moonshot.cn/v1' }),
+      kimi:          empty({ api_key_env: 'MOONSHOT_API_KEY', base_url: 'https://api.moonshot.ai/v1' }),
       ollama:        empty({ base_url: 'http://localhost:11434/v1' }),
     },
     default_policy: 'cost_optimized',

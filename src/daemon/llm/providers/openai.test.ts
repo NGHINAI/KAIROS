@@ -7,14 +7,14 @@ describe('OpenAIProvider', () => {
   it('reports openai id when used as openai', () => {
     const p = new OpenAIProvider('openai', { enabled: true, api_key_env: 'OPENAI_API_KEY' })
     expect(p.id).toBe('openai')
-    expect(p.modelsForTier('ultra_cheap')).toContain('gpt-4o-mini')
-    expect(p.modelsForTier('heavy')).toContain('gpt-5')
+    expect(p.modelsForTier('ultra_cheap')).toContain('gpt-5-nano')
+    expect(p.modelsForTier('heavy')).toContain('gpt-5-mini')
   })
 
   it('serves Kimi via base_url override', () => {
-    const p = new OpenAIProvider('kimi', { enabled: true, api_key_env: 'MOONSHOT_API_KEY', base_url: 'https://api.moonshot.cn/v1' })
+    const p = new OpenAIProvider('kimi', { enabled: true, api_key_env: 'MOONSHOT_API_KEY', base_url: 'https://api.moonshot.ai/v1' })
     expect(p.id).toBe('kimi')
-    expect(p.modelsForTier('ultra_cheap')).toContain('moonshot-v1-8k')
+    expect(p.modelsForTier('ultra_cheap')).toContain('kimi-k2.5')
   })
 
   it('serves Ollama via base_url override (no auth)', () => {

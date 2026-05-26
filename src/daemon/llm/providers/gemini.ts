@@ -12,22 +12,24 @@ import { PromptAssembler } from '../cache/promptAssembler'
 // USD per million tokens
 // cached_input: 75% discount vs base input (Gemini context cache pricing)
 const PRICING: Record<string, { input: number; output: number; cached_input: number }> = {
-  'gemini-2.5-flash-lite': { input: 0.075, output: 0.30,  cached_input: 0.01875 },
-  'gemini-2.5-flash':      { input: 0.30,  output: 2.50,  cached_input: 0.075   },
-  'gemini-2.5-pro':        { input: 1.25,  output: 5.00,  cached_input: 0.3125  },
-  // Legacy 1.5 models (per task spec, listed for routing completeness)
-  'gemini-1.5-flash':      { input: 0.075, output: 0.30,  cached_input: 0.01875 },
-  'gemini-1.5-pro':        { input: 1.25,  output: 5.00,  cached_input: 0.3125  },
+  // Active models — current generation (2026-05-26)
+  'gemini-3.1-flash-lite': { input: 0.25, output: 1.50,  cached_input: 0.025  }, // GA May 7 2026; cached est. (unconfirmed)
+  'gemini-3.5-flash':      { input: 1.50, output: 9.00,  cached_input: 0.15   }, // GA May 19 2026
+  // Deprecated models — sunset Oct 16 2026; still in use as fallbacks
+  'gemini-2.5-flash-lite': { input: 0.10, output: 0.40,  cached_input: 0.025  },
+  'gemini-2.5-flash':      { input: 0.30, output: 2.50,  cached_input: 0.075  },
+  'gemini-2.5-pro':        { input: 1.25, output: 10.00, cached_input: 0.3125 },
 }
 
 // Models that support the explicit cachedContents resource.
 // Experimental / preview models are intentionally excluded.
+// gemini-1.5-flash and gemini-1.5-pro removed — shut down (not on current pricing page).
 const CACHE_SUPPORTED_MODELS = new Set([
-  'gemini-1.5-flash',
-  'gemini-1.5-pro',
   'gemini-2.5-flash-lite',
   'gemini-2.5-flash',
   'gemini-2.5-pro',
+  'gemini-3.1-flash-lite',
+  'gemini-3.5-flash',
 ])
 
 // Minimum token count of long-hint content before we bother creating a cache.
@@ -41,8 +43,8 @@ const GEMINI_BASE = 'https://generativelanguage.googleapis.com'
 const API_VERSION = 'v1beta'
 
 const TIER_MODELS: Record<Tier, string[]> = {
-  ultra_cheap: ['gemini-2.5-flash-lite'],
-  mid:         ['gemini-2.5-flash'],
+  ultra_cheap: ['gemini-2.5-flash-lite', 'gemini-3.1-flash-lite'], // 2.5-flash-lite deprecated Oct 2026; migrate to 3.1-flash-lite
+  mid:         ['gemini-2.5-flash'],                               // deprecated Oct 2026; successor: gemini-3.5-flash (but 5× costlier)
   heavy:       ['gemini-2.5-pro'],
 }
 
@@ -116,14 +118,11 @@ export class GeminiProvider implements LLMProvider {
     // Create new cachedContents resource via POST
     const apiKey = this.getApiKey()
     const url = `${GEMINI_BASE}/${API_VERSION}/cachedContents?key=${encodeURIComponent(apiKey)}`
+    // persona + STANDING_ORDERS + procedural memory are semantically a system instruction,
+    // not a user message — use systemInstruction for correct conversation structure.
     const body = JSON.stringify({
       model: `models/${model}`,
-      contents: [
-        {
-          role: 'user',
-          parts: [{ text: longContent }],
-        },
-      ],
+      systemInstruction: { parts: [{ text: longContent }] },
       ttl: `${CACHE_TTL_SECONDS}s`,
     })
 
@@ -283,7 +282,7 @@ export class GeminiApiProvider extends GeminiProvider {
       apiKey: opts.apiKey,
       _fetch: opts._fetch,
     } as GeminiProviderConfig)
-    this.defaultModel = opts.model ?? 'gemini-1.5-flash'
+    this.defaultModel = opts.model ?? 'gemini-2.5-flash-lite'
   }
 
   /** Single-arg complete using the default model. */

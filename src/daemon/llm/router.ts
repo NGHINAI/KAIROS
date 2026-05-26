@@ -38,19 +38,19 @@ const MODE_PREFS: Record<KairosMode, ModePrefs> = {
   },
   hosted: {
     ultra_cheap: [
-      { provider: 'openai',  model: 'gpt-4o-mini' },
-      { provider: 'gemini',  model: 'gemini-1.5-flash' },
-      { provider: 'kimi',    model: 'moonshot-v1-8k' },
+      { provider: 'openai', model: 'gpt-5-nano' },           // $0.000164/call, $2.46/mo @ 15K
+      { provider: 'gemini', model: 'gemini-2.5-flash-lite' }, // $0.000248/call, $3.72/mo @ 15K (deprecated Oct 2026)
+      { provider: 'openai', model: 'gpt-5.4-nano' },         // $0.000586/call, $8.79/mo @ 15K
     ],
     mid: [
-      { provider: 'openai',        model: 'gpt-4o' },
-      { provider: 'gemini',        model: 'gemini-1.5-pro' },
-      { provider: 'anthropic_api', model: 'claude-sonnet-4-6' },
+      { provider: 'openai', model: 'gpt-5-nano' },           // same cheap model — most "mid" tasks don't need more
+      { provider: 'gemini', model: 'gemini-2.5-flash' },     // fallback for long-context if gpt-5-nano misses
+      { provider: 'openai', model: 'gpt-5-mini' },           // upgrade if nano demonstrably fails
     ],
     heavy: [
-      { provider: 'anthropic_api', model: 'claude-sonnet-4-6' },
-      { provider: 'openai',        model: 'gpt-4o' },
-      { provider: 'gemini',        model: 'gemini-1.5-pro' },
+      { provider: 'openai', model: 'gpt-5-mini' },           // primary — $0.000820/call, ~$0.62 per 5% of monthly calls
+      { provider: 'kimi',   model: 'kimi-k2.5' },            // fallback, MoE reasoning for code tasks
+      { provider: 'openai', model: 'gpt-4.1-mini' },         // fallback for 1M context if needed
     ],
   },
   local: {
