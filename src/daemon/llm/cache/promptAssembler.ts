@@ -2,7 +2,7 @@
 // Composes SystemBlock[] + ContextBlock[] + prompt into a layered structure
 // providers translate to their native caching mechanism.
 
-import type { CompletionRequest, LegacyCompletionRequest } from '../types'
+import type { CompletionRequest } from '../types'
 import type { CacheableBlock, CacheHint, SystemBlock, ContextBlock } from './cacheHints'
 import { resolveHint } from './cacheHints'
 
@@ -46,15 +46,4 @@ export class PromptAssembler {
     }
   }
 
-  static fromLegacy(legacy: LegacyCompletionRequest): CompletionRequest {
-    return {
-      task_type: legacy.task_type,
-      system_blocks: legacy.system ? [{ text: legacy.system, cache_hint: 'long' as const }] : [],
-      context_blocks: [],
-      prompt: legacy.prompt,
-      structured: legacy.structured,
-      max_output_tokens: legacy.max_output_tokens,
-      latency_target: legacy.latency_target,
-    }
-  }
 }

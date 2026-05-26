@@ -51,11 +51,7 @@ export class CodexCliProvider implements LLMProvider {
 
     const start = Date.now()
 
-    // Normalise legacy { system, prompt } shape or new system_blocks shape.
-    const normalised = (req.system_blocks && req.system_blocks.length > 0)
-      ? req
-      : PromptAssembler.fromLegacy(req)
-    const assembled = assembler.assemble(normalised)
+    const assembled = assembler.assemble(req)
 
     // codex exec has no --system flag; prepend all blocks (system + context)
     // as plain text before the user prompt.

@@ -99,12 +99,7 @@ export class OpenAIProvider implements LLMProvider {
   async complete(model: string, req: CompletionRequest): Promise<CompletionResult> {
     const start = Date.now()
 
-    // Normalize to block-based form
-    const normalised = (req.system_blocks && req.system_blocks.length > 0)
-      ? req
-      : PromptAssembler.fromLegacy(req)
-
-    const assembled = assembler.assemble(normalised)
+    const assembled = assembler.assemble(req)
 
     // Build system string: non-volatile blocks (long first, then short) concatenated.
     // OpenAI caches the prompt prefix automatically — stable ordering ensures cache hits.

@@ -34,13 +34,6 @@ describe('PromptAssembler', () => {
     expect(out.short_cache_breakpoint_index).toBe(2)   // last 'short' block (after 2 long blocks)
   })
 
-  it('accepts legacy {system, prompt} shape and wraps it', () => {
-    const out = PromptAssembler.fromLegacy({ task_type: 'narrative' as any, system: 'old-style', prompt: 'q' })
-    expect(out.system_blocks!.length).toBe(1)
-    expect(out.system_blocks![0].text).toBe('old-style')
-    expect(out.system_blocks![0].cache_hint).toBe('long')
-  })
-
   it('computes total estimated tokens (rough)', () => {
     const sys: SystemBlock[] = [{ text: 'a'.repeat(400) }]    // ~100 tokens at 4 chars/token
     const out = new PromptAssembler().assemble({ system_blocks: sys, context_blocks: [], prompt: 'short', task_type: 'narrative' as any })

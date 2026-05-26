@@ -15,6 +15,7 @@ const router = buildRouter(db, join(homedir(), '.kairos', 'providers.json'))
 console.log('Sending narrative request...')
 const result = await router.complete({
   task_type: 'narrative',
+  system_blocks: [],
   prompt: 'In one sentence, what is the color of grass?',
   max_output_tokens: 50,
 })

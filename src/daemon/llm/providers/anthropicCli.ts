@@ -32,11 +32,7 @@ export class AnthropicCliProvider implements LLMProvider {
   async complete(model: string, req: CompletionRequest): Promise<CompletionResult> {
     const start = Date.now()
 
-    // Normalise legacy { system, prompt } shape or new system_blocks shape.
-    const normalised = (req.system_blocks && req.system_blocks.length > 0)
-      ? req
-      : PromptAssembler.fromLegacy(req)
-    const assembled = assembler.assemble(normalised)
+    const assembled = assembler.assemble(req)
 
     // Flatten all blocks into a single system string for the CLI.
     const systemText = assembled.layered.map(b => b.text).join('\n\n')

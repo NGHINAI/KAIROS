@@ -49,7 +49,7 @@ describe('ModelRouter', () => {
         { provider: 'openai', model: 'o' },
       ],
     })
-    const result = await router.complete({ task_type: 'narrative', prompt: 'hi' })
+    const result = await router.complete({ task_type: 'narrative', system_blocks: [], prompt: 'hi' })
     expect(result.provider).toBe('gemini')
     expect(result.fallback_count).toBe(0)
   })
@@ -66,7 +66,7 @@ describe('ModelRouter', () => {
         { provider: 'openai', model: 'o' },
       ],
     })
-    const result = await router.complete({ task_type: 'narrative', prompt: 'hi' })
+    const result = await router.complete({ task_type: 'narrative', system_blocks: [], prompt: 'hi' })
     expect(result.provider).toBe('openai')
     expect(result.fallback_count).toBe(1)
   })
@@ -83,7 +83,7 @@ describe('ModelRouter', () => {
         { provider: 'openai', model: 'o' },
       ],
     })
-    const result = await router.complete({ task_type: 'narrative', prompt: 'hi' })
+    const result = await router.complete({ task_type: 'narrative', system_blocks: [], prompt: 'hi' })
     expect(result.provider).toBe('openai')
     expect(result.fallback_count).toBe(0)
   })
@@ -94,7 +94,7 @@ describe('ModelRouter', () => {
       tracker,
       candidates: () => [{ provider: 'gemini', model: 'g' }],
     })
-    await router.complete({ task_type: 'narrative', prompt: 'hi' })
+    await router.complete({ task_type: 'narrative', system_blocks: [], prompt: 'hi' })
     expect(tracker.monthlyCostCents()).toBe(7)
   })
 
@@ -110,7 +110,7 @@ describe('ModelRouter', () => {
         { provider: 'openai', model: 'o' },
       ],
     })
-    expect(router.complete({ task_type: 'narrative', prompt: 'hi' })).rejects.toThrow()
+    expect(router.complete({ task_type: 'narrative', system_blocks: [], prompt: 'hi' })).rejects.toThrow()
   })
 
   it('respects max_cost_cents budget gate', async () => {
@@ -119,7 +119,7 @@ describe('ModelRouter', () => {
       tracker,
       candidates: () => [{ provider: 'openai', model: 'o' }],
     })
-    const result = await router.complete({ task_type: 'narrative', prompt: 'hi', max_cost_cents: 9999 })
+    const result = await router.complete({ task_type: 'narrative', system_blocks: [], prompt: 'hi', max_cost_cents: 9999 })
     expect(result.cost_cents).toBe(100)
   })
 })

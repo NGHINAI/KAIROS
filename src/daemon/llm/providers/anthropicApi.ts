@@ -100,12 +100,7 @@ export class AnthropicApiProvider implements LLMProvider {
   }
 
   async complete(model: string, req: CompletionRequest): Promise<CompletionResult> {
-    // Normalize to block-based form
-    const normalised = (req.system_blocks && req.system_blocks.length > 0)
-      ? req
-      : PromptAssembler.fromLegacy(req)
-
-    const assembled = assembler.assemble(normalised)
+    const assembled = assembler.assemble(req)
     const hasCacheable = assembled.long_cache_breakpoint_index !== null ||
       assembled.short_cache_breakpoint_index !== null
 

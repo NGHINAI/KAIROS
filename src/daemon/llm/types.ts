@@ -31,13 +31,9 @@ export type Tier = 'ultra_cheap' | 'mid' | 'heavy'
 export type CompletionRequest = {
   task_type: TaskType
 
-  // NEW: structured blocks with cache hints
-  system_blocks?: SystemBlock[]
+  // Structured blocks with cache hints (required — all callers must pass system_blocks)
+  system_blocks: SystemBlock[]
   context_blocks?: ContextBlock[]
-
-  // LEGACY: kept temporarily during migration. Task 14 removes.
-  /** @deprecated use system_blocks instead */
-  system?: string
 
   prompt: string
   max_cost_cents?: number          // refuse if all providers exceed
@@ -45,15 +41,6 @@ export type CompletionRequest = {
   fallback_chain?: ProviderId[]    // optional override
   structured?: boolean             // require parseable JSON
   max_output_tokens?: number
-}
-
-export type LegacyCompletionRequest = {
-  task_type: TaskType
-  system?: string
-  prompt: string
-  structured?: boolean
-  max_output_tokens?: number
-  latency_target?: 'realtime' | 'standard' | 'background'
 }
 
 export type CompletionResult = {
