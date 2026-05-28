@@ -20,7 +20,7 @@ export type CacheHint = 'long' | 'short' | 'none'
 export type SystemBlock = {
   text: string
   cache_hint?: CacheHint    // defaults to 'long' for system blocks
-  source?: 'persona' | 'standing_orders' | 'procedural_memory'
+  source?: 'persona' | 'standing_orders' | 'procedural_memory' | 'skills'
 }
 
 export type ContextBlock = {

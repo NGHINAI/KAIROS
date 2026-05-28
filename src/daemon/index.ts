@@ -807,8 +807,9 @@ async function main(): Promise<void> {
             // Register the invoke_skill intent
             registerInvokeSkillIntent(intentRegistry, { dispatcher })
 
-            // Stash registry on globalThis for system_blocks injection by agency layer
-            ;(globalThis as { __kairosSkillRegistry?: SkillRegistry }).__kairosSkillRegistry = skillRegistryInst
+            // Stash AWM (agentskills.io) registry on globalThis for system_blocks injection by agency layer.
+            // NB: different key from the legacy manifest-based __kairosSkillRegistry (consumed by discordBot/server).
+            ;(globalThis as { __kairosAwmSkillRegistry?: SkillRegistry }).__kairosAwmSkillRegistry = skillRegistryInst
             ;(globalThis as { __kairosSkillStore?: SkillStore }).__kairosSkillStore = skillStore
 
             log(`[skills] subsystem ready — ${skillStore.listAll().length} skills indexed, dispatcher + registry active${awmWorker ? ', AwmWorker started' : ''}${curatorTimer ? ', Curator scheduled' : ''}`)

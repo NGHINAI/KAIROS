@@ -88,4 +88,17 @@ export class SkillRegistry {
   stopWatching(): void {
     if (this.watcherStop) { this.watcherStop(); this.watcherStop = null }
   }
+
+  /** Returns a SystemBlock-shaped descriptor for injection into LLM system_blocks.
+   *  Lists active skills as "- <name>: <description>" lines.
+   *  Empty list returns null (caller can skip). */
+  buildSystemBlock(): { text: string; cache_hint: 'short'; source: 'skills' } | null {
+    const metadata = this.listActiveMetadata()
+    if (metadata.length === 0) return null
+    const lines = ['Available skills (invoke via invoke_skill intent with the skill slug):']
+    for (const m of metadata) {
+      lines.push(`- ${m.name}: ${m.description}`)
+    }
+    return { text: lines.join('\n'), cache_hint: 'short', source: 'skills' }
+  }
 }

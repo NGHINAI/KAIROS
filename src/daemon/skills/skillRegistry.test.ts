@@ -89,4 +89,25 @@ describe('SkillRegistry', () => {
     expect(store.get('late-arrival')?.name).toBe('late-arrival')
     rmSync(tmp, { recursive: true })
   })
+
+  it('buildSystemBlock returns a SystemBlock with active skills, or null if empty', () => {
+    // 1. No skills registered → null
+    expect(registry.buildSystemBlock()).toBeNull()
+
+    // 2. With one active skill → returns block whose text contains name and description
+    makeSkillOnDisk(tmp, 'my-skill', { description: 'Does something useful' })
+    registry.initialize()
+    const block = registry.buildSystemBlock()
+    expect(block).not.toBeNull()
+    expect(block?.cache_hint).toBe('short')
+    expect(block?.source).toBe('skills')
+    expect(block?.text).toContain('my-skill')
+    expect(block?.text).toContain('Does something useful')
+
+    // 3. Stale skills are excluded
+    store.upsert({ ...store.get('my-skill')!, state: 'stale' })
+    expect(registry.buildSystemBlock()).toBeNull()
+
+    rmSync(tmp, { recursive: true })
+  })
 })
