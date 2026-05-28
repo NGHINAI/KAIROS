@@ -1,3 +1,37 @@
+## v0.3.5-phase-c2-7 (2026-05-27) — Composio Connectors (reactive)
+
+Phase C.2.7 wires Composio's 500+ integrations into KAIROS as MCP tools. Users connect Slack, Gmail, Notion, GitHub, etc. via voice-first auth (auto-open browser + Earned Interrupt restraint). NO BYOC — single `COMPOSIO_API_KEY` (Model A) serves all KAIROS users via Composio's multi-tenant userId scoping.
+
+### What shipped (12 tasks, ~2,700 LOC)
+
+- **ComposioClient wrapper** — uses `connectedAccounts.link()` with POSITIONAL args (deprecated `initiate()` guard)
+- **ConnectionStore** — SQLite per-user toolkit connections (single-account-per-toolkit constraint)
+- **ConnectionFlow** — browser + OAuthCallbackHandler + `waitForConnection()` confirmation
+- **HttpMcpClient** — StreamableHTTPClientTransport for hosted MCP servers
+- **McpHost transport branching** — stdio | http | sse via `config.transport`
+- **ComposioSessionManager** — ToolRouter session lifecycle with workbench:false + manageConnections:true
+- **TokenExpiryPoller** — 5-min polling for connection state
+- **connect_service / disconnect_service intents** (GREEN tier)
+
+### Virality amendments
+
+- **V1 system prompt directives** — instructs the agent to use COMPOSIO_SEARCH_TOOLS for unknown tasks and COMPOSIO_MULTI_EXECUTE_TOOL for multi-app workflows
+- **V2 postConnectionAnnouncement** — rich voice intro after each connection ("Slack connected. I can now send, list, and search.")
+- **V3 DestructiveToolGuard** — confirms via voice before delete/remove/archive tool calls
+
+### Out of scope (deferred to C.2.8)
+
+- Composio triggers (proactive remote event monitoring)
+- KAIROS Cloud relay (per-user event routing at scale)
+- "Tell me when X happens" type rules
+
+### Validation
+- 100+ unit tests passing
+- Smoke test (`scripts/smoke-composio.ts`) confirms live Composio integration
+- Validation gate (`scripts/validate-phase-c2-7.ts`) covers 7 assertions
+
+---
+
 ## v0.3.4.1 (2026-05-26) — Cheap-model migration (hosted mode: gpt-5-nano primary, no Sonnet/Opus)
 
 ### Hosted-mode routing overhaul
