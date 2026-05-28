@@ -28,6 +28,7 @@ export type TaskType =
   | 'persona_compose'   // ultra-cheap: compose soul.md from wizard answers
   | 'skill_crystallize' // mid: LLM-compose candidate SKILL.md from trajectory cluster
   | 'skill_curate'       // ultra-cheap: Phase 2 Curator decides keep/patch/consolidate/archive
+  | 'orders_compose'      // mid: speech → DSL rule for STANDING_ORDERS v2
 
 export type Tier = 'ultra_cheap' | 'mid' | 'heavy'
 

@@ -18,6 +18,7 @@ const TASK_TO_TIER: Record<TaskType, Tier> = {
   skill_crystallize:  'mid',
   skill_curate:       'ultra_cheap',
   source_patch:       'heavy',
+  orders_compose:     'mid',
 }
 
 export type Candidate = { provider: ProviderId; model: string }
