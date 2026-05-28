@@ -179,3 +179,107 @@ describe('RestraintPipeline', () => {
     expect(decision.mode).toBe('interrupt')
   })
 })
+
+// ---------------------------------------------------------------------------
+// C.3.1 — PersonaAwareness integration tests
+// ---------------------------------------------------------------------------
+
+describe('RestraintPipeline — PersonaAwareness integration (C.3.1)', () => {
+  let db: Database
+
+  function makePersonaAwareness(overrides: Record<string, unknown> = {}): any {
+    return {
+      getHints: () => ({
+        interrupt_aggressiveness: 'medium',
+        in_focus_now: false,
+        active_hours_now: true,
+        prefer_terse: false,
+        prefer_voice_over_text: false,
+        ...overrides,
+      }),
+    }
+  }
+
+  function makePipeline(personaAwareness?: any): RestraintPipeline {
+    db = new Database(':memory:')
+    db.exec(KARMA_SCHEMA)
+    db.exec(RATE_LIMITER_SCHEMA)
+    db.exec(DIGEST_SCHEMA)
+    db.exec(DRY_RUN_SCHEMA)
+
+    const focus = new FocusDetector(cfg, {
+      now: () => new Date('2026-05-25T10:00:00').getTime(),
+      probeFocusedApp: async () => ({ app: 'VS Code', duration_sec: 300 }),
+      probeMeeting: async () => false,
+    })
+    const karma = new KarmaStore(db, cfg)
+    const cooldown = new CooldownTracker(cfg.default_trigger_cooldown_sec * 1000)
+    const rateLimiter = new RateLimiter(db, cfg)
+    const scorer = new ActionScorer(cfg)
+    const router = new DeliveryRouter(cfg)
+    const digest = new DigestComposer(db)
+    const dryRun = new DryRunMode(db, cfg)
+    const urgencyFloor = new (require('./urgencyFloor').UrgencyFloor)()
+
+    return new RestraintPipeline({
+      config: cfg, urgencyFloor, focus, karma, cooldown, rateLimiter, scorer, router, digest, dryRun,
+      ...(personaAwareness !== undefined ? { personaAwareness } : {}),
+    })
+  }
+
+  // Score calculation reference (cfg weights: rule=0.20, urgency=0.30, relevance=0.20, ctx=0.15, novelty=0.10):
+  //   borderline inputs (urgency=0.5, rule=0.5, relevance=0.5, novelty=0.5, ctx=1.0):
+  //     score = 0.10 + 0.15 + 0.10 + 0.15 + 0.05 = 0.55  (above digest 0.40, below raised floor 0.60)
+  //   below-threshold inputs (urgency=0.3, rule=0.3, relevance=0.3, novelty=0.3, ctx=1.0):
+  //     score = 0.06 + 0.09 + 0.06 + 0.15 + 0.03 = 0.39  (below digest 0.40, above low-aggressiveness floor 0.30)
+
+  it('suppresses non-urgent fire when persona.in_focus_now === true', async () => {
+    const pipe = makePipeline(makePersonaAwareness({ in_focus_now: true }))
+    const result = await pipe.evaluate(makeReq('notify', 'trig-focus-persona'), {
+      urgency: 0.5, rule_match_strength: 0.5, personal_relevance: 0.5, novelty: 0.5, urgent: false,
+    })
+    expect(result.mode).toBe('suppressed')
+    expect(result.reason ?? '').toMatch(/focus/i)
+  })
+
+  it('does NOT suppress URGENT fire even when in_focus_now', async () => {
+    const pipe = makePipeline(makePersonaAwareness({ in_focus_now: true }))
+    // urgency floor: URGENT keyword in reasoning bypasses all gates
+    const result = await pipe.evaluate(
+      { ...makeReq('notify', 'trig-urgent-focus'), reasoning: 'URGENT: server down' },
+      { urgency: 1.0, rule_match_strength: 1.0, personal_relevance: 1.0, novelty: 1.0, urgent: false },
+    )
+    expect(result.mode).not.toBe('suppressed')
+  })
+
+  it('low interrupt_aggressiveness raises the effective threshold — borderline event suppressed', async () => {
+    const pipe = makePipeline(makePersonaAwareness({ interrupt_aggressiveness: 'low' }))
+    // score ≈ 0.55 — above default digest floor (0.40) but below raised floor (0.60)
+    const result = await pipe.evaluate(makeReq('notify', 'trig-low-agg'), {
+      urgency: 0.5, rule_match_strength: 0.5, personal_relevance: 0.5, novelty: 0.5, urgent: false,
+    })
+    expect(result.mode).toBe('suppressed')
+    expect(result.reason ?? '').toMatch(/low interrupt_aggressiveness/i)
+  })
+
+  it('high interrupt_aggressiveness lowers the threshold — sub-threshold event routed as digest', async () => {
+    const pipe = makePipeline(makePersonaAwareness({ interrupt_aggressiveness: 'high' }))
+    // score ≈ 0.39 — below default digest floor (0.40) but above lowered floor (0.30) → digest
+    const result = await pipe.evaluate(makeReq('notify', 'trig-high-agg'), {
+      urgency: 0.3, rule_match_strength: 0.3, personal_relevance: 0.3, novelty: 0.3, urgent: false,
+    })
+    expect(result.mode).not.toBe('suppressed')
+    expect(result.mode).not.toBe('log_only')
+  })
+
+  it('no PersonaAwareness dep = existing behavior preserved (no regressions)', async () => {
+    const pipe = makePipeline(/* no personaAwareness */)
+    // score ≈ 0.55 — default config → digest (above 0.40, below surface 0.70)
+    const result = await pipe.evaluate(makeReq('notify', 'trig-no-persona'), {
+      urgency: 0.5, rule_match_strength: 0.5, personal_relevance: 0.5, novelty: 0.5, urgent: false,
+    })
+    expect(result).toBeDefined()
+    // With no persona dep, borderline score 0.55 falls in digest bucket (default thresholds)
+    expect(result.mode).toBe('digest')
+  })
+})

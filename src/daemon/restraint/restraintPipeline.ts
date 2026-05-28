@@ -28,6 +28,7 @@ import type { DigestComposer } from './digestComposer'
 import type { DryRunMode } from './dryRunMode'
 
 import type { UrgencyFloor } from './urgencyFloor'
+import type { PersonaAwareness } from '../persona/personaAwareness'
 
 export type RestraintDeps = {
   config: RestraintConfig
@@ -40,6 +41,7 @@ export type RestraintDeps = {
   router: DeliveryRouter
   digest: DigestComposer
   dryRun: DryRunMode
+  personaAwareness?: PersonaAwareness  // OPTIONAL — C.3.1 persona-driven threshold tuning
 }
 
 /** Inputs the pipeline needs that the caller (ActionExecutor) computes per request. */
@@ -93,6 +95,13 @@ export class RestraintPipeline {
       return { mode: 'suppressed', score: null, reason: `user busy: ${why}` }
     }
 
+    // 4b. Persona hints — query AFTER focus/urgency gates so urgency floor always wins (step 0)
+    const hints = this.deps.personaAwareness?.getHints()
+    if (hints?.in_focus_now) {
+      // User is in deep focus / meeting per persona model → suppress non-urgent fires
+      return { mode: 'suppressed', score: null, reason: 'persona: user in deep focus' }
+    }
+
     // 5. Score
     const focusState = await this.deps.focus.state()
     const components: ScoreComponents = {
@@ -104,6 +113,25 @@ export class RestraintPipeline {
       dismissal_penalty: this.deps.karma.dismissalPenalty(triggerId),
     }
     const score = this.deps.scorer.compute(components)
+
+    // 5b. Persona threshold adjustment — raise or lower the effective digest floor
+    if (hints?.interrupt_aggressiveness === 'low') {
+      // User wants fewer interruptions: suppress anything that scores below threshold + 0.2
+      const raisedFloor = this.deps.config.digest_threshold + 0.2
+      if (score.total < raisedFloor) {
+        return { mode: 'suppressed', score, reason: `persona: low interrupt_aggressiveness raised threshold to ${raisedFloor.toFixed(2)}` }
+      }
+    } else if (hints?.interrupt_aggressiveness === 'high') {
+      // User is fine being interrupted: lower threshold by 0.1 — if score is above the reduced
+      // digest floor, let it through to normal routing (router already handles the actual bucketing)
+      const loweredFloor = Math.max(0, this.deps.config.digest_threshold - 0.1)
+      if (score.total < this.deps.config.digest_threshold && score.total >= loweredFloor) {
+        // Would have been log_only under default config but now qualifies for digest
+        const decision = this.deps.router.route(score)
+        // Override to at least digest
+        return { ...decision, mode: decision.mode === 'log_only' ? 'digest' : decision.mode, reason: `persona: high interrupt_aggressiveness lowered threshold` }
+      }
+    }
 
     // 6. Route
     const decision = this.deps.router.route(score)
