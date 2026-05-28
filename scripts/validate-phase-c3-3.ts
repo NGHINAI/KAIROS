@@ -360,16 +360,20 @@ try {
   if (!composioKey || composioKey.startsWith('ak_your_')) {
     record(true, 'SKIP: COMPOSIO_API_KEY not set — PythonRunner Workbench test skipped')
   } else {
-    // Try to load the @composio-core/composio package; skip if not installed
-    let ComposioMod: any = null
-    try {
-      ComposioMod = await import('@composio-core/composio')
-    } catch {
-      // Package not installed in this environment
-    }
-    if (!ComposioMod) {
-      record(true, 'SKIP (no @composio-core/composio) — PythonRunner Workbench test skipped')
+    // Opt-in only — Python Workbench runs cost real Composio compute.
+    // Set KAIROS_VALIDATE_PYTHON=1 to exercise this path.
+    if (process.env.KAIROS_VALIDATE_PYTHON !== '1') {
+      record(true, 'SKIP: set KAIROS_VALIDATE_PYTHON=1 to run PythonRunner Workbench test')
     } else {
+      let ComposioMod: any = null
+      try {
+        ComposioMod = await import('@composio/core')
+      } catch {
+        // Package not installed
+      }
+      if (!ComposioMod) {
+        record(true, 'SKIP (no @composio/core) — PythonRunner Workbench test skipped')
+      } else {
       try {
         const { PythonRunner } = await import('../src/daemon/skills/pythonRunner')
         const tmp = makeTempDir('7')
@@ -391,6 +395,7 @@ try {
         }
       } catch (err) {
         record(false, `PythonRunner test threw: ${err instanceof Error ? err.message : err}`)
+      }
       }
     }
   }
