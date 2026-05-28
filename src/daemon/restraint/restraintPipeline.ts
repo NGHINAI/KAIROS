@@ -56,6 +56,11 @@ export type EvaluateInputs = {
 export class RestraintPipeline {
   constructor(private deps: RestraintDeps) {}
 
+  /** Wire in PersonaAwareness after construction (C.3.1 persona subsystem). */
+  setPersonaAwareness(awareness: PersonaAwareness): void {
+    this.deps.personaAwareness = awareness
+  }
+
   async evaluate(request: ActionRequest, inputs: EvaluateInputs): Promise<DeliveryDecision> {
     const triggerId = request.source_trigger_id ?? request.intent_id
 

@@ -93,6 +93,11 @@ import { ComposioSessionManager } from './connectors/composioSessionManager'
 import { TokenExpiryPoller } from './connectors/tokenExpiryPoller'
 import { registerConnectServiceIntent } from './connectors/connectServiceIntent'
 import { registerDisconnectServiceIntent } from './connectors/disconnectServiceIntent'
+import { SoulLoader } from './persona/soulLoader'
+import { TrajWriter } from './persona/trajWriter'
+import { PersonaUpdater } from './persona/personaUpdater'
+import { DreamingExtension } from './persona/dreamingExtension'
+import { PersonaAwareness } from './persona/personaAwareness'
 
 const VERSION = '0.2.0'
 
@@ -630,7 +635,73 @@ async function main(): Promise<void> {
           log('Restraint subsystem active — Earned Interrupt enabled')
         }
 
+        // ─── Persona subsystem (Phase C.3.1) ──────────────────────────────────
+        let personaDreamingTimers: ReturnType<typeof setInterval>[] = []
+        if (config.persona?.enabled !== false) {
+          // SoulLoader — loads soul.md as long-cached SystemBlock
+          const soulLoader = new SoulLoader({ path: config.persona?.paths?.soul })
+          soulLoader.load()
+          soulLoader.startWatching()
+
+          // TrajWriter — agency dispatcher calls .record() after each intent completion
+          const trajWriter = new TrajWriter({ dir: config.persona?.paths?.traj })
+
+          // PersonaUpdater — Dreaming + nudges write through here
+          const personaUpdater = new PersonaUpdater({
+            path: config.persona?.paths?.persona,
+            tokenCap: config.persona?.token_cap,
+          })
+
+          // PersonaAwareness — derives hints from persona + live focus state
+          const personaAwareness = new PersonaAwareness({
+            personaUpdater,
+            getLiveState: () => ({
+              // FocusAppObserver is event-driven (no getter); read last known value from StateSnapshot
+              current_focus_app: snapshot.read().focus_app?.app ?? undefined,
+              is_in_meeting: false,    // wired in Phase E (meeting detection)
+              current_hour_local: new Date().getHours(),
+              current_day_of_week: new Date().getDay(),
+            }),
+          })
+
+          // DreamingExtension — 3-phase Hermes dreaming cycles
+          const dreaming = new DreamingExtension({
+            trajWriter,
+            personaUpdater,
+            router: undefined,  // optional LLM-driven diffs; wired in C.3.3
+          })
+
+          const lightInterval = config.persona?.dreaming?.light_interval_ms ?? 4 * 60 * 60 * 1000
+          const remInterval = config.persona?.dreaming?.rem_interval_ms ?? 24 * 60 * 60 * 1000
+          const deepInterval = config.persona?.dreaming?.deep_interval_ms ?? 7 * 24 * 60 * 60 * 1000
+
+          personaDreamingTimers = [
+            setInterval(() => { dreaming.runCycle('light').catch(err => log(`[dreaming] light cycle failed: ${err}`, 'warn')) }, lightInterval),
+            setInterval(() => { dreaming.runCycle('rem').catch(err => log(`[dreaming] REM cycle failed: ${err}`, 'warn')) }, remInterval),
+            setInterval(() => { dreaming.runCycle('deep').catch(err => log(`[dreaming] deep cycle failed: ${err}`, 'warn')) }, deepInterval),
+          ]
+
+          // Expose soulLoader on globalThis — callers can inject buildSystemBlock() into system_blocks
+          ;(globalThis as { __kairosSoulLoader?: SoulLoader }).__kairosSoulLoader = soulLoader
+
+          // Wire TrajWriter into executor (after executor is constructed below, via setter)
+          // Wire PersonaAwareness into RestraintPipeline via setter
+          if (restraintPipeline) {
+            restraintPipeline.setPersonaAwareness(personaAwareness)
+          }
+
+          // Store refs for executor wiring below and for shutdown
+          ;(globalThis as { __kairosTrajWriter?: TrajWriter }).__kairosTrajWriter = trajWriter
+
+          log('[persona] subsystem ready — SoulLoader, TrajWriter, PersonaUpdater, Dreaming, PersonaAwareness active')
+        }
+        // ──────────────────────────────────────────────────────────────────────
+
         const executor = new ActionExecutor(db, intentRegistry, trajectory, inbox, actionCtx, restraintPipeline)
+
+        // Wire TrajWriter into executor if persona subsystem is active
+        const _trajWriter = (globalThis as { __kairosTrajWriter?: TrajWriter }).__kairosTrajWriter
+        if (_trajWriter) executor.setTrajWriter(_trajWriter)
         const triggerEngine = new TriggerEngine(db, bus, (req) => executor.dispatch(req))
         const bridge = new PerceptionToTrigger(bus, episodic)
 
@@ -666,6 +737,7 @@ async function main(): Promise<void> {
           triggerEngine.stop()
           clearInterval(bridgeTimer)
           agencyHttpServer.stop()
+          for (const t of personaDreamingTimers) clearInterval(t)
         }
       }
 

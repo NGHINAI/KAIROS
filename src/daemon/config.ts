@@ -83,6 +83,20 @@ const DEFAULTS: Config = {
     api_key: process.env.COMPOSIO_API_KEY,
     poll_interval_ms: process.env.KAIROS_COMPOSIO_POLL_MS ? parseInt(process.env.KAIROS_COMPOSIO_POLL_MS) : undefined,
   },
+  persona: {
+    enabled: process.env.KAIROS_PERSONA_ENABLED !== 'false',
+    paths: {
+      soul: process.env.KAIROS_SOUL_PATH ?? join(process.env.HOME ?? '', '.kairos', 'soul.md'),
+      persona: process.env.KAIROS_PERSONA_PATH ?? join(process.env.HOME ?? '', '.kairos', 'persona.md'),
+      traj: process.env.KAIROS_TRAJ_DIR ?? join(process.env.HOME ?? '', '.kairos', 'traj'),
+    },
+    token_cap: process.env.KAIROS_PERSONA_TOKEN_CAP ? parseInt(process.env.KAIROS_PERSONA_TOKEN_CAP) : undefined,
+    dreaming: {
+      light_interval_ms: process.env.KAIROS_DREAM_LIGHT_MS ? parseInt(process.env.KAIROS_DREAM_LIGHT_MS) : undefined,
+      rem_interval_ms: process.env.KAIROS_DREAM_REM_MS ? parseInt(process.env.KAIROS_DREAM_REM_MS) : undefined,
+      deep_interval_ms: process.env.KAIROS_DREAM_DEEP_MS ? parseInt(process.env.KAIROS_DREAM_DEEP_MS) : undefined,
+    },
+  },
 }
 
 const SANDBOX_OVERRIDES: Partial<Config> = {

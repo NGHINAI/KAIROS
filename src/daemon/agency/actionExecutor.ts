@@ -20,6 +20,8 @@ import type { InboxSurface } from './inboxSurface'
 import type { NativeNotifier } from './nativeNotifier'
 import type { ActionRequest, ActionStatus, TrajectoryStep } from './types'
 import type { RestraintPipeline, EvaluateInputs } from '../restraint/restraintPipeline'
+import type { TrajWriter } from '../persona/trajWriter'
+import type { TrajEntry } from '../persona/types'
 
 export const EXECUTOR_SCHEMA = `
   CREATE TABLE IF NOT EXISTS agency_pending_actions (
@@ -56,6 +58,8 @@ export type DispatchResult = {
 }
 
 export class ActionExecutor {
+  private trajWriter?: TrajWriter
+
   constructor(
     private db: Database,
     private registry: IntentRegistry,
@@ -66,6 +70,11 @@ export class ActionExecutor {
     private restraintPipeline?: RestraintPipeline | null,
   ) {
     db.exec(EXECUTOR_SCHEMA)
+  }
+
+  /** Wire in a TrajWriter after construction (C.3.1 persona subsystem). */
+  setTrajWriter(writer: TrajWriter): void {
+    this.trajWriter = writer
   }
 
   async dispatch(request: ActionRequest): Promise<DispatchResult> {
@@ -221,6 +230,25 @@ export class ActionExecutor {
       this.trajectory.appendStep(trajectoryId, step)
       this.trajectory.finalize(trajectoryId, result.status === 'success' ? 'success' : 'failure')
       this.db.run('UPDATE agency_pending_actions SET status = ? WHERE request_id = ?', ['completed', request.request_id])
+
+      // C.3.1: Write to traj.md if TrajWriter is wired in
+      if (this.trajWriter) {
+        const trajEntry: TrajEntry = {
+          ts: request.requested_at,
+          task_goal: entry.intent.description,
+          intent_id: entry.intent.id,
+          args_summary: JSON.stringify(request.args).slice(0, 300),
+          steps: [{
+            action: entry.intent.id,
+            result_summary: result.details.slice(0, 200),
+            reasoning: request.reasoning.slice(0, 200),
+          }],
+          outcome: result.status === 'success' ? 'success' : 'failed',
+          duration_ms: step.duration_ms,
+        }
+        try { this.trajWriter.record(trajEntry) } catch { /* non-critical */ }
+      }
+
       return { status: 'completed', details: result.details, trajectory_id: trajectoryId }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
@@ -230,6 +258,25 @@ export class ActionExecutor {
       this.trajectory.appendStep(trajectoryId, step)
       this.trajectory.finalize(trajectoryId, 'failure', msg)
       logError(`ActionExecutor: ${entry.intent.id} failed`, err)
+
+      // C.3.1: Record failed trajectory too
+      if (this.trajWriter) {
+        const trajEntry: TrajEntry = {
+          ts: request.requested_at,
+          task_goal: entry.intent.description,
+          intent_id: entry.intent.id,
+          args_summary: JSON.stringify(request.args).slice(0, 300),
+          steps: [{
+            action: entry.intent.id,
+            result_summary: msg.slice(0, 200),
+            reasoning: request.reasoning.slice(0, 200),
+          }],
+          outcome: 'failed',
+          duration_ms: step.duration_ms,
+        }
+        try { this.trajWriter.record(trajEntry) } catch { /* non-critical */ }
+      }
+
       return { status: 'failed', details: msg, trajectory_id: trajectoryId }
     }
   }

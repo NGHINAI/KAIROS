@@ -87,6 +87,21 @@ export type Config = {
     session_id?: string
     poll_interval_ms?: number
   }
+  persona?: {
+    enabled?: boolean
+    paths?: {
+      soul?: string         // defaults to ~/.kairos/soul.md
+      persona?: string      // defaults to ~/.kairos/persona.md
+      traj?: string         // defaults to ~/.kairos/traj/
+      dreams?: string       // defaults to ~/.kairos/DREAMS.md (handled by extension)
+    }
+    token_cap?: number      // default 400 (PersonaUpdater)
+    dreaming?: {
+      light_interval_ms?: number   // default 4h
+      rem_interval_ms?: number     // default 24h
+      deep_interval_ms?: number    // default 7d
+    }
+  }
 }
 
 // ─── Database row types ─────────────────────────────────────────────
