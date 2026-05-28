@@ -60,6 +60,7 @@ export type Config = {
   orders: {
     enabled: boolean
     filePath: string
+    v2_enabled?: boolean
   }
   agency: {
     enabled: boolean

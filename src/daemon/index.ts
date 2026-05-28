@@ -112,6 +112,16 @@ import { SkillCrystallizer } from './skills/crystallizer'
 import { PersonaGate } from './skills/personaGate'
 import { ReviewQueue } from './skills/reviewQueue'
 import { registerInvokeSkillIntent } from './skills/invokeSkillIntent'
+import { OrdersStore } from './orders/v2/store'
+import { OrdersParser as OrdersParserV2 } from './orders/v2/parser'
+import { OrdersAuthor } from './orders/v2/author'
+import { ActionDispatcher as OrdersActionDispatcher } from './orders/v2/actionDispatcher'
+import { ReactiveEvaluator } from './orders/v2/reactiveEvaluator'
+import { RulesEventBus } from './orders/v2/eventBus'
+import { ConditionEvaluator } from './orders/v2/conditionEvaluator'
+import { DryRunLogger } from './orders/v2/dryRunLogger'
+import { ScheduleAdapter } from './orders/v2/scheduleAdapter'
+import { watchOrdersFile } from './orders/v2/watcher'
 
 const VERSION = '0.2.0'
 
@@ -819,6 +829,111 @@ async function main(): Promise<void> {
         }
         // ──────────────────────────────────────────────────────────────────────────
 
+        // ──────────────────────────────────────────────────────────────────────────
+        // C.4.1 STANDING_ORDERS v2 — structured DSL + time-triggered rules
+        // ──────────────────────────────────────────────────────────────────────────
+        let v2Watcher: (() => void) | null = null
+        let v2ScheduleAdapter: ScheduleAdapter | null = null
+
+        if (config.orders?.v2_enabled !== false) {
+          try {
+            const ordersV2Store = new OrdersStore(db)
+            const ordersV2Parser = new OrdersParserV2()
+            const rulesBus = new RulesEventBus()
+            const dryRunLogger = new DryRunLogger(ordersV2Store)
+            const conditionEval = new ConditionEvaluator()
+
+            const personaAwareness = (globalThis as any).__kairosPersonaAwareness
+            const getPersonaState = () => {
+              if (!personaAwareness) return {}
+              try { return personaAwareness.getLiveState?.() ?? {} } catch { return {} }
+            }
+
+            const skillDispatcher = (globalThis as any).__kairosSkillDispatcher ?? null
+            const composioClient = (globalThis as any).__kairosComposioClient ?? null
+
+            const actionDispatcher = new OrdersActionDispatcher({
+              intentRegistry,
+              skillDispatcher: skillDispatcher ?? { invoke: async () => ({ ok: false, error: 'skill subsystem not initialized', duration_ms: 0, sandbox: 'declarative' }) },
+              composio: composioClient ? {
+                invokeTool: async (_toolkit: string, _tool: string, _args: any) => ({ ok: false, error: 'composio_tool action wired in C.4.2' }),
+              } : null,
+              eventBus: rulesBus,
+            })
+
+            const reactiveEvaluator = new ReactiveEvaluator({
+              store: ordersV2Store,
+              dispatcher: actionDispatcher,
+              conditionEvaluator: conditionEval,
+              dryRunLogger,
+              getPersonaState,
+            })
+
+            // For each event-triggered rule, subscribe a listener on RulesEventBus that
+            // forwards into the reactive evaluator as a named-event firing.
+            const subscribeEventRules = () => {
+              const events = new Set<string>()
+              for (const r of ordersV2Store.listAll()) {
+                if ('event' in r.when) events.add(r.when.event)
+              }
+              for (const ev of events) {
+                rulesBus.on(ev, payload => {
+                  reactiveEvaluator.handleEvent('event', { name: ev, payload }).catch((e: any) => log(`[orders-v2] event handler failed: ${e}`, 'warn'))
+                })
+              }
+            }
+
+            v2ScheduleAdapter = new ScheduleAdapter({
+              store: ordersV2Store,
+              onFire: async (rule, ctx) => {
+                await actionDispatcher.dispatch(rule.do, ctx)
+                ordersV2Store.recordFire(rule.slug, Date.now())
+              },
+            })
+
+            const v2FilePath = config.orders?.filePath ?? join(homedir(), '.kairos', 'STANDING_ORDERS.md')
+            const refreshAllFromFile = () => {
+              try {
+                if (!require('fs').existsSync(v2FilePath)) return
+                const { rules, errors } = ordersV2Parser.parseFile(v2FilePath)
+                ordersV2Store.replaceAll(rules)
+                v2ScheduleAdapter!.refreshAll()
+                subscribeEventRules()
+                if (errors.length > 0) log(`[orders-v2] ${errors.length} rules skipped due to parse errors`, 'warn')
+              } catch (err) {
+                log(`[orders-v2] reload failed: ${err}`, 'warn')
+              }
+            }
+
+            refreshAllFromFile()
+            if (require('fs').existsSync(v2FilePath)) {
+              v2Watcher = watchOrdersFile(v2FilePath, refreshAllFromFile, 200)
+            }
+
+            if (router) {
+              const ordersAuthor = new OrdersAuthor({ router, store: ordersV2Store, parser: ordersV2Parser, filePath: v2FilePath })
+              ;(globalThis as any).__kairosOrdersAuthor = ordersAuthor
+            }
+
+            // Wire perception bus: subscribe to all events via wildcard '*'.
+            // The proactive EventBus dispatches both targeted (source-keyed) and wildcard subscribers.
+            // Each WorldEvent carries { kind, payload, source, ts, id } — we forward kind + payload
+            // into ReactiveEvaluator so state-selector rules can react to perception signals.
+            bus.subscribe('*', (e) => {
+              reactiveEvaluator.handleEvent(e.kind, e.payload).catch((err: any) => log(`[orders-v2] reactive failed: ${err}`, 'warn'))
+            })
+
+            ;(globalThis as any).__kairosOrdersV2Store = ordersV2Store
+            ;(globalThis as any).__kairosOrdersV2DryRunLogger = dryRunLogger
+            ;(globalThis as any).__kairosOrdersV2RulesBus = rulesBus
+
+            log(`[orders-v2] subsystem ready — ${ordersV2Store.listAll().length} rules loaded`)
+          } catch (err) {
+            log(`[orders-v2] subsystem failed to start: ${err}`, 'warn')
+          }
+        }
+        // ──────────────────────────────────────────────────────────────────────────
+
         const executor = new ActionExecutor(db, intentRegistry, trajectory, inbox, actionCtx, restraintPipeline)
 
         // Wire TrajWriter into executor if persona subsystem is active
@@ -866,6 +981,8 @@ async function main(): Promise<void> {
           for (const t of personaDreamingTimers) clearInterval(t)
           if (awmWorker) awmWorker.stop()
           if (curatorTimer) clearInterval(curatorTimer)
+          if (v2Watcher) v2Watcher()
+          if (v2ScheduleAdapter) v2ScheduleAdapter.stopAll()
         }
       }
 
