@@ -1,3 +1,30 @@
+## [v0.3.7-phase-c3-3] - 2026-05-28
+
+### Added
+- **AWM (Agent Workflow Memory) subsystem** — self-improving skill crystallization following the agentskills.io Dec-2025 standard
+- **SKILL.md parser/serializer** with strict frontmatter validation (name regex, description length, KAIROS metadata extensions)
+- **SkillWriter** with atomic tmp-then-rename persistence to `~/.kairos/skills/<slug>/`
+- **UsageTracker** — Hermes 10-field `.usage.json` schema, failure history bounded to last 5
+- **SkillStore** — SQLite metadata index with `rebuildFromDisk` recovery
+- **SkillRegistry** — progressive disclosure (metadata at boot, body on activation), hot-reload via fsWatch
+- **TsRunner** — Bun Worker TypeScript executor with 30s timeout
+- **PythonRunner** — Composio Workbench session-based Python executor
+- **SkillDispatcher** — routes scripts/main.ts → TsRunner, scripts/main.py → PythonRunner, else declarative
+- **SkillCrystallizer** — LLM (mid-tier `skill_crystallize`) composes SKILL.md from trajectory clusters
+- **PersonaGate** — cosine dedup (threshold 0.85) + autonomy tier classification (GREEN/YELLOW auto-promote, ORANGE/RED queue)
+- **ReviewQueue** — SQLite-backed approval queue for risky skills
+- **AwmWorker** — 4h-interval trajectory watcher with cluster detection and crystallization pipeline
+- **Curator** — Hermes 2-phase lifecycle (deterministic stale@30d/archive@90d + LLM-driven keep/patch/consolidate/archive at `skill_curate` ultra-cheap tier)
+- **invoke_skill** agency intent (GREEN at intent level; safety enforced via per-skill PersonaGate tier)
+- Validation gate (`scripts/validate-phase-c3-3.ts`) — 14 assertions cover every subsystem
+
+### Changed
+- `TaskType` union extended with `skill_crystallize` (mid tier) and `skill_curate` (ultra-cheap tier)
+- `SystemBlock.source` union extended with `'skills'` for SkillRegistry.buildSystemBlock()
+- `UsageTracker` storage decoupled from skill dirs — now `~/.kairos/skills/.usage/<slug>.json` (was inside each skill dir; breaks when Curator moves dirs to .archive)
+
+---
+
 ## v0.3.6-phase-c3-1 (2026-05-28) — User Profile + Persona-Awareness + soul.md
 
 Phase C.3.1 establishes the KAIROS `.md` file family (soul.md / persona.md / traj.md / DREAMS.md) — the foundation for the agent intelligence layer. Identity is stable (soul.md), user model is live (persona.md, Dreaming-driven), every action is logged (traj.md), and consolidation runs in 3 phases (DREAMS.md).
