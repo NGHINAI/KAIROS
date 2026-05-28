@@ -14,8 +14,9 @@ const TASK_TO_TIER: Record<TaskType, Tier> = {
   action_compose:   'mid',
   dream:            'mid',
   agency_judge:     'mid',
-  skill_generate:   'heavy',
-  source_patch:     'heavy',
+  skill_generate:     'heavy',
+  skill_crystallize:  'mid',
+  source_patch:       'heavy',
 }
 
 export type Candidate = { provider: ProviderId; model: string }
