@@ -20,7 +20,8 @@
     "@modelcontextprotocol/sdk": "^1.0.4",
     "fastembed": "^2.1.0",
     "googleapis": "^171.4.0",
-    "openai": "^6.39.0"
+    "openai": "^6.39.0",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@types/bun": "latest"
