@@ -122,6 +122,7 @@ import { ConditionEvaluator } from './orders/v2/conditionEvaluator'
 import { DryRunLogger } from './orders/v2/dryRunLogger'
 import { ScheduleAdapter } from './orders/v2/scheduleAdapter'
 import { watchOrdersFile } from './orders/v2/watcher'
+import { buildApprovalPrompt } from './orders/v2/approvalPrompt'
 
 const VERSION = '0.2.0'
 
@@ -910,6 +911,18 @@ async function main(): Promise<void> {
               v2Watcher = watchOrdersFile(v2FilePath, refreshAllFromFile, 200)
             }
 
+            // Hourly check for dry-run windows that expired → surface as a log/inbox prompt
+            const v2ApprovalTimer: ReturnType<typeof setInterval> = setInterval(() => {
+              try {
+                const expired = dryRunLogger.listReadyForApproval(Date.now())
+                for (const rule of expired) {
+                  const prompt = buildApprovalPrompt(rule, dryRunLogger, Date.now())
+                  log(`[orders-v2] approval ready: ${prompt.title} — ${prompt.body.replace(/\n/g, ' | ')}`)
+                }
+              } catch (err) { log(`[orders-v2] approval scan failed: ${err}`, 'warn') }
+            }, 60 * 60 * 1000)
+            ;(globalThis as any).__kairosOrdersV2ApprovalTimer = v2ApprovalTimer
+
             if (router) {
               const ordersAuthor = new OrdersAuthor({ router, store: ordersV2Store, parser: ordersV2Parser, filePath: v2FilePath })
               ;(globalThis as any).__kairosOrdersAuthor = ordersAuthor
@@ -982,6 +995,7 @@ async function main(): Promise<void> {
           if (awmWorker) awmWorker.stop()
           if (curatorTimer) clearInterval(curatorTimer)
           if (v2Watcher) v2Watcher()
+          if ((globalThis as any).__kairosOrdersV2ApprovalTimer) clearInterval((globalThis as any).__kairosOrdersV2ApprovalTimer)
           if (v2ScheduleAdapter) v2ScheduleAdapter.stopAll()
         }
       }
