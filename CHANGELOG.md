@@ -1,3 +1,26 @@
+## v0.3.6-phase-c3-1 (2026-05-28) — User Profile + Persona-Awareness + soul.md
+
+Phase C.3.1 establishes the KAIROS `.md` file family (soul.md / persona.md / traj.md / DREAMS.md) — the foundation for the agent intelligence layer. Identity is stable (soul.md), user model is live (persona.md, Dreaming-driven), every action is logged (traj.md), and consolidation runs in 3 phases (DREAMS.md).
+
+### What shipped (11 tasks, ~1,700 LOC)
+
+- **SoulLoader + SoulWizard** — OpenClaw-derived soul.md format (Core Truths + Boundaries + Vibe). First-run wizard asks 5 questions, lightweight LLM composes. 4 BASELINE_BOUNDARIES hardcoded in runtime — never user-overridable.
+- **PersonaUpdater** — Hermes-derived user model. ≤400 token cap for prefix-cache efficiency. Two write paths: Dreaming-driven and nudge-based.
+- **TrajWriter** — UFO2 ExperienceFlow-derived per-day trajectory log. Same SECRET_PATTERNS sanitization as C.1.5 UrgencyFloor (incl. Composio `ak_` key prefix).
+- **DreamingExtension** — Hermes 3-phase Dreaming (Light/REM/Deep) atop Phase B's existing dreamer. 6-factor scoring formula. Writes DreamCycleEntry to DREAMS.md.
+- **PersonaAwareness** — derives PersonaHints (interrupt_aggressiveness, in_focus_now, active_hours_now, prefer_terse, prefer_voice_over_text). Consumed by RestraintPipeline + future agency layer.
+- **RestraintPipeline integration** — C.1.5 Earned Interrupt now reads persona hints. `in_focus_now → suppress`. `interrupt_aggressiveness=low → raise threshold +0.2`. Backward-compatible: works without personaAwareness too.
+
+### Note for C.4
+
+HEARTBEAT.md (time-triggered rules) is deferred to C.4. C.4's existing scope (STANDING_ORDERS.md v2 DSL refactor) should bundle HEARTBEAT.md alongside it.
+
+### Validation
+- 482+ unit tests passing (existing + new persona tests)
+- Validation gate (`scripts/validate-phase-c3-1.ts`) covers 7 assertions across the persona subsystem
+
+---
+
 ## v0.3.5-phase-c2-7 (2026-05-27) — Composio Connectors (reactive)
 
 Phase C.2.7 wires Composio's 500+ integrations into KAIROS as MCP tools. Users connect Slack, Gmail, Notion, GitHub, etc. via voice-first auth (auto-open browser + Earned Interrupt restraint). NO BYOC — single `COMPOSIO_API_KEY` (Model A) serves all KAIROS users via Composio's multi-tenant userId scoping.
