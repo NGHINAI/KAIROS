@@ -102,6 +102,21 @@ export type Config = {
       deep_interval_ms?: number    // default 7d
     }
   }
+  skills?: {
+    enabled?: boolean              // default true
+    dir?: string                   // default ~/.kairos/skills/
+    awm?: {
+      enabled?: boolean            // default true
+      interval_ms?: number         // default 4h
+      min_tool_calls?: number      // default 5
+      min_occurrences?: number     // default 3
+    }
+    curator?: {
+      enabled?: boolean            // default true
+      cycle_interval_days?: number // default 7
+      idle_gate_ms?: number        // default 2h
+    }
+  }
 }
 
 // ─── Database row types ─────────────────────────────────────────────

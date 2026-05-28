@@ -98,6 +98,20 @@ import { TrajWriter } from './persona/trajWriter'
 import { PersonaUpdater } from './persona/personaUpdater'
 import { DreamingExtension } from './persona/dreamingExtension'
 import { PersonaAwareness } from './persona/personaAwareness'
+import { readFileSync } from 'fs'
+import { SkillStore } from './skills/skillStore'
+import { SkillRegistry } from './skills/skillRegistry'
+import { UsageTracker } from './skills/usageTracker'
+import { SkillWriter } from './skills/skillWriter'
+import { SkillDispatcher } from './skills/skillDispatcher'
+import { TsRunner } from './skills/tsRunner'
+import { PythonRunner } from './skills/pythonRunner'
+import { AwmWorker } from './skills/awmWorker'
+import { Curator } from './skills/curator'
+import { SkillCrystallizer } from './skills/crystallizer'
+import { PersonaGate } from './skills/personaGate'
+import { ReviewQueue } from './skills/reviewQueue'
+import { registerInvokeSkillIntent } from './skills/invokeSkillIntent'
 
 const VERSION = '0.2.0'
 
@@ -697,12 +711,123 @@ async function main(): Promise<void> {
         }
         // ──────────────────────────────────────────────────────────────────────
 
+        // ──────────────────────────────────────────────────────────────────────────
+        // C.3.3 AWM (Agent Workflow Memory) subsystem — skill registry + worker + curator
+        // ──────────────────────────────────────────────────────────────────────────
+        let awmWorker: AwmWorker | null = null
+        let curatorInst: Curator | null = null
+        let curatorTimer: ReturnType<typeof setInterval> | null = null
+        let lastCuratorRunAt = 0
+
+        if (config.skills?.enabled !== false) {
+          try {
+            const skillsRoot = config.skills?.dir
+            const skillStore = new SkillStore(db, skillsRoot ? { root_dir: skillsRoot } : {})
+            skillStore.rebuildFromDisk()
+
+            const usageTracker = new UsageTracker(skillsRoot ? { root_dir: skillsRoot } : {})
+            const skillWriter = new SkillWriter(skillsRoot ? { root_dir: skillsRoot } : {})
+            const reviewQueue = new ReviewQueue(db)
+
+            const tsRunner = new TsRunner()
+            // PythonRunner depends on a Composio SDK; pull it from globalThis if Composio came up.
+            // If not, Python skills will fail at dispatch — that's acceptable for the first boot.
+            const composioForPython = (globalThis as any).__kairosComposioClient ?? null
+            const pythonRunner = composioForPython
+              ? new PythonRunner({ composio: composioForPython, userId: 'local' })
+              : null
+
+            const skillRegistryInst = new SkillRegistry({ skillStore, usageTracker, rootDir: skillsRoot })
+            skillRegistryInst.initialize()
+
+            const dispatcher = new SkillDispatcher({
+              skillRegistry: skillRegistryInst,
+              usageTracker,
+              tsRunner,
+              pythonRunner: pythonRunner as PythonRunner,
+            })
+
+            // AwmWorker — induction pipeline. Requires router + persona TrajWriter.
+            const _trajWriterForAwm = (globalThis as { __kairosTrajWriter?: TrajWriter }).__kairosTrajWriter
+            if (_trajWriterForAwm && router) {
+              const crystallizer = new SkillCrystallizer({ router })
+              const personaGate = new PersonaGate({
+                skillStore,
+                skillWriter,
+                reviewQueue,
+                // Embedder: lazy-load from global if memory subsystem is up; else stub returns dummy
+                embedder: (globalThis as any).__kairosLocalEmbedder ?? {
+                  async warmup() {},
+                  async embed(_t: string) { return new Float32Array(384) },
+                },
+                loadExistingSkillContent: (dir: string) => {
+                  try { return readFileSync(join(dir, 'SKILL.md'), 'utf8') } catch { return null }
+                },
+              })
+
+              awmWorker = new AwmWorker(
+                { trajWriter: _trajWriterForAwm, crystallizer, personaGate },
+                {
+                  min_tool_calls: config.skills?.awm?.min_tool_calls,
+                  min_occurrences: config.skills?.awm?.min_occurrences,
+                },
+              )
+              if (config.skills?.awm?.enabled !== false) {
+                awmWorker.start(config.skills?.awm?.interval_ms ?? 4 * 60 * 60 * 1000)
+              }
+            } else {
+              log('[skills] AwmWorker skipped — TrajWriter or ModelRouter not available', 'warn')
+            }
+
+            // Curator — weekly idle-gated lifecycle
+            curatorInst = new Curator(
+              { skillStore, usageTracker, skillWriter, router: router ?? undefined },
+              {
+                cycle_interval_days: config.skills?.curator?.cycle_interval_days,
+                idle_gate_ms: config.skills?.curator?.idle_gate_ms,
+                root_dir: skillsRoot,
+              },
+            )
+            if (config.skills?.curator?.enabled !== false) {
+              // Check every hour; only actually runs if shouldRun() gate passes
+              curatorTimer = setInterval(() => {
+                const now = Date.now()
+                const lastAgencyIntentAt = (globalThis as any).__kairosLastAgencyIntentAt ?? Date.now()
+                const idleMs = now - lastAgencyIntentAt
+                if (!curatorInst!.shouldRun(now, lastCuratorRunAt, idleMs)) return
+                curatorInst!.runOnce(now)
+                  .then(r => {
+                    lastCuratorRunAt = r.ran_at
+                    log(`[skills] curator ran: stale=${r.phase1.marked_stale.length} archived=${r.phase1.archived.length} reviewed=${r.phase2.processed}`)
+                  })
+                  .catch(err => log(`[skills] curator failed: ${err}`, 'warn'))
+              }, 60 * 60 * 1000)
+            }
+
+            // Register the invoke_skill intent
+            registerInvokeSkillIntent(intentRegistry, { dispatcher })
+
+            // Stash registry on globalThis for system_blocks injection by agency layer
+            ;(globalThis as { __kairosSkillRegistry?: SkillRegistry }).__kairosSkillRegistry = skillRegistryInst
+            ;(globalThis as { __kairosSkillStore?: SkillStore }).__kairosSkillStore = skillStore
+
+            log(`[skills] subsystem ready — ${skillStore.listAll().length} skills indexed, dispatcher + registry active${awmWorker ? ', AwmWorker started' : ''}${curatorTimer ? ', Curator scheduled' : ''}`)
+          } catch (err) {
+            log(`[skills] subsystem failed to start, continuing without skill subsystem: ${err}`, 'warn')
+          }
+        }
+        // ──────────────────────────────────────────────────────────────────────────
+
         const executor = new ActionExecutor(db, intentRegistry, trajectory, inbox, actionCtx, restraintPipeline)
 
         // Wire TrajWriter into executor if persona subsystem is active
         const _trajWriter = (globalThis as { __kairosTrajWriter?: TrajWriter }).__kairosTrajWriter
         if (_trajWriter) executor.setTrajWriter(_trajWriter)
-        const triggerEngine = new TriggerEngine(db, bus, (req) => executor.dispatch(req))
+        const triggerEngine = new TriggerEngine(db, bus, async (req) => {
+          const result = await executor.dispatch(req)
+          ;(globalThis as any).__kairosLastAgencyIntentAt = Date.now()
+          return result
+        })
         const bridge = new PerceptionToTrigger(bus, episodic)
 
         // Seed bridge high-water from latest existing episode so we don't re-fire on restart
@@ -738,6 +863,8 @@ async function main(): Promise<void> {
           clearInterval(bridgeTimer)
           agencyHttpServer.stop()
           for (const t of personaDreamingTimers) clearInterval(t)
+          if (awmWorker) awmWorker.stop()
+          if (curatorTimer) clearInterval(curatorTimer)
         }
       }
 
