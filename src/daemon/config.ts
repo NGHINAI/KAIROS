@@ -78,6 +78,11 @@ const DEFAULTS: Config = {
     enabled: process.env.KAIROS_EMBED_ENABLED === 'false' ? false : true,
     cache_dir: process.env.KAIROS_EMBED_CACHE_DIR ?? join(process.env.HOME ?? '', '.kairos', 'cache', 'huggingface'),
   },
+  composio: {
+    enabled: process.env.KAIROS_COMPOSIO_ENABLED !== 'false',
+    api_key: process.env.COMPOSIO_API_KEY,
+    poll_interval_ms: process.env.KAIROS_COMPOSIO_POLL_MS ? parseInt(process.env.KAIROS_COMPOSIO_POLL_MS) : undefined,
+  },
 }
 
 const SANDBOX_OVERRIDES: Partial<Config> = {

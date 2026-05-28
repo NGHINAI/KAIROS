@@ -81,6 +81,12 @@ export type Config = {
     cache_dir?: string
     model?: string
   }
+  composio?: {
+    enabled?: boolean
+    api_key?: string
+    session_id?: string
+    poll_interval_ms?: number
+  }
 }
 
 // ─── Database row types ─────────────────────────────────────────────

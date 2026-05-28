@@ -86,6 +86,13 @@ import { ServiceResolver } from './onboarding/serviceResolver'
 import { NpmRegistryClient } from './onboarding/npmRegistryClient'
 import { McpCatalogClient } from './onboarding/mcpCatalogClient'
 import { registerSetupIntent } from './onboarding/setupIntent'
+import { ComposioClient } from './connectors/composioClient'
+import { ConnectionStore } from './connectors/connectionStore'
+import { ConnectionFlow } from './connectors/connectionFlow'
+import { ComposioSessionManager } from './connectors/composioSessionManager'
+import { TokenExpiryPoller } from './connectors/tokenExpiryPoller'
+import { registerConnectServiceIntent } from './connectors/connectServiceIntent'
+import { registerDisconnectServiceIntent } from './connectors/disconnectServiceIntent'
 
 const VERSION = '0.2.0'
 
@@ -516,6 +523,68 @@ async function main(): Promise<void> {
             runtime: setupRuntime,
           })
           log('Onboarding subsystem active — setup_service intent registered')
+
+          // ─── Composio subsystem (Phase C.2.7) ─────────────────────────────
+          if (config.composio?.enabled !== false) {
+            const composioApiKey = process.env.COMPOSIO_API_KEY ?? config.composio?.api_key
+            if (!composioApiKey) {
+              log('[composio] no COMPOSIO_API_KEY set, skipping Composio subsystem. Set COMPOSIO_API_KEY env var to enable connectors.', 'warn')
+            } else {
+              try {
+                const composioClient = new ComposioClient({ apiKey: composioApiKey })
+                const connectionStore = new ConnectionStore(db)
+                const composioUserId = 'local'
+
+                const activeConnections = connectionStore.listActive(composioUserId)
+                const initialToolkits = activeConnections.map(c => c.toolkit_slug)
+
+                const sessionManager = new ComposioSessionManager({
+                  sdk: composioClient.sdk,
+                  userId: composioUserId,
+                  toolkits: initialToolkits,
+                  cachedSessionId: config.composio?.session_id,
+                  manageConnections: true,
+                })
+                await sessionManager.init()
+                log(`[composio] session ready (${sessionManager.getSessionId()}, ${initialToolkits.length} toolkits)`)
+
+                await mcpHost.addServer({
+                  id: 'composio',
+                  enabled: true,
+                  transport: 'http',
+                  url: sessionManager.getMcpUrl(),
+                  headers: sessionManager.getMcpHeaders(),
+                  tier_policy: { default: 'YELLOW' },
+                })
+
+                const connectionFlow = new ConnectionFlow({
+                  composio: composioClient,
+                  browserOpener: new BrowserOpener(),
+                  oauthCallbackHandler: new OAuthCallbackHandler(),
+                  connectionStore,
+                  announcer: { announce: async (text: string, _opts: any) => log(`[composio:announce] ${text}`) },
+                })
+
+                registerConnectServiceIntent(intentRegistry, { connectionFlow, sessionManager, userId: composioUserId })
+                registerDisconnectServiceIntent(intentRegistry, { composio: composioClient, connectionStore, sessionManager, userId: composioUserId })
+
+                const expiryPoller = new TokenExpiryPoller({
+                  composio: composioClient,
+                  connectionStore,
+                  onConnectionExpired: (c) => {
+                    log(`[composio] connection expired: ${c.toolkit_slug} — needs reconnect`, 'warn')
+                  },
+                  userId: composioUserId,
+                  intervalMs: config.composio?.poll_interval_ms ?? 5 * 60 * 1000,
+                })
+                expiryPoller.start()
+
+                log('[composio] subsystem ready')
+              } catch (err) {
+                log('[composio] subsystem failed to start, continuing without connectors: ' + String(err), 'warn')
+              }
+            }
+          }
         }
 
         const trajectory = new TrajectoryLog(db)

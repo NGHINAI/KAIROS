@@ -84,6 +84,33 @@ export class McpHost {
     }))
   }
 
+  /** Dynamically register and connect a server after initial startAll(). */
+  async addServer(config: McpServerConfig): Promise<void> {
+    try {
+      const client = await this.createClient(config)
+      await client.connect()
+      this.clients.set(config.id, client)
+
+      const listed = await client.listTools()
+      for (const t of listed) {
+        const qualified = `${config.id}::${t.name}`
+        const tier = config.tier_policy.overrides?.[t.name] ?? config.tier_policy.default
+        this.tools.set(qualified, {
+          server_id: config.id,
+          tool_name: t.name,
+          qualified_id: qualified,
+          description: t.description ?? '',
+          input_schema: t.inputSchema,
+          tier,
+        })
+      }
+      log(`McpHost: ${config.id} added dynamically (${listed.length} tools)`)
+    } catch (err) {
+      logError(`McpHost: addServer ${config.id} failed`, err)
+      throw err
+    }
+  }
+
   async stopAll(): Promise<void> {
     await Promise.all(Array.from(this.clients.values()).map(c => c.disconnect()))
     this.clients.clear()
