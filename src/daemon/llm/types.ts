@@ -27,6 +27,7 @@ export type TaskType =
   | 'agency_judge'       // mid: judge an agent action
   | 'persona_compose'   // ultra-cheap: compose soul.md from wizard answers
   | 'skill_crystallize' // mid: LLM-compose candidate SKILL.md from trajectory cluster
+  | 'skill_curate'       // ultra-cheap: Phase 2 Curator decides keep/patch/consolidate/archive
 
 export type Tier = 'ultra_cheap' | 'mid' | 'heavy'
 

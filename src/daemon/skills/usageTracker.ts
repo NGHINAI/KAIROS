@@ -31,16 +31,18 @@ export type UsageTrackerOptions = {
 
 export class UsageTracker {
   private rootDir: string
+  private usageDir: string   // ~/.kairos/skills/.usage/ — decoupled from skill dirs
 
   constructor(opts: UsageTrackerOptions = {}) {
     this.rootDir = opts.root_dir ?? join(homedir(), '.kairos', 'skills')
+    this.usageDir = join(this.rootDir, '.usage')
   }
 
-  private pathFor(slug: string): string {
-    return join(this.rootDir, slug, '.usage.json')
+  pathFor(slug: string): string {
+    return join(this.usageDir, `${slug}.json`)
   }
 
-  /** Read .usage.json for slug, or null if missing. */
+  /** Read usage record for slug, or null if missing. */
   read(slug: string): SkillUsage | null {
     const path = this.pathFor(slug)
     if (!existsSync(path)) return null
@@ -53,8 +55,7 @@ export class UsageTracker {
 
   /** Atomic write — tmp-then-rename. */
   private write(slug: string, usage: SkillUsage): void {
-    const dir = join(this.rootDir, slug)
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+    if (!existsSync(this.usageDir)) mkdirSync(this.usageDir, { recursive: true })
     const path = this.pathFor(slug)
     const tmp = path + '.tmp.' + process.pid
     writeFileSync(tmp, JSON.stringify(usage, null, 2))

@@ -16,6 +16,7 @@ const TASK_TO_TIER: Record<TaskType, Tier> = {
   agency_judge:     'mid',
   skill_generate:     'heavy',
   skill_crystallize:  'mid',
+  skill_curate:       'ultra_cheap',
   source_patch:       'heavy',
 }
 
