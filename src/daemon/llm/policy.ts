@@ -10,6 +10,7 @@ const TASK_TO_TIER: Record<TaskType, Tier> = {
   trigger_eval:     'ultra_cheap',
   classify:         'ultra_cheap',
   observe_classify: 'ultra_cheap',
+  persona_compose:  'ultra_cheap',
   action_compose:   'mid',
   dream:            'mid',
   agency_judge:     'mid',

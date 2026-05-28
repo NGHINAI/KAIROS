@@ -25,6 +25,7 @@ export type TaskType =
   | 'classify'           // ultra-cheap: tag an event
   | 'observe_classify'   // ultra-cheap: classify an observation
   | 'agency_judge'       // mid: judge an agent action
+  | 'persona_compose'   // ultra-cheap: compose soul.md from wizard answers
 
 export type Tier = 'ultra_cheap' | 'mid' | 'heavy'
 
