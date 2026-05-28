@@ -7,11 +7,17 @@ import type { AutonomyTier } from '../agency/types'
 export type McpServerConfig = {
   id: string                          // stable id, used as tool namespace ('github::search')
   enabled: boolean
-  transport: 'stdio' | 'sse' | 'http'
+  transport?: 'stdio' | 'sse' | 'http'  // default 'stdio' for back-compat
   command?: string                    // for stdio
   args?: string[]
   env?: Record<string, string>        // additional env (auth comes via auth_keychain)
-  url?: string                        // for sse/http
+  url?: string                        // for sse/http — full URL incl. path
+  headers?: Record<string, string>    // sent on every HTTP/SSE request
+  headers_keychain?: Array<{
+    service: string                   // macOS keychain service name
+    account: string                   // account/key id
+    header_name: string               // HTTP header to populate (e.g. 'Authorization')
+  }>
   auth_keychain?: {
     service: string                   // macOS keychain service name
     account: string                   // account/key id

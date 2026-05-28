@@ -2,23 +2,57 @@
 // Manages multiple MCP server connections. Loads config from JSON,
 // resolves auth via keychain, starts enabled servers in parallel,
 // exposes a unified tool list namespaced as serverId::toolName.
+//
+// C.2.7: supports both stdio (McpClient) and http/sse (HttpMcpClient)
+// transports, normalises callTool() return shape across both, and
+// guards destructive tool invocations behind an optional confirmer.
 
 import { existsSync, readFileSync } from 'fs'
 import { log, logError } from '../logger'
 import { McpClient } from './mcpClient'
+import { HttpMcpClient } from './httpMcpClient'
 import type { Keychain } from './keychain'
 import type { McpServerConfig, McpToolDescriptor, McpToolCallResult } from './types'
+
+// ---------------------------------------------------------------------------
+// DestructiveToolGuard types
+// ---------------------------------------------------------------------------
+
+export interface DestructiveActionConfirmer {
+  /** Returns true if the user confirms the destructive action within `timeoutMs`. */
+  confirm(opts: {
+    tool_name: string
+    args: Record<string, unknown>
+    description: string
+    timeout_ms: number
+  }): Promise<boolean>
+}
+
+const DESTRUCTIVE_PATTERN = /delete|remove|archive|trash|purge|drop/i
+
+// ---------------------------------------------------------------------------
+// McpHost options
+// ---------------------------------------------------------------------------
 
 export type McpHostOptions = {
   configPath: string
   keychain: Keychain
+  /** When provided, destructive-pattern tools require confirmation before execution. */
+  destructiveConfirmer?: DestructiveActionConfirmer
 }
 
-export class McpHost {
-  private clients: Map<string, McpClient> = new Map()
-  private tools: Map<string, McpToolDescriptor> = new Map()
+// ---------------------------------------------------------------------------
+// McpHost
+// ---------------------------------------------------------------------------
 
-  constructor(private opts: McpHostOptions) {}
+export class McpHost {
+  private clients: Map<string, McpClient | HttpMcpClient> = new Map()
+  private tools: Map<string, McpToolDescriptor> = new Map()
+  private readonly destructiveConfirmer?: DestructiveActionConfirmer
+
+  constructor(private opts: McpHostOptions) {
+    this.destructiveConfirmer = opts.destructiveConfirmer
+  }
 
   async startAll(): Promise<void> {
     const cfg = this.loadConfig()
@@ -26,12 +60,7 @@ export class McpHost {
 
     await Promise.all(enabled.map(async (s) => {
       try {
-        const env: Record<string, string> = {}
-        if (s.auth_keychain) {
-          const secret = await this.opts.keychain.get(s.auth_keychain.service, s.auth_keychain.account)
-          if (secret) env[s.auth_keychain.env_var] = secret
-        }
-        const client = new McpClient(s, env)
+        const client = await this.createClient(s)
         await client.connect()
         this.clients.set(s.id, client)
 
@@ -43,7 +72,7 @@ export class McpHost {
             server_id: s.id,
             tool_name: t.name,
             qualified_id: qualified,
-            description: t.description,
+            description: t.description ?? '',
             input_schema: t.inputSchema,
             tier,
           })
@@ -74,8 +103,97 @@ export class McpHost {
     if (!tool) return { ok: false, error: `unknown tool: ${qualifiedId}` }
     const client = this.clients.get(tool.server_id)
     if (!client) return { ok: false, error: `server ${tool.server_id} not connected` }
-    return await client.callTool(tool.tool_name, args)
+
+    // V3 DestructiveToolGuard
+    const guard = await this.maybeGuardDestructive(tool.tool_name, args)
+    if (!guard.allowed) {
+      return { ok: false, error: guard.cancellation }
+    }
+
+    return await this.invokeAndNormalize(client, tool.tool_name, args)
   }
+
+  // ---------------------------------------------------------------------------
+  // Sub-task B: transport-branching factory
+  // ---------------------------------------------------------------------------
+
+  private async createClient(config: McpServerConfig): Promise<McpClient | HttpMcpClient> {
+    const transport = config.transport ?? 'stdio'   // back-compat: stdio is default
+    if (transport === 'http' || transport === 'sse') {
+      if (!config.url) throw new Error(`McpHost: ${config.id} has transport=${transport} but no url`)
+      const headers = await this.resolveHeaders(config)
+      return new HttpMcpClient({ url: config.url, headers })
+    }
+    // stdio path — inject auth env var from keychain if configured
+    const env: Record<string, string> = {}
+    if (config.auth_keychain) {
+      const secret = await this.opts.keychain.get(config.auth_keychain.service, config.auth_keychain.account)
+      if (secret) env[config.auth_keychain.env_var] = secret
+    }
+    return new McpClient(config, env)
+  }
+
+  private async resolveHeaders(config: McpServerConfig): Promise<Record<string, string>> {
+    const headers = { ...(config.headers ?? {}) }
+    for (const kc of config.headers_keychain ?? []) {
+      const value = await this.opts.keychain.get(kc.service, kc.account)
+      if (value) headers[kc.header_name] = value
+    }
+    return headers
+  }
+
+  // ---------------------------------------------------------------------------
+  // Sub-task C: normalize callTool() return shape across both client types
+  // ---------------------------------------------------------------------------
+
+  private async invokeAndNormalize(
+    client: McpClient | HttpMcpClient,
+    toolName: string,
+    args: Record<string, unknown>,
+  ): Promise<McpToolCallResult> {
+    try {
+      const raw = await client.callTool(toolName, args)
+      // McpClient already returns { ok, output_text?, error? } — pass through
+      if (raw && typeof raw === 'object' && 'ok' in raw) {
+        return raw as McpToolCallResult
+      }
+      // HttpMcpClient returns raw SDK result — normalize it
+      const r = raw as any
+      if (r?.isError === true) {
+        const errText = (r?.content ?? []).map((c: any) => c.text ?? '').join('\n') || 'unknown error'
+        return { ok: false, error: errText }
+      }
+      const outText = (r?.content ?? []).map((c: any) => c.text ?? '').join('\n')
+      return { ok: true, output_text: outText }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Sub-task D: V3 DestructiveToolGuard
+  // ---------------------------------------------------------------------------
+
+  private async maybeGuardDestructive(
+    toolName: string,
+    args: Record<string, unknown>,
+  ): Promise<{ allowed: boolean; cancellation?: string }> {
+    if (!this.destructiveConfirmer) return { allowed: true }
+    if (!DESTRUCTIVE_PATTERN.test(toolName)) return { allowed: true }
+    const desc = `${toolName} with args: ${JSON.stringify(args).slice(0, 200)}`
+    const ok = await this.destructiveConfirmer.confirm({
+      tool_name: toolName,
+      args,
+      description: desc,
+      timeout_ms: 30_000,
+    })
+    if (!ok) return { allowed: false, cancellation: 'destructive action cancelled by user (or timeout)' }
+    return { allowed: true }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Config loader
+  // ---------------------------------------------------------------------------
 
   private loadConfig(): McpServerConfig[] {
     if (!existsSync(this.opts.configPath)) return []
