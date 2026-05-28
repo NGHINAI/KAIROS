@@ -21,3 +21,8 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+# Secrets — never commit. Use .env.example for committed templates.
+.env
+.env.local
+.env.*.local
