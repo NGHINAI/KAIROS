@@ -73,4 +73,28 @@ describe('ComposioClient', () => {
     const c = new ComposioClient({ apiKey: 'test', _sdk: fakeSdk })
     await c.linkConnection({ userId: 'u1', authConfigId: 'ac_1' })   // must succeed without calling initiate
   })
+
+  it('executeTool uses positional signature (slug, body) with dangerouslySkipVersionCheck=true', async () => {
+    // @composio/core@0.10.0 signature: sdk.tools.execute(slug, { userId, arguments, ... }, modifiers).
+    // The single-object form silently fails (object passed as slug). Without
+    // dangerouslySkipVersionCheck, every manual execute throws TOOL_VERSION_REQUIRED
+    // because KAIROS rules implicitly target "latest" tool versions.
+    let receivedSlug: any
+    let receivedBody: any
+    const fakeSdk: any = {
+      tools: {
+        execute: async (slug: string, body: any) => {
+          receivedSlug = slug
+          receivedBody = body
+          return { successful: true, data: { id: 'msg_1' } }
+        },
+      },
+    }
+    const c = new ComposioClient({ apiKey: 'test', _sdk: fakeSdk })
+    await c.executeTool({ toolName: 'GMAIL_SEND_EMAIL', userId: 'u1', arguments: { recipient_email: 'x@y.z' } })
+    expect(receivedSlug).toBe('GMAIL_SEND_EMAIL')
+    expect(receivedBody.userId).toBe('u1')
+    expect(receivedBody.arguments).toEqual({ recipient_email: 'x@y.z' })
+    expect(receivedBody.dangerouslySkipVersionCheck).toBe(true)
+  })
 })

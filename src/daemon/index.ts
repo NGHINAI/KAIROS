@@ -1043,6 +1043,20 @@ async function main(): Promise<void> {
             const pendingQueue = new PendingEditsQueue(db)
 
             if (router) {
+              // Compute "connected toolkits" lazily so the LLM prompt reflects current
+              // OAuth state at authoring time (not at daemon-boot time).
+              const _connStore = (globalThis as any).__kairosConnectionStore
+              const getConnectedToolkits = (): string[] => {
+                try {
+                  const conns = _connStore?.listActive?.() ?? _connStore?.list?.() ?? []
+                  const set = new Set<string>()
+                  for (const c of conns) {
+                    const slug = String((c as any).toolkit_slug ?? (c as any).toolkit ?? '').toLowerCase()
+                    if (slug) set.add(slug)
+                  }
+                  return [...set]
+                } catch { return [] }
+              }
               const ordersAuthor = new OrdersAuthor({
                 router,
                 store: ordersV2Store,
@@ -1053,6 +1067,9 @@ async function main(): Promise<void> {
                 schemaCache: triggerSchemaCache ?? undefined,
                 instanceManager: triggerInstanceManager ?? undefined,
                 connectGuard: triggerConnectGuard ?? undefined,
+                // Phase D fixup — ground action-tool authoring in real Composio schemas
+                toolResolver: composioResolver ?? undefined,
+                getConnectedToolkits,
               })
               ;(globalThis as any).__kairosOrdersAuthor = ordersAuthor
             }

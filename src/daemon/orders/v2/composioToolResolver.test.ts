@@ -5,15 +5,18 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { ComposioToolResolver } from './composioToolResolver'
 
+// Fake matches @composio/core@0.10.0 actual shape: getRawComposioTools returns a
+// bare array of tool descriptors with `slug` (canonical, e.g. 'GMAIL_SEND_EMAIL')
+// and `name` (human-readable, e.g. 'Send Email'). We index off `slug`.
 function fakeComposio(tools: any[], options: { onListCall?: () => void } = {}) {
   let listCalls = 0
   return {
     sdk: {
       tools: {
-        list: async (_opts: any) => {
+        getRawComposioTools: async (_opts: any) => {
           listCalls++
           options.onListCall?.()
-          return { items: tools }
+          return tools
         },
       },
     },
@@ -26,10 +29,10 @@ describe('ComposioToolResolver', () => {
   beforeEach(() => { tmp = mkdtempSync(join(tmpdir(), 'kairos-resolver-')) })
   afterEach(() => { rmSync(tmp, { recursive: true, force: true }) })
 
-  it('initialize populates map from tools.list', async () => {
+  it('initialize populates map from getRawComposioTools', async () => {
     const c = fakeComposio([
-      { toolkit: { slug: 'slack' }, name: 'SLACK_SEND_MESSAGE' },
-      { toolkit: { slug: 'github' }, name: 'GITHUB_CREATE_ISSUE' },
+      { toolkit: { slug: 'slack' }, slug: 'SLACK_SEND_MESSAGE', name: 'Send Slack message' },
+      { toolkit: { slug: 'github' }, slug: 'GITHUB_CREATE_ISSUE', name: 'Create GitHub issue' },
     ])
     const r = new ComposioToolResolver({ composio: c, userId: 'local', cachePath: join(tmp, 'cache.json') })
     await r.initialize()
@@ -40,7 +43,7 @@ describe('ComposioToolResolver', () => {
 
   it('indexes friendly aliases — stripped toolkit prefix + suffix truncation', async () => {
     const c = fakeComposio([
-      { toolkit: { slug: 'slack' }, name: 'SLACK_SEND_MESSAGE' },
+      { toolkit: { slug: 'slack' }, slug: 'SLACK_SEND_MESSAGE', name: 'Send Slack message' },
     ])
     const r = new ComposioToolResolver({ composio: c, userId: 'local', cachePath: join(tmp, 'cache.json') })
     await r.initialize()
@@ -51,7 +54,7 @@ describe('ComposioToolResolver', () => {
   })
 
   it('resolve returns null for unknown toolkit + tool combinations', async () => {
-    const c = fakeComposio([{ toolkit: { slug: 'slack' }, name: 'SLACK_SEND_MESSAGE' }])
+    const c = fakeComposio([{ toolkit: { slug: 'slack' }, slug: 'SLACK_SEND_MESSAGE', name: 'Send Slack message' }])
     const r = new ComposioToolResolver({ composio: c, userId: 'local', cachePath: join(tmp, 'cache.json') })
     await r.initialize()
     expect(r.resolve('slack', 'create_channel')).toBeNull()
@@ -59,23 +62,29 @@ describe('ComposioToolResolver', () => {
     r.stop()
   })
 
-  it('persists cache to disk', async () => {
+  it('persists cache to disk (both aliases and descriptors)', async () => {
     const cachePath = join(tmp, 'cache.json')
-    const c = fakeComposio([{ toolkit: { slug: 'slack' }, name: 'SLACK_SEND_MESSAGE' }])
+    const c = fakeComposio([{ toolkit: { slug: 'slack' }, slug: 'SLACK_SEND_MESSAGE', name: 'Send Slack message' }])
     const r = new ComposioToolResolver({ composio: c, userId: 'local', cachePath })
     await r.initialize()
     expect(existsSync(cachePath)).toBe(true)
     const cached = JSON.parse(readFileSync(cachePath, 'utf8'))
-    expect(cached.entries).toBeDefined()
-    expect(Object.keys(cached.entries).length).toBeGreaterThan(0)
+    expect(cached.aliases).toBeDefined()
+    expect(Object.keys(cached.aliases).length).toBeGreaterThan(0)
+    expect(cached.descriptors).toBeDefined()
+    expect(cached.descriptors.SLACK_SEND_MESSAGE).toBeDefined()
+    expect(cached.descriptors.SLACK_SEND_MESSAGE.toolkit).toBe('slack')
     r.stop()
   })
 
-  it('warm-boot from cache (no list call when cache is fresh)', async () => {
+  it('warm-boot from cache (no list call when cache is fresh and has new shape)', async () => {
     const cachePath = join(tmp, 'cache.json')
     writeFileSync(cachePath, JSON.stringify({
       saved_at: Date.now(),
-      entries: { 'slack:send_message': 'SLACK_SEND_MESSAGE', 'slack:send': 'SLACK_SEND_MESSAGE', 'slack:message': 'SLACK_SEND_MESSAGE' },
+      aliases: { 'slack:send_message': 'SLACK_SEND_MESSAGE', 'slack:send': 'SLACK_SEND_MESSAGE', 'slack:message': 'SLACK_SEND_MESSAGE' },
+      descriptors: {
+        SLACK_SEND_MESSAGE: { slug: 'SLACK_SEND_MESSAGE', friendly: 'send_message', toolkit: 'slack', description: 'Send', inputParameters: {} },
+      },
     }))
     const c = fakeComposio([])
     const r = new ComposioToolResolver({ composio: c, userId: 'local', cachePath })
@@ -85,13 +94,46 @@ describe('ComposioToolResolver', () => {
     r.stop()
   })
 
+  it('old-shape cache (entries only) forces a refresh', async () => {
+    // Pre-v0.5.3 caches had only `entries` (alias map) — no descriptors. Must regenerate.
+    const cachePath = join(tmp, 'cache.json')
+    writeFileSync(cachePath, JSON.stringify({
+      saved_at: Date.now(),
+      entries: { 'slack:send_message': 'SLACK_SEND_MESSAGE' },
+    }))
+    const c = fakeComposio([{ toolkit: { slug: 'slack' }, slug: 'SLACK_SEND_MESSAGE', name: 'Send', description: 'd', inputParameters: { required: ['channel'] } }])
+    const r = new ComposioToolResolver({ composio: c, userId: 'local', cachePath })
+    await r.initialize()
+    expect(c.getCallCount()).toBe(1) // refreshed because descriptors missing
+    expect(r.getDescriptor('SLACK_SEND_MESSAGE')?.inputParameters?.required).toEqual(['channel'])
+    r.stop()
+  })
+
+  it('listToolsForToolkit returns descriptors with input schema and stripped friendly name', async () => {
+    const c = fakeComposio([
+      { toolkit: { slug: 'gmail' }, slug: 'GMAIL_SEND_EMAIL', name: 'Send email', description: 'Sends an email', inputParameters: { required: ['recipient_email', 'subject', 'body'] } },
+      { toolkit: { slug: 'gmail' }, slug: 'GMAIL_CREATE_DRAFT', name: 'Create draft', description: 'Drafts an email', inputParameters: { required: ['recipient_email', 'subject'] } },
+      { toolkit: { slug: 'slack' }, slug: 'SLACK_SEND_MESSAGE', name: 'Send', description: 'Slack post', inputParameters: { required: ['channel', 'text'] } },
+    ])
+    const r = new ComposioToolResolver({ composio: c, userId: 'local', cachePath: join(tmp, 'cache.json') })
+    await r.initialize()
+    const gmailTools = r.listToolsForToolkit('gmail')
+    expect(gmailTools).toHaveLength(2)
+    expect(gmailTools[0]!.friendly).toBe('create_draft')   // sorted by slug, GMAIL_CREATE_DRAFT first
+    expect(gmailTools[1]!.friendly).toBe('send_email')
+    expect(gmailTools[1]!.inputParameters.required).toEqual(['recipient_email', 'subject', 'body'])
+    expect(r.listToolsForToolkit('slack')).toHaveLength(1)
+    expect(r.listToolsForToolkit('discord')).toHaveLength(0)
+    r.stop()
+  })
+
   it('warm-boot refreshes when cache is older than 24h', async () => {
     const cachePath = join(tmp, 'cache.json')
     writeFileSync(cachePath, JSON.stringify({
       saved_at: Date.now() - 25 * 60 * 60 * 1000,
       entries: { 'old:tool': 'OLD_TOOL' },
     }))
-    const c = fakeComposio([{ toolkit: { slug: 'new' }, name: 'NEW_TOOL' }])
+    const c = fakeComposio([{ toolkit: { slug: 'new' }, slug: 'NEW_TOOL', name: 'New tool' }])
     const r = new ComposioToolResolver({ composio: c, userId: 'local', cachePath })
     await r.initialize()
     expect(c.getCallCount()).toBe(1)
@@ -100,17 +142,17 @@ describe('ComposioToolResolver', () => {
   })
 
   it('refresh() updates the map', async () => {
-    const c = fakeComposio([{ toolkit: { slug: 'slack' }, name: 'SLACK_SEND_MESSAGE' }])
+    const c = fakeComposio([{ toolkit: { slug: 'slack' }, slug: 'SLACK_SEND_MESSAGE', name: 'Send Slack message' }])
     const r = new ComposioToolResolver({ composio: c, userId: 'local', cachePath: join(tmp, 'cache.json') })
     await r.initialize()
-    ;(c.sdk.tools.list as any) = async () => ({ items: [{ toolkit: { slug: 'slack' }, name: 'SLACK_NEW_THING' }] })
+    ;(c.sdk.tools.getRawComposioTools as any) = async () => [{ toolkit: { slug: 'slack' }, slug: 'SLACK_NEW_THING', name: 'New thing' }]
     await r.refresh()
     expect(r.resolve('slack', 'thing')).toBe('SLACK_NEW_THING')
     r.stop()
   })
 
   it('on-miss refresh is rate-limited (≤ 1 / hour)', async () => {
-    const c = fakeComposio([{ toolkit: { slug: 'slack' }, name: 'SLACK_SEND_MESSAGE' }])
+    const c = fakeComposio([{ toolkit: { slug: 'slack' }, slug: 'SLACK_SEND_MESSAGE', name: 'Send Slack message' }])
     const r = new ComposioToolResolver({ composio: c, userId: 'local', cachePath: join(tmp, 'cache.json'), now: () => 100_000 })
     await r.initialize()
     const beforeCalls = c.getCallCount()

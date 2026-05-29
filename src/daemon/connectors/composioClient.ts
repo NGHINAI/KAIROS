@@ -104,11 +104,20 @@ export class ComposioClient {
   }
 
   async executeTool(args: { toolName: string; userId: string; arguments: any }): Promise<any> {
-    return this.sdk.tools.execute({
-      toolName: args.toolName,
+    // @composio/core@0.10.0 signature is POSITIONAL: execute(slug, body, modifiers).
+    // The single-object form silently passes an object as slug → all dispatches fail.
+    //
+    // dangerouslySkipVersionCheck=true: KAIROS rules implicitly target "latest" tool
+    // versions because they're authored against current behavior. Without this flag,
+    // Composio throws TOOL_VERSION_REQUIRED on every manual execute. The "danger"
+    // is that a Composio-side breaking change could break a rule — acceptable risk
+    // (same as any "latest" dependency pin). Future: pin per-toolkit versions via
+    // a constructor option when stability matters.
+    return this.sdk.tools.execute(args.toolName, {
       userId: args.userId,
       arguments: args.arguments,
-    })
+      dangerouslySkipVersionCheck: true,
+    } as any)
   }
 
   private detectAuthType(t: any): 'oauth' | 'api_key' | 'no_auth' | 'unknown' {

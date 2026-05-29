@@ -13,6 +13,7 @@ import type { PendingEditsQueue } from './pendingEdits'
 import type { TriggerSchemaCache } from '../../connectors/triggers/schemaCache'
 import type { TriggerInstanceManager } from '../../connectors/triggers/instanceManager'
 import type { ConnectGuard } from '../../connectors/triggers/connectGuard'
+import type { ComposioToolResolver } from './composioToolResolver'
 
 const SYSTEM_PROMPT = `You are KAIROS's standing-orders compiler. The user just spoke a request like "remind me every Monday at 9 to send the standup". Convert it into a structured rule object.
 
@@ -47,6 +48,13 @@ export type OrdersAuthorDeps = {
   schemaCache?: TriggerSchemaCache
   instanceManager?: TriggerInstanceManager
   connectGuard?: ConnectGuard
+  // NEW (Phase D fixup — for grounding composio_tool action authoring in real schemas)
+  toolResolver?: ComposioToolResolver
+  /** Returns the toolkit slugs the user currently has connected (e.g. ['gmail','googlecalendar']).
+   *  Used to filter the action-tool catalog into the LLM prompt — otherwise we'd dump 1000s. */
+  getConnectedToolkits?: () => string[]
+  /** Max action tools per toolkit to include in the prompt — prevents prompt bloat. */
+  toolsPerToolkitCap?: number
 }
 
 export type AuthorResult = {
@@ -61,9 +69,8 @@ export class OrdersAuthor {
 
   private buildSystemPrompt(): string {
     let prompt = SYSTEM_PROMPT
+    // ── Triggers (incoming events the LLM can match `when.state.incoming_event` against) ──
     if (this.deps.schemaCache) {
-      // Access the internal map via getType iteration — we don't have a public listAll.
-      // For Phase D v1, we iterate using a slug list approach if known, OR access (cache as any).map.
       const cache: any = this.deps.schemaCache as any
       const map: Map<string, any> | undefined = cache.map
       if (map && map.size > 0) {
@@ -74,7 +81,46 @@ export class OrdersAuthor {
         prompt += `\nFor rules like 'notify me when X', use:\n  when:\n    state:\n      incoming_event:\n        trigger: <TRIGGER_SLUG>\n  if:\n    - "payload.<field> == '<value>'"  # client-side filter\n`
       }
     }
+    // ── Action tools (outbound calls — `do: composio_tool`). Grounded in real Composio schemas ──
+    // Without this section the LLM would guess tool names + arg shapes and produce
+    // rules that fail at execute time with "could not resolve composio tool" or unknown-arg
+    // errors. With it, generated rules are validated against authoritative schemas.
+    if (this.deps.toolResolver && this.deps.getConnectedToolkits) {
+      const connected = this.deps.getConnectedToolkits()
+      const cap = this.deps.toolsPerToolkitCap ?? 25
+      if (connected.length > 0) {
+        prompt += `\n\nAvailable Composio action tools (the user has these toolkits connected; use them in do.composio_tool):\n`
+        for (const toolkit of connected) {
+          const tools = this.deps.toolResolver.listToolsForToolkit(toolkit).slice(0, cap)
+          if (tools.length === 0) continue
+          prompt += `\n  ${toolkit}:\n`
+          for (const t of tools) {
+            const required = this.summarizeRequiredArgs(t.inputParameters)
+            const desc = t.description ? ` — ${t.description.slice(0, 100)}` : ''
+            prompt += `    - ${t.friendly}: required=[${required}]${desc}\n`
+          }
+        }
+        prompt += `\nWhen generating a composio_tool action, use the friendly tool name (not the canonical slug):\n  - action: composio_tool\n    args:\n      toolkit: gmail\n      tool: send_email     # NOT GMAIL_SEND_EMAIL\n      args:\n        recipient_email: "..."\n        subject: "..."\n        body: "..."\n`
+        prompt += `\nIMPORTANT: only pick tools from the lists above. Do NOT invent tool names. Do NOT invent argument names — match the schema exactly.\n`
+      }
+    }
     return prompt
+  }
+
+  /** Extracts a brief "required arg names" summary from a Composio inputParameters JSON-schema fragment. */
+  private summarizeRequiredArgs(schema: any): string {
+    if (!schema || typeof schema !== 'object') return ''
+    const required: string[] = Array.isArray(schema.required) ? schema.required : []
+    if (required.length === 0) {
+      // Some schemas mark fields required via a per-property `required: true`; sweep for that too.
+      const props = (schema.properties ?? {}) as Record<string, any>
+      const swept: string[] = []
+      for (const [k, v] of Object.entries(props)) {
+        if (v && typeof v === 'object' && (v as any).required === true) swept.push(k)
+      }
+      return swept.slice(0, 8).join(', ')
+    }
+    return required.slice(0, 8).join(', ')
   }
 
   async handleSpeech(text: string): Promise<AuthorResult> {

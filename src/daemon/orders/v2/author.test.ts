@@ -292,4 +292,80 @@ describe('OrdersAuthor', () => {
     const result = await author.handleSpeech('test')
     expect(result.created_slug).toBe('bc')
   })
+
+  it('prompt lists composio action tools per connected toolkit (with required args)', async () => {
+    // Capture what the router actually receives so we can assert the prompt.
+    let capturedSystemBlocks: any = null
+    const fake = {
+      router: {
+        async complete(req: any) {
+          capturedSystemBlocks = req.system_blocks
+          return {
+            parsed: {
+              proposed_rule: {
+                when: { state: { incoming_event: { trigger: 'GOOGLECALENDAR_GOOGLE_CALENDAR_EVENT_CREATED_TRIGGER' } } },
+                do: [{ action: 'composio_tool', args: { toolkit: 'gmail', tool: 'send_email', args: { recipient_email: 'a@b.c', subject: 's', body: 'b' } } }],
+              },
+              slug_suggestion: 'mail-on-cal', similar_existing: null, confidence: 1,
+            },
+            text: '',
+          } as any
+        },
+      },
+    }
+
+    // Minimal fake toolResolver that returns Gmail + Calendar tools.
+    const fakeToolResolver: any = {
+      listToolsForToolkit(toolkit: string) {
+        if (toolkit === 'gmail') return [
+          { slug: 'GMAIL_SEND_EMAIL', friendly: 'send_email', toolkit: 'gmail', description: 'Send an email', inputParameters: { required: ['recipient_email', 'subject', 'body'] } },
+          { slug: 'GMAIL_CREATE_DRAFT', friendly: 'create_draft', toolkit: 'gmail', description: 'Draft', inputParameters: { required: ['recipient_email', 'subject'] } },
+        ]
+        if (toolkit === 'googlecalendar') return [
+          { slug: 'GOOGLECALENDAR_CREATE_EVENT', friendly: 'create_event', toolkit: 'googlecalendar', description: 'Create a calendar event', inputParameters: { required: ['calendar_id', 'summary', 'start_time', 'end_time'] } },
+        ]
+        return []
+      },
+    }
+
+    const author = new OrdersAuthor({
+      router: fake.router as any, store, parser, filePath: file,
+      toolResolver: fakeToolResolver,
+      getConnectedToolkits: () => ['gmail', 'googlecalendar'],
+    })
+    await author.handleSpeech('send me a summary email whenever I create a calendar event')
+
+    expect(capturedSystemBlocks).not.toBeNull()
+    const text = capturedSystemBlocks[0].text
+    // LLM sees friendly tool names AND required arg lists, grouped per toolkit
+    expect(text).toContain('Available Composio action tools')
+    expect(text).toContain('gmail:')
+    expect(text).toContain('send_email: required=[recipient_email, subject, body]')
+    expect(text).toContain('create_draft: required=[recipient_email, subject]')
+    expect(text).toContain('googlecalendar:')
+    expect(text).toContain('create_event: required=[calendar_id, summary, start_time, end_time]')
+    // Anti-hallucination guidance
+    expect(text).toContain('Do NOT invent tool names')
+  })
+
+  it('prompt omits composio action tools section when no toolkits connected', async () => {
+    let capturedSystemBlocks: any = null
+    const fake = {
+      router: {
+        async complete(req: any) {
+          capturedSystemBlocks = req.system_blocks
+          return { parsed: { proposed_rule: { when: { cron: '0 9 * * 1' }, do: [{ action: 'log', args: {} }] }, slug_suggestion: 'a', similar_existing: null, confidence: 1 }, text: '' } as any
+        },
+      },
+    }
+    const fakeToolResolver: any = { listToolsForToolkit: () => [] }
+    const author = new OrdersAuthor({
+      router: fake.router as any, store, parser, filePath: file,
+      toolResolver: fakeToolResolver,
+      getConnectedToolkits: () => [],
+    })
+    await author.handleSpeech('test')
+    const text = capturedSystemBlocks[0].text
+    expect(text).not.toContain('Available Composio action tools')
+  })
 })

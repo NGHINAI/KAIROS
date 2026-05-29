@@ -1,3 +1,68 @@
+## [v0.5.3] - 2026-05-29
+
+**Phase D round-trip closed end-to-end + three production bugs fixed + authoring path grounded in real schemas.**
+
+Live-verified the full proactive loop: Google Calendar event → Composio Pusher → KAIROS reactive stack → real Gmail send via `composio.executeTool`. Email arrived in the inbox. The verification surfaced three production bugs and one architecture gap.
+
+### Fixed — execution path
+
+- **`composioClient.executeTool` wrong call signature** — was calling `sdk.tools.execute({ toolName, userId, arguments })` (single-object form), but the @composio/core@0.10.0 public signature is positional `execute(slug, body, modifiers)`. The object-form silently passed an object as `slug`, so EVERY composio_tool action would fail at the first call. Unreached before today because no daemon-driven action had been observed live. Now uses the positional signature with `dangerouslySkipVersionCheck: true`.
+- **`TOOL_VERSION_REQUIRED` blocker** — Composio's manual tool execute path requires a toolkit version; `"latest"` is rejected. Without the `dangerouslySkipVersionCheck` flag, every action throws. Wrapper now passes the flag; rationale documented inline (KAIROS rules implicitly target latest by design).
+- **`ComposioToolResolver.refresh()` called non-existent method** — used `sdk.tools.list()` (doesn't exist on @composio/core@0.10.0; correct method is `getRawComposioTools`). Resolver was never live-exercised before today's round-trip. Also fixed: descriptor's canonical identifier is `slug` not `name` (the previous code read the human-readable name and would have produced unusable mappings even after fixing the method name). Defensively handles both bare-array and `{items}` response shapes.
+
+### Fixed — authoring path (the gap you flagged)
+
+The LLM authoring rules via `OrdersAuthor` was previously blind to Composio action tools. It knew about triggers (incoming events) but had to GUESS at action tool names and arg shapes when generating `composio_tool` actions — producing rules that would fail at execute time with "could not resolve composio tool" or unknown-argument errors.
+
+- **`ComposioToolResolver` extended to cache full descriptors** (slug, friendly name, description, input parameter schema, toolkit), not just the alias map. New public methods: `getDescriptor(canonicalSlug)`, `listToolsForToolkit(toolkit)`. Cache file format bumped: `{ aliases, descriptors }`. Old-shape caches (`{ entries }`) force a refresh.
+- **`OrdersAuthor.buildSystemPrompt()` now enumerates action tools per CONNECTED toolkit** with their required arg lists, e.g.:
+  ```
+  Available Composio action tools:
+    gmail:
+      - send_email: required=[recipient_email, subject, body] — Send an email
+      - create_draft: required=[recipient_email, subject] — Draft
+    googlecalendar:
+      - create_event: required=[calendar_id, summary, start_time, end_time]
+  ```
+  Plus anti-hallucination guidance: "Do NOT invent tool names. Do NOT invent argument names."
+- **`OrdersAuthor` accepts `getConnectedToolkits` callback** so the prompt reflects current OAuth state at authoring time (not at daemon-boot time). Daemon wires it to `ConnectionStore`.
+- **Per-toolkit tool cap** (`toolsPerToolkitCap`, default 25) — prevents prompt bloat when a toolkit has 100+ tools.
+
+### Live-verified round-trip
+
+Real Calendar event `1j1r2lac56srpip3ss4rm2kv7c` (added 2026-05-29 18:30 CDT) flowed:
+```
+Pusher V3 envelope (chunked) → TriggerNormalizer V3-decode
+  → perception bus → ReactiveEvaluator (rule matched, organizer condition passed)
+    → ActionDispatcher → composio.executeTool('GMAIL_SEND_EMAIL', ...)
+      → Gmail send → email arrived (id=19e75e50e7215d63, successful=true)
+```
+
+### Added
+
+- `scripts/live-test-phase-d-roundtrip.ts` — full reactive round-trip live test with hard guard rails (`KAIROS_LIVE_APPROVE=yes` required for real send, `MAX_ACTIONS`, `COOLDOWN_SEC`, `DURATION_MIN` caps). Default: dry-run.
+- New tests: `composioClient.executeTool` signature lockdown (positional + dangerouslySkipVersionCheck flag), 3 new resolver tests (descriptor cache shape, `listToolsForToolkit`, old-cache-forces-refresh), 2 new author tests (action-tool prompt assembly, empty-toolkits short-circuit).
+
+### Architecture clarification
+
+KAIROS uses TWO Composio paths intentionally:
+1. **MCP path** (`McpHost`, `HttpMcpClient`) — for the LLM agent. LLM sees tool definitions via MCP protocol, decides which tool to call, MCP server brokers execution. Used in chat/agency mode (Phase C.2.7).
+2. **Direct path** (`composio.executeTool` → `sdk.tools.execute`) — for STANDING_ORDERS rules. The rule already declares exactly which tool with exactly which args; no LLM in the loop at execute time, so no MCP needed. The LLM's involvement is at AUTHORING time only — and `OrdersAuthor` now grounds it in real Composio schemas.
+
+### Regression
+
+- Triggers subtree: 59/59
+- Resolver + author subtree: 27/27 (5 new tests)
+- ComposioClient subtree: 4/4 (1 new test)
+- Phase D gate: 20/20 PASS
+- Full suite: 776 pass + 2 pre-existing `fs.watch` flakes (SkillRegistry, FileEventsObserver) — unchanged from v0.5.2 baseline
+
+### Tag
+
+`v0.5.3` — Phase D end-to-end live-verified.
+
+---
+
 ## [v0.5.2] - 2026-05-29
 
 **Phase D accuracy audit — two grounded-against-SDK fixes.**
