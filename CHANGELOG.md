@@ -1,3 +1,26 @@
+## [v0.3.8-phase-c4-1] - 2026-05-28
+
+### Added
+- **STANDING_ORDERS v2 DSL** — structured YAML frontmatter rules in `~/.kairos/STANDING_ORDERS.md`
+- **Time-triggered rules** — `when: cron: "..."` and `when: at: "..."` via existing `ScheduleManager` (no separate HEARTBEAT.md needed)
+- **Per-rule cooldowns** — `cooldown: 20h` field per rule
+- **Chaining via named events** — actions can `emit_event`, rules can listen via `when: event "name"`
+- **24h dry-run gate** — new rules fire silently to log; inbox prompt after 24h with stats
+- **OrdersAuthor** — speech → LLM-compiled DSL → file append; KAIROS writes the file as you speak
+- **Four action types** — built-in intents + invoke_skill (C.3.3) + composio_tool (C.2.7 — minimal stub, full wiring in C.4.2) + emit_event
+- **Safe condition evaluator** — restricted expression grammar (no `eval()`)
+- Validation gate (`scripts/validate-phase-c4-1.ts`) — 14 assertions
+- `orders_compose` TaskType (mid tier)
+
+### Changed
+- New SQLite tables: `orders_rules`, `orders_rule_state`, `orders_dry_run_log`
+- v1 standing-orders subsystem preserved; both run side-by-side; v1 keeps working untouched for existing rules
+
+### Notes
+- Persona-conditioned RestraintPipeline routing, offline LLM-free English parsing, full Composio tool wiring, and the Phase C overall validation gate (v0.4.0) are deferred to C.4.2.
+
+---
+
 ## [v0.3.7-phase-c3-3] - 2026-05-28
 
 ### Added
