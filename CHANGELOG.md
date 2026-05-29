@@ -1,3 +1,42 @@
+## [v0.5.0] - 2026-05-29
+
+**Phase D complete.** KAIROS now receives real-time events from any connected service via Composio Triggers. STANDING_ORDERS v2 rules fire on incoming emails, Slack DMs, GitHub PRs, calendar invites, and 200+ other event types — automatically, with idempotency, refcounting, reconciliation, and connect-prompts.
+
+### Added
+
+- **TriggerListener** — wraps `composio.triggers.subscribe()` (Pusher-backed). Each event flows through normalizer → idempotent log → perception bus → metrics
+- **`incoming_event` state selector in STANDING_ORDERS v2** — the only new DSL field. Rules express monitoring via existing `if`/`unless` predicates on `payload.*` — works for ANY Composio trigger automatically (200+ today, growing)
+- **TriggerEventLog** — SQLite-backed event log with `UNIQUE(toolkit, event_id)` idempotency. Boot-time replay of unprocessed events for crash recovery
+- **TriggerInstanceManager** — refcounted trigger instances: many rules share one Composio instance when slug + config + account match. Boot-time reconciliation against `triggers.list_active()` cleans up orphans (local-only or remote-only)
+- **TriggerSchemaCache** — caches `triggers.get_type()` (24h TTL, on-miss rate-limited to 1/hour per slug). Used by OrdersAuthor to inject the available trigger catalog into the LLM prompt at compile time, so the LLM knows which `trigger:` slugs exist
+- **ConnectGuard** — when a new `incoming_event` rule references an unconnected toolkit, surfaces an inbox prompt + native notification + opens the Composio OAuth URL via `open` shell command. Rule moves to `pending_connection` state until OAuth completes. In-flight dedup so multiple rules referencing the same toolkit don't trigger multiple OAuth prompts
+- **TriggerNormalizer** — pure function mapping variable Composio payload shapes to canonical `NormalizedEvent` envelope: `{ trigger_slug, toolkit, payload, raw, received_at, event_id, ... }`
+- **TriggerMetrics** — per-minute bucketed counts (received, matched, fired, failed) + latency percentiles (p50, p99). SQL-backed; ready for future HUD consumption
+- New rule lifecycle state: `pending_connection` (awaiting OAuth)
+- New SQLite tables: `composio_trigger_events`, `trigger_instances`, `rule_trigger_links`, `trigger_metrics`
+- Validation gate `scripts/validate-phase-d.ts` — 20 assertions, simulated 2h event session
+- Pusher-under-Bun spike script (`scripts/spike-pusher-under-bun.ts`)
+
+### Notes
+
+- **Real-time Gmail is a known limitation.** Composio's hosted Gmail OAuth polls every ~15 min. Sub-second Gmail requires BYOAuth + Google Pub/Sub (deferred — separate phase). Other toolkits (Slack, GitHub, Linear, Notion, Calendar) are real-time via webhook ingestion
+- **Offline event loss.** Pusher doesn't queue for offline subscribers. If KAIROS is offline when an event fires, that event is lost. Phase F (KAIROS Cloud + webhook receiver) adds at-least-once delivery via persistent webhook delivery
+- **Voice surface for ConnectGuard** deferred to Phase E. Phase D uses inbox + native-notif prompts
+- **pusher-js + Bun:** `pusher-js` loads under Bun but the default-import shape is `{ Pusher: class }`. Daemon uses named import where needed. Verified via Task 0 spike
+
+### Validated
+
+- All 10 phase gates verdict PASS (C.1, C.1.5, C.2, C.2.5, C.2.7, C.3.1, C.3.3, C.4.1, C overall, D)
+- Phase D gate: 20/20 PASS
+- Full unit suite: 682 pass + 2 pre-existing failures (FileEventsObserver flake; SkillRegistry hot-reload flaky under suite-concurrency, passes in isolation)
+- 3 memory test files (`embeddings`, `episodicMemory`, `semanticMemory`) panic Bun runtime due to native @huggingface/transformers deps — pre-existing condition
+
+### Tag
+
+`v0.5.0` — Phase D shipped.
+
+---
+
 ## [v0.4.0] - 2026-05-28
 
 **Phase C complete.** Orchestration, persona, skills, standing orders — all four sub-phases shipped and proven to work together end-to-end via the simulated 4-hour user-session validation gate.
