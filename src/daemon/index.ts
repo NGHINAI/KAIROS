@@ -865,6 +865,13 @@ async function main(): Promise<void> {
               triggerSchemaCache = new TriggerSchemaCache({ composio: _composioClientForTriggers as any })
               await triggerSchemaCache.initialize().catch((err: any) => log(`[triggers] schema init: ${err}`, 'warn'))
 
+              // Authoritative toolkit resolution via Composio's getType() (cached).
+              // Falls back to slug-split heuristic on cache miss.
+              triggerNormalizer.setToolkitLookup((slug: string) => {
+                const t = triggerSchemaCache?.getType(slug)
+                return t?.toolkit ?? null
+              })
+
               triggerInstanceManager = new TriggerInstanceManager({
                 db,
                 composio: (_composioClientForTriggers as any).sdk ?? _composioClientForTriggers,

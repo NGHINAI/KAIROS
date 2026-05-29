@@ -139,6 +139,56 @@ describe('TriggerNormalizer', () => {
     expect(env.received_at).toBeLessThanOrEqual(after)
   })
 
+  // ── Multi-token toolkit slug via schemaCache lookup ──────────
+
+  it('toolkit lookup overrides split heuristic for multi-token toolkits', () => {
+    // Composio toolkits like MICROSOFT_TEAMS, GOOGLE_CHAT, GOOGLE_MEET have
+    // multi-token slugs. The split heuristic would resolve 'MICROSOFT_TEAMS_NEW_MESSAGE'
+    // to 'microsoft' (wrong). With an authoritative cache, we get the correct value.
+    const nWithLookup = new TriggerNormalizer()
+    nWithLookup.setToolkitLookup((slug: string) => {
+      if (slug === 'MICROSOFT_TEAMS_NEW_MESSAGE') return 'microsoft_teams'
+      if (slug === 'GOOGLE_CHAT_NEW_MESSAGE') return 'google_chat'
+      return null
+    })
+
+    const teamsEvent = nWithLookup.normalize({
+      id: 'm1', timestamp: '2026-05-29T00:00:00Z', type: 'composio.trigger.message',
+      metadata: { trigger_slug: 'MICROSOFT_TEAMS_NEW_MESSAGE', trigger_id: 'ti', connected_account_id: 'ca', auth_config_id: 'ac', user_id: 'u', log_id: 'l' },
+      data: { message: 'hi' },
+    })
+    expect(teamsEvent.toolkit).toBe('microsoft_teams')
+
+    const chatEvent = nWithLookup.normalize({
+      id: 'm2', timestamp: '2026-05-29T00:00:00Z', type: 'composio.trigger.message',
+      metadata: { trigger_slug: 'GOOGLE_CHAT_NEW_MESSAGE', trigger_id: 'ti', connected_account_id: 'ca', auth_config_id: 'ac', user_id: 'u', log_id: 'l' },
+      data: { message: 'hi' },
+    })
+    expect(chatEvent.toolkit).toBe('google_chat')
+  })
+
+  it('toolkit lookup falls back to split when cache misses', () => {
+    const nWithLookup = new TriggerNormalizer()
+    nWithLookup.setToolkitLookup(() => null) // cache miss for everything
+    const env = nWithLookup.normalize({
+      id: 'm1', timestamp: '2026-05-29T00:00:00Z', type: 'composio.trigger.message',
+      metadata: { trigger_slug: 'GMAIL_NEW_GMAIL_MESSAGE', trigger_id: 'ti', connected_account_id: 'ca', auth_config_id: 'ac', user_id: 'u', log_id: 'l' },
+      data: { from: 'a@b.c' },
+    })
+    expect(env.toolkit).toBe('gmail') // split heuristic still works
+  })
+
+  it('toolkit lookup lowercases the resolved value', () => {
+    const nWithLookup = new TriggerNormalizer()
+    nWithLookup.setToolkitLookup(() => 'Microsoft_Teams') // mixed-case
+    const env = nWithLookup.normalize({
+      id: 'm1', timestamp: '2026-05-29T00:00:00Z', type: 'composio.trigger.message',
+      metadata: { trigger_slug: 'MICROSOFT_TEAMS_NEW_MESSAGE', trigger_id: 'ti', connected_account_id: 'ca', auth_config_id: 'ac', user_id: 'u', log_id: 'l' },
+      data: { message: 'hi' },
+    })
+    expect(env.toolkit).toBe('microsoft_teams')
+  })
+
   it('V3 takes precedence over legacy fields', () => {
     // If both V3 markers AND legacy fields exist, V3 wins because it's the
     // authoritative format from Composio.

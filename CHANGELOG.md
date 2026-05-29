@@ -1,3 +1,37 @@
+## [v0.5.2] - 2026-05-29
+
+**Phase D accuracy audit — two grounded-against-SDK fixes.**
+
+Audited every protocol-level claim in our Composio integration against `@composio/core@0.10.0` source and Composio's public docs. Verdict: byte-for-byte canonical on every wire-level concern. Found two real bugs the audit-vs-code comparison surfaced.
+
+### Fixed
+
+- **`TriggerInstanceManager.reconcile()` field name** — Composio's `listActive()` returns items with `id` per `TriggerInstanceListActiveResponseItemSchema`, not `triggerId` or `trigger_id`. v0.5.1 read the wrong field, which would classify ALL remote triggers as orphans and attempt to delete them on every reconcile. Silent and data-destructive — only unreached because test scripts always teardown before reconcile runs. Fixed to `r.id ?? r.triggerId ?? r.trigger_id` with the canonical field first. Added a test using the real schema shape to lock it in.
+- **Toolkit derivation latent bug for multi-token toolkits** — V1/V2/V3 envelopes do NOT carry a `toolkit_slug` field (confirmed against `WebhookTriggerPayloadV3Schema`). Composio's own SDK derives toolkit via `slug.split('_')[0]`, which fails for multi-token toolkits like `MICROSOFT_TEAMS`, `GOOGLE_CHAT`, `GOOGLE_MEET`, `GOOGLE_PHOTOS`, `GOOGLE_MAPS`, `GOOGLE_CLASSROOM`, `GOOGLE_CLOUD_VISION`, `GOOGLE_SEARCH_CONSOLE`. Currently unreached (none of these ship triggers as of audit), but a latent footgun. `TriggerNormalizer` now accepts an authoritative `ToolkitLookup` (wired to `TriggerSchemaCache.getType().toolkit` — the canonical-at-API source). Falls back to the split heuristic on cache miss (cold start).
+
+### Audit-confirmed correct (no change needed)
+
+- Pusher channel name: `private-{projectId}_triggers` — matches SDK `pusherChannel` exactly
+- Credentials endpoint: `/api/v3/internal/sdk/realtime/credentials` with `x-api-key` header
+- Auth endpoint: `/api/v3/internal/sdk/realtime/auth`
+- Base URL: `https://backend.composio.dev`
+- Chunked event protocol: `{id, index, chunk, final}` — matches `bindWithChunking`
+- `triggers.create(userId, slug, body)` positional signature
+- V1/V2/V3 envelope detection order
+- No V4 envelope exists or is announced (verified on the upstream `next` branch)
+
+### Regression
+
+- Triggers subtree: 59/59 (4 new tests: 3 toolkit-lookup paths in normalizer, 1 `id`-field shape in instanceManager)
+- Phase D gate: 20/20 PASS
+- Full suite: 771 pass + 2 pre-existing `fs.watch` timing flakes (SkillRegistry hot-reload + FileEventsObserver — both pass in isolation, unchanged from v0.5.1 baseline)
+
+### Tag
+
+`v0.5.2` — Phase D grounded in SDK source.
+
+---
+
 ## [v0.5.1] - 2026-05-29
 
 **Phase D fix-up — events now actually flow end-to-end against real Composio.**

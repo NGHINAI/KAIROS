@@ -28,7 +28,24 @@ type Detected = {
   user_id?: string
 }
 
+/** Synchronous toolkit lookup (typically backed by TriggerSchemaCache.getType().toolkit).
+ *  Returns null if the slug is not in the cache — caller falls back to the split heuristic. */
+export type ToolkitLookup = (slug: string) => string | null
+
 export class TriggerNormalizer {
+  private lookupToolkit: ToolkitLookup | null = null
+
+  /** Wire an authoritative toolkit lookup. Composio's V1/V2/V3 envelopes do NOT
+   *  carry toolkit_slug (verified against @composio/core@0.10.0 — see
+   *  WebhookTriggerPayloadV3Schema). They expect clients to derive it from the
+   *  trigger slug, which their own SDK does via slug.split('_')[0]. That fails
+   *  for multi-token toolkits like MICROSOFT_TEAMS, GOOGLE_CHAT, GOOGLE_MEET.
+   *  By consulting triggers.getType(slug).toolkit.slug (cached), we get the
+   *  authoritative value and avoid the latent split bug. */
+  setToolkitLookup(lookup: ToolkitLookup): void {
+    this.lookupToolkit = lookup
+  }
+
   normalize(raw: RawComposioEvent): NormalizedEvent {
     const d = this.detect(raw)
     return {
@@ -131,11 +148,19 @@ export class TriggerNormalizer {
     }
   }
 
-  /** Convention: toolkit = first segment of slug, lowercased.
-   *  'GMAIL_NEW_GMAIL_MESSAGE' → 'gmail'
-   *  'GOOGLECALENDAR_GOOGLE_CALENDAR_EVENT_CREATED_TRIGGER' → 'googlecalendar' */
+  /** Authoritative lookup first (if cache is wired), else split heuristic.
+   *  Heuristic: toolkit = first segment of slug, lowercased.
+   *    'GMAIL_NEW_GMAIL_MESSAGE' → 'gmail'
+   *    'GOOGLECALENDAR_GOOGLE_CALENDAR_EVENT_CREATED_TRIGGER' → 'googlecalendar'
+   *  The heuristic FAILS for multi-token toolkits ('MICROSOFT_TEAMS_NEW_MESSAGE'
+   *  → 'microsoft' instead of 'microsoft_teams'). The schemaCache lookup is the
+   *  fix; we keep the heuristic as fallback for cold-start before initialize(). */
   private toolkitFromSlug(slug: string): string {
     if (!slug) return ''
+    if (this.lookupToolkit) {
+      const looked = this.lookupToolkit(slug)
+      if (looked) return looked.toLowerCase()
+    }
     return slug.split('_')[0]?.toLowerCase() ?? ''
   }
 
