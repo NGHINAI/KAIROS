@@ -1,3 +1,35 @@
+## [v0.4.0] - 2026-05-28
+
+**Phase C complete.** Orchestration, persona, skills, standing orders — all four sub-phases shipped and proven to work together end-to-end via the simulated 4-hour user-session validation gate.
+
+### Phase C arc (C.1 → C.2 → C.3 → C.4)
+
+- **C.1 — Agency + Restraint:** trigger engine, action executor, urgency floor, karma/cooldown/rate-limit gates, dry-run mode, intent registry
+- **C.2 — Memory + Composio:** episodic + semantic memory, vector embedding, prompt caching, model router with task-typed tier selection, Composio connectors with managed OAuth
+- **C.3 — Persona + AWM Skills:** soul.md + persona.md + Dreaming cycles, PersonaAwareness hints, agentskills.io SKILL.md crystallization, PersonaGate + Curator
+- **C.4 — Standing Orders v2:** structured DSL with time-triggered rules, chaining via named events, persona-conditioned routing, real Composio tool execution, 24h dry-run gate, pending-edits queue for offline LLM
+
+### Added in C.4.2 (final sub-phase)
+
+- **ComposioToolResolver** — maps friendly `{toolkit, friendly_name}` to exact `toolName` via boot-time `composio.tools.list()`; 24h cache at `~/.kairos/composio-tools-cache.json`; on-miss refresh rate-limited to 1/hour
+- **Real composio_tool action execution** — replaces the C.4.1 stub. resolver → `composio.executeTool()` → output captured for chaining via `${skill_output.X}`
+- **Persona-conditioned routing** — `personaThresholdShift(hints)` applied to RestraintPipeline's interrupt/surface/digest thresholds at score time. aggressiveness=low → +0.10; in_focus_now → +0.05; !active_hours → +0.10; high → −0.05. Clamped to ±0.20. `persona_snapshot` recorded in DeliveryDecision for audit
+- **PendingEditsQueue + Processor** — SQLite-backed retry queue with exponential backoff (5min × 2^retry, capped 1h); max 10 retries → failed state surfaced via inbox; max 50 pending rows (oldest dropped on overflow). `OrdersAuthor.handleSpeechDirect()` exposed for direct retry path
+- **Phase C overall validation gate** — `scripts/validate-phase-c.ts` runs 30 assertions across a simulated 4-hour user session in <60s wall time. Covers: boot, rule-create-from-speech, state-triggered firing, dry-run logging, persona dreaming, persona shift behavior, Composio resolver + executeTool, LLM-down queue/retry, skill crystallization via AwmWorker, skill invocation, clean shutdown
+
+### Validated
+
+- All 10 phase-specific gates verdict PASS
+- Phase C overall gate: 30/30 PASS
+- Full `bun test`: 624 pass + 1 pre-existing FileEventsObserver flake (unchanged from C.4.2 baseline)
+- 3 memory test files (`embeddings`, `episodicMemory`, `semanticMemory`) panic Bun runtime due to native @huggingface/transformers deps — pre-existing, not caused by C.4.2
+
+### Tag
+
+`v0.4.0` — Phase C cohesive release. No `-phase-c4-2` suffix; this is the milestone.
+
+---
+
 ## [v0.3.8-phase-c4-1] - 2026-05-28
 
 ### Added
