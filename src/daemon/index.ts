@@ -126,6 +126,13 @@ import { buildApprovalPrompt } from './orders/v2/approvalPrompt'
 import { ComposioToolResolver } from './orders/v2/composioToolResolver'
 import { PendingEditsQueue } from './orders/v2/pendingEdits'
 import { PendingEditsProcessor } from './orders/v2/pendingEditsProcessor'
+import { TriggerListener } from './connectors/triggers/listener'
+import { TriggerEventLog } from './connectors/triggers/eventLog'
+import { TriggerNormalizer } from './connectors/triggers/normalizer'
+import { TriggerSchemaCache } from './connectors/triggers/schemaCache'
+import { TriggerInstanceManager } from './connectors/triggers/instanceManager'
+import { TriggerMetrics } from './connectors/triggers/metrics'
+import { ConnectGuard } from './connectors/triggers/connectGuard'
 
 const VERSION = '0.2.0'
 
@@ -612,6 +619,11 @@ async function main(): Promise<void> {
                 })
                 expiryPoller.start()
 
+                // Stash for Phase D trigger subsystem and orders-v2
+                ;(globalThis as any).__kairosComposioClient = composioClient
+                ;(globalThis as any).__kairosConnectionStore = connectionStore
+                ;(globalThis as any).__kairosConnectionFlow = connectionFlow
+
                 log('[composio] subsystem ready')
               } catch (err) {
                 log('[composio] subsystem failed to start, continuing without connectors: ' + String(err), 'warn')
@@ -834,6 +846,88 @@ async function main(): Promise<void> {
         // ──────────────────────────────────────────────────────────────────────────
 
         // ──────────────────────────────────────────────────────────────────────────
+        // Phase D — Composio Triggers subsystem
+        // ──────────────────────────────────────────────────────────────────────────
+        let triggerListener: TriggerListener | null = null
+        let triggerSchemaCache: TriggerSchemaCache | null = null
+        let triggerInstanceManager: TriggerInstanceManager | null = null
+        let triggerConnectGuard: ConnectGuard | null = null
+
+        {
+          const _composioClientForTriggers = (globalThis as any).__kairosComposioClient ?? null
+          if (_composioClientForTriggers && config.composio?.triggers_enabled !== false) {
+            try {
+              const _connectionStoreForTriggers = (globalThis as any).__kairosConnectionStore
+              const triggerEventLog = new TriggerEventLog(db)
+              const triggerNormalizer = new TriggerNormalizer()
+              const triggerMetrics = new TriggerMetrics(db)
+
+              triggerSchemaCache = new TriggerSchemaCache({ composio: _composioClientForTriggers as any })
+              await triggerSchemaCache.initialize().catch((err: any) => log(`[triggers] schema init: ${err}`, 'warn'))
+
+              triggerInstanceManager = new TriggerInstanceManager({
+                db,
+                composio: (_composioClientForTriggers as any).sdk ?? _composioClientForTriggers,
+                userId: 'local',
+              })
+              await triggerInstanceManager.reconcile().catch((err: any) => log(`[triggers] reconcile: ${err}`, 'warn'))
+
+              triggerConnectGuard = new ConnectGuard({
+                connectionStore: _connectionStoreForTriggers as any,
+                // Adapter — ConnectionFlow exposes connect(), not link(); wrap to { url? }
+                connectionFlow: {
+                  link: async (toolkit: string) => {
+                    try {
+                      const _cf = (globalThis as any).__kairosConnectionFlow
+                      const r = await (_cf as any).connect({ userId: 'local', toolkitSlug: toolkit })
+                      // connect() returns ConnectFlowResult — extract redirect_url if present
+                      return { url: (r as any)?.redirect_url ?? undefined }
+                    } catch (err) {
+                      throw err
+                    }
+                  },
+                },
+                inbox: inbox as any,
+                nativeNotifier: notifier as any,
+                onConnectionComplete: (toolkit: string) => log(`[triggers] connection complete: ${toolkit}`),
+                userId: 'local',
+              })
+
+              triggerListener = new TriggerListener({
+                composio: (_composioClientForTriggers as any).sdk ?? _composioClientForTriggers,
+                eventLog: triggerEventLog,
+                normalizer: triggerNormalizer,
+                perceptionBus: bus as any,
+                metrics: triggerMetrics,
+                onHealthChange: (h: any) => log(`[triggers] health: ${h}`),
+              })
+              await triggerListener.start()
+
+              // Wire schemaCache + instanceManager + connectGuard into OrdersAuthor (if it exists)
+              const _author = (globalThis as any).__kairosOrdersAuthor
+              if (_author) {
+                _author.deps = _author.deps ?? {}
+                ;(_author as any).deps.schemaCache = triggerSchemaCache
+                ;(_author as any).deps.instanceManager = triggerInstanceManager
+                ;(_author as any).deps.connectGuard = triggerConnectGuard
+              }
+
+              // Boot replay of unprocessed events
+              const unprocessed = triggerEventLog.listUnprocessed(100)
+              for (const env of unprocessed) (bus as any).publish('incoming_event', env)
+              if (unprocessed.length > 0) log(`[triggers] replayed ${unprocessed.length} events at boot`)
+
+              ;(globalThis as any).__kairosTriggerListener = triggerListener
+              ;(globalThis as any).__kairosTriggerEventLog = triggerEventLog
+              log(`[triggers] subsystem ready`)
+            } catch (err) {
+              log(`[triggers] subsystem failed to start: ${err}`, 'warn')
+            }
+          }
+        }
+        // ──────────────────────────────────────────────────────────────────────────
+
+        // ──────────────────────────────────────────────────────────────────────────
         // C.4.1 STANDING_ORDERS v2 — structured DSL + time-triggered rules
         // ──────────────────────────────────────────────────────────────────────────
         let v2Watcher: (() => void) | null = null
@@ -942,7 +1036,17 @@ async function main(): Promise<void> {
             const pendingQueue = new PendingEditsQueue(db)
 
             if (router) {
-              const ordersAuthor = new OrdersAuthor({ router, store: ordersV2Store, parser: ordersV2Parser, filePath: v2FilePath, pendingQueue })
+              const ordersAuthor = new OrdersAuthor({
+                router,
+                store: ordersV2Store,
+                parser: ordersV2Parser,
+                filePath: v2FilePath,
+                pendingQueue,
+                // Phase D — wire in trigger deps if subsystem started
+                schemaCache: triggerSchemaCache ?? undefined,
+                instanceManager: triggerInstanceManager ?? undefined,
+                connectGuard: triggerConnectGuard ?? undefined,
+              })
               ;(globalThis as any).__kairosOrdersAuthor = ordersAuthor
             }
 
@@ -1029,6 +1133,7 @@ async function main(): Promise<void> {
           if (v2ScheduleAdapter) v2ScheduleAdapter.stopAll()
           if (composioResolver) composioResolver.stop()
           if (pendingProcessor) pendingProcessor.stop()
+          if (triggerListener) void triggerListener.stop()
         }
       }
 

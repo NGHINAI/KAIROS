@@ -87,6 +87,7 @@ export type Config = {
     api_key?: string
     session_id?: string
     poll_interval_ms?: number
+    triggers_enabled?: boolean   // Phase D — default true
   }
   persona?: {
     enabled?: boolean
