@@ -208,4 +208,46 @@ created_at: 2026-05-28T00:00:00Z
     expect(new OrdersParser().parseString('').rules).toHaveLength(0)
     expect(new OrdersParser().parseString('# Just a comment').rules).toHaveLength(0)
   })
+
+  it('accepts incoming_event selector with valid trigger slug', () => {
+    const text = `## x
+---
+schema_version: 1
+when:
+  state:
+    incoming_event:
+      trigger: GMAIL_NEW_GMAIL_MESSAGE
+do:
+  - action: log
+    args: { message: x }
+state: active
+created_by: manual
+created_at: 2026-05-29T00:00:00Z
+---
+`
+    const r = new OrdersParser().parseString(text)
+    expect(r.rules).toHaveLength(1)
+    expect(r.errors).toHaveLength(0)
+  })
+
+  it('rejects incoming_event with bad trigger slug format', () => {
+    const text = `## x
+---
+schema_version: 1
+when:
+  state:
+    incoming_event:
+      trigger: not-a-valid-slug
+do:
+  - action: log
+    args: { message: x }
+state: active
+created_by: manual
+created_at: 2026-05-29T00:00:00Z
+---
+`
+    const r = new OrdersParser().parseString(text)
+    expect(r.rules).toHaveLength(0)
+    expect(r.errors[0]!.error).toMatch(/incoming_event/i)
+  })
 })

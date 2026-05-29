@@ -73,6 +73,17 @@ export class OrdersParser {
     const w = raw.when as Record<string, unknown>
     const whenKeys = Object.keys(w).filter(k => ['cron', 'at', 'event', 'state'].includes(k))
     if (whenKeys.length !== 1) throw new Error(`when must have exactly one of {cron, at, event, state}, got [${whenKeys.join(',')}]`)
+    // Phase D — validate incoming_event sub-selector if present
+    const stateSel = (raw.when as any).state
+    if (stateSel && typeof stateSel === 'object' && 'incoming_event' in stateSel) {
+      const ie = stateSel.incoming_event
+      if (!ie || typeof ie.trigger !== 'string' || !/^[A-Z][A-Z0-9_]+$/.test(ie.trigger)) {
+        throw new Error(`invalid incoming_event.trigger: ${ie?.trigger}`)
+      }
+      if (ie.config !== undefined && (typeof ie.config !== 'object' || ie.config === null)) {
+        throw new Error('incoming_event.config must be an object if present')
+      }
+    }
     const doArr = raw.do as Action[] | undefined
     if (!Array.isArray(doArr) || doArr.length === 0) throw new Error('do must be non-empty array')
     for (const a of doArr) {
