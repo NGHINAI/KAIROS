@@ -9,6 +9,7 @@
 // through unchanged". Order matters; see restraintPipeline.ts for the wiring.
 
 import type { AutonomyTier } from '../agency/types'
+import type { PersonaHints } from '../persona/types'
 
 /** How urgently the user should see this. */
 export type DeliveryMode =
@@ -43,6 +44,7 @@ export type DeliveryDecision = {
   reason: string                     // why this mode (for trajectory log)
   delivered_at?: number              // when actually surfaced (null until delivered)
   queue_for_digest?: 'morning' | 'lunch' | 'evening'  // which digest slot
+  persona_snapshot?: PersonaHints | null  // C.4.2: persona hints at time of routing (null if no awareness)
 }
 
 /** Karma record per trigger — tracks dismissal/usage history. */

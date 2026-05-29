@@ -29,6 +29,7 @@ import type { DryRunMode } from './dryRunMode'
 
 import type { UrgencyFloor } from './urgencyFloor'
 import type { PersonaAwareness } from '../persona/personaAwareness'
+import { personaThresholdShift } from './personaShift'
 
 export type RestraintDeps = {
   config: RestraintConfig
@@ -138,8 +139,27 @@ export class RestraintPipeline {
       }
     }
 
-    // 6. Route
-    const decision = this.deps.router.route(score)
+    // 6. Route — apply persona threshold shift (C.4.2)
+    const shift = personaThresholdShift(hints ?? null)
+    const interruptT = this.deps.config.interrupt_threshold + shift
+    const surfaceT   = this.deps.config.surface_threshold   + (shift * 0.5)
+    const digestT    = this.deps.config.digest_threshold    + (shift * 0.25)
+
+    let decision: DeliveryDecision
+    if (score.total >= interruptT) {
+      decision = { mode: 'interrupt', score, reason: `score ${score.total.toFixed(2)} >= ${interruptT.toFixed(2)} (persona-shifted)`, persona_snapshot: hints ?? null }
+    } else if (score.total >= surfaceT) {
+      decision = { mode: 'surface', score, reason: `score ${score.total.toFixed(2)} >= ${surfaceT.toFixed(2)} (persona-shifted)`, persona_snapshot: hints ?? null }
+    } else if (score.total >= digestT) {
+      decision = {
+        mode: 'digest', score,
+        reason: `score ${score.total.toFixed(2)} >= ${digestT.toFixed(2)}, queuing (persona-shifted)`,
+        queue_for_digest: this.deps.router.route(score).queue_for_digest,
+        persona_snapshot: hints ?? null,
+      }
+    } else {
+      decision = { mode: 'log_only', score, reason: `score ${score.total.toFixed(2)} below digest threshold (persona-shifted)`, persona_snapshot: hints ?? null }
+    }
 
     // 7. Rate limit
     if (!this.deps.rateLimiter.canDeliver(decision.mode, inputs.urgent)) {

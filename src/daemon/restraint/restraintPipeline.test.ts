@@ -283,3 +283,113 @@ describe('RestraintPipeline — PersonaAwareness integration (C.3.1)', () => {
     expect(result.mode).toBe('digest')
   })
 })
+
+// ---------------------------------------------------------------------------
+// C.4.2 — personaThresholdShift integration tests
+// ---------------------------------------------------------------------------
+
+describe('RestraintPipeline — persona-conditioned routing (C.4.2)', () => {
+  let db: Database
+
+  function mkPersonaAwareness(hints: any) {
+    return {
+      getHints: () => hints,
+      invalidate: () => {},
+    } as any
+  }
+
+  function makePipeline(personaAwareness?: any): RestraintPipeline {
+    db = new Database(':memory:')
+    db.exec(KARMA_SCHEMA)
+    db.exec(RATE_LIMITER_SCHEMA)
+    db.exec(DIGEST_SCHEMA)
+    db.exec(DRY_RUN_SCHEMA)
+
+    const focus = new FocusDetector(cfg, {
+      now: () => new Date('2026-05-25T10:00:00').getTime(),
+      probeFocusedApp: async () => ({ app: 'VS Code', duration_sec: 300 }),
+      probeMeeting: async () => false,
+    })
+    const karma = new KarmaStore(db, cfg)
+    const cooldown = new CooldownTracker(cfg.default_trigger_cooldown_sec * 1000)
+    const rateLimiter = new RateLimiter(db, cfg)
+    const scorer = new ActionScorer(cfg)
+    const router = new DeliveryRouter(cfg)
+    const digest = new DigestComposer(db)
+    const dryRun = new DryRunMode(db, cfg)
+    const urgencyFloor = new (require('./urgencyFloor').UrgencyFloor)()
+
+    return new RestraintPipeline({
+      config: cfg, urgencyFloor, focus, karma, cooldown, rateLimiter, scorer, router, digest, dryRun,
+      ...(personaAwareness !== undefined ? { personaAwareness } : {}),
+    })
+  }
+
+  it('persona_snapshot is included in the DeliveryDecision', async () => {
+    const hints = {
+      interrupt_aggressiveness: 'medium' as const,
+      in_focus_now: false,
+      active_hours_now: true,
+      prefer_terse: true,
+      prefer_voice_over_text: false,
+    }
+    const pipe = makePipeline(mkPersonaAwareness(hints))
+    // score ≈ 0.55 → digest bucket; persona_snapshot should reflect hints
+    const result = await pipe.evaluate(makeReq('notify', 'trig-snapshot'), {
+      urgency: 0.5, rule_match_strength: 0.5, personal_relevance: 0.5, novelty: 0.5, urgent: false,
+    })
+    expect((result as any).persona_snapshot).toEqual(hints)
+  })
+
+  it('persona shift is 0 when no awareness set (regression — existing tests should pass)', async () => {
+    const pipe = makePipeline(/* no personaAwareness — shift=0 */)
+    const result = await pipe.evaluate(makeReq('notify', 'trig-no-awareness'), {
+      urgency: 0.5, rule_match_strength: 0.5, personal_relevance: 0.5, novelty: 0.5, urgent: false,
+    })
+    // No exception; zero shift means default thresholds; score 0.55 → digest
+    expect(result.mode).toBe('digest')
+    expect(result.mode).toBeDefined()
+  })
+
+  it('active_hours_now=false raises effective interrupt threshold — borderline interrupt demoted to surface', async () => {
+    // cfg.interrupt_threshold = 0.90; all-1.0 inputs → score ≈ 0.95 → normally interrupt
+    // With active_hours_now=false: shift = +0.10 → interruptT = 1.00
+    //   score 0.95 < 1.00 → NOT interrupt; surfaceT = 0.70 + 0.05 = 0.75 → 0.95 >= 0.75 → surface
+    const pipe = makePipeline(mkPersonaAwareness({
+      interrupt_aggressiveness: 'medium',
+      in_focus_now: false,
+      active_hours_now: false,
+      prefer_terse: false,
+      prefer_voice_over_text: false,
+    }))
+    const result = await pipe.evaluate(makeReq('notify', 'trig-shift-active'), {
+      urgency: 1.0, rule_match_strength: 1.0, personal_relevance: 1.0, novelty: 1.0, urgent: false,
+    })
+    // Shift raised interruptT to 1.00; score 0.95 is no longer >= interrupt threshold
+    expect(result.mode).not.toBe('interrupt')
+    expect(result.mode).toBe('surface')
+  })
+
+  it('low aggressiveness + !active_hours raises threshold by clamped 0.20 — result is well-defined', async () => {
+    // shift = low(+0.10) + in_focus=false(0) + !active(+0.10) = 0.20 (clamped)
+    // interruptT = 0.90 + 0.20 = 1.10 (effectively >= 1.0 → nothing can interrupt)
+    // surfaceT   = 0.70 + 0.10 = 0.80
+    // digestT    = 0.40 + 0.05 = 0.45
+    // score ≈ 0.95 → not interrupt (1.10), not surface (0.80? 0.95>=0.80 → YES surface)
+    // But 5b fires first for low aggressiveness: score 0.95 >= raisedFloor (0.60) → passes 5b
+    const pipe = makePipeline(mkPersonaAwareness({
+      interrupt_aggressiveness: 'low',
+      in_focus_now: false,
+      active_hours_now: false,
+      prefer_terse: false,
+      prefer_voice_over_text: false,
+    }))
+    const result = await pipe.evaluate(makeReq('notify', 'trig-clamped-shift'), {
+      urgency: 1.0, rule_match_strength: 1.0, personal_relevance: 1.0, novelty: 1.0, urgent: false,
+    })
+    // Regardless of the exact bucket, result must be well-defined and not throw
+    expect(result.mode).toBeDefined()
+    // score 0.95 passes 5b (raisedFloor=0.60); with shift=0.20: surfaceT=0.80, 0.95>=0.80 → surface
+    expect(result.mode).toBe('surface')
+  })
+})
