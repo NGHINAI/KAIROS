@@ -9,6 +9,7 @@ import type { ModelRouter } from '../../llm/router'
 import type { OrdersStore } from './store'
 import type { OrdersParser } from './parser'
 import type { Rule, Action, When } from './types'
+import type { PendingEditsQueue } from './pendingEdits'
 
 const SYSTEM_PROMPT = `You are KAIROS's standing-orders compiler. The user just spoke a request like "remind me every Monday at 9 to send the standup". Convert it into a structured rule object.
 
@@ -38,18 +39,34 @@ export type OrdersAuthorDeps = {
   store: OrdersStore
   parser: OrdersParser
   filePath: string
+  pendingQueue?: PendingEditsQueue   // NEW — optional; if omitted, behavior matches C.4.1
 }
 
 export type AuthorResult = {
   created_slug: string | null
   similar_existing?: string
   error?: string
+  queued_for_retry?: boolean          // NEW
 }
 
 export class OrdersAuthor {
   constructor(private deps: OrdersAuthorDeps) {}
 
   async handleSpeech(text: string): Promise<AuthorResult> {
+    try {
+      return await this.handleSpeechDirect(text)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (this.deps.pendingQueue) {
+        this.deps.pendingQueue.enqueue(text)
+        this.deps.pendingQueue.enforceCapacityCap()
+        return { created_slug: null, queued_for_retry: true, error: msg }
+      }
+      return { created_slug: null, error: msg }
+    }
+  }
+
+  async handleSpeechDirect(text: string): Promise<AuthorResult> {
     const existing = this.deps.store.listAll().map(r => ({
       slug: r.slug,
       when_kind: this.whenKindOf(r.when),
@@ -62,22 +79,19 @@ ${existing.length === 0 ? '(none)' : existing.map(e => `- ${e.slug} (${e.when_ki
 
 Produce the JSON object.`
 
-    let parsed: any
-    try {
-      const result = await this.deps.router.complete({
-        task_type: 'orders_compose' as any,
-        system_blocks: [{ text: SYSTEM_PROMPT, cache_hint: 'long' }],
-        prompt: userPrompt,
-        structured: true,
-        max_output_tokens: 1500,
-        latency_target: 'standard',
-      })
-      parsed = result.parsed
-    } catch (err) {
-      return { created_slug: null, error: err instanceof Error ? err.message : String(err) }
-    }
+    // NOTE: no try/catch around router.complete() — let throws propagate
+    const result = await this.deps.router.complete({
+      task_type: 'orders_compose' as any,
+      system_blocks: [{ text: SYSTEM_PROMPT, cache_hint: 'long' }],
+      prompt: userPrompt,
+      structured: true,
+      max_output_tokens: 1500,
+      latency_target: 'standard',
+    })
+
+    const parsed = result.parsed as any
     if (!parsed?.proposed_rule || !parsed.slug_suggestion) {
-      return { created_slug: null, error: 'LLM output missing proposed_rule or slug_suggestion' }
+      throw new Error('LLM output missing proposed_rule or slug_suggestion')
     }
     if (parsed.similar_existing) {
       return { created_slug: null, similar_existing: parsed.similar_existing }

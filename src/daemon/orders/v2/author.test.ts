@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'bun:test'
 import { Database } from 'bun:sqlite'
+import { PendingEditsQueue } from './pendingEdits'
 import { mkdtempSync, readFileSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -115,5 +116,70 @@ describe('OrdersAuthor', () => {
     const author = new OrdersAuthor({ router: fake.router as any, store, parser, filePath: file })
     const result = await author.handleSpeech('test')
     expect(result.created_slug).toBe('dup-2')
+  })
+
+  // ── C.4.2 new tests ────────────────────────────────────────────────────────
+
+  function makeFailingRouter(errorMsg: string) {
+    return {
+      router: {
+        async complete(_req: any) { throw new Error(errorMsg) },
+      },
+    }
+  }
+
+  it('LLM ok + queue present → file path (no queue interaction)', async () => {
+    const queueDb = new Database(':memory:')
+    const queue = new PendingEditsQueue(queueDb)
+    const fake = makeFakeRouter({
+      proposed_rule: { when: { event: 'foo' }, do: [{ action: 'log', args: { message: 'x' } }] },
+      slug_suggestion: 'r-ok',
+      similar_existing: null,
+      confidence: 1,
+    })
+    const author = new OrdersAuthor({ router: fake.router as any, store, parser, filePath: file, pendingQueue: queue })
+    const result = await author.handleSpeech('do x')
+    expect(result.created_slug).toBe('r-ok')
+    expect(queue.listAll()).toHaveLength(0)
+  })
+
+  it('LLM fails + queue present → enqueued, returns queued_for_retry=true', async () => {
+    const queueDb = new Database(':memory:')
+    const queue = new PendingEditsQueue(queueDb)
+    const failing = makeFailingRouter('LLM 500')
+    const author = new OrdersAuthor({ router: failing.router as any, store, parser, filePath: file, pendingQueue: queue })
+    const result = await author.handleSpeech('please save this')
+    expect(result.created_slug).toBeNull()
+    expect(result.queued_for_retry).toBe(true)
+    expect(queue.listAll()).toHaveLength(1)
+    expect(queue.listAll()[0]!.speech).toBe('please save this')
+  })
+
+  it('LLM missing proposed_rule + queue present → enqueued (treated as transient)', async () => {
+    const queueDb = new Database(':memory:')
+    const queue = new PendingEditsQueue(queueDb)
+    const broken = makeFakeRouter({ slug_suggestion: 'x' })   // proposed_rule missing
+    const author = new OrdersAuthor({ router: broken.router as any, store, parser, filePath: file, pendingQueue: queue })
+    const result = await author.handleSpeech('xx')
+    expect(result.queued_for_retry).toBe(true)
+    expect(queue.listAll()).toHaveLength(1)
+  })
+
+  it('handleSpeechDirect bypasses queue — throws on failure', async () => {
+    const queueDb = new Database(':memory:')
+    const queue = new PendingEditsQueue(queueDb)
+    const failing = makeFailingRouter('LLM 500')
+    const author = new OrdersAuthor({ router: failing.router as any, store, parser, filePath: file, pendingQueue: queue })
+    await expect(author.handleSpeechDirect('xx')).rejects.toThrow(/500/)
+    expect(queue.listAll()).toHaveLength(0)
+  })
+
+  it('queue absent + LLM fails → original error-return behavior preserved', async () => {
+    const failing = makeFailingRouter('LLM 500')
+    const author = new OrdersAuthor({ router: failing.router as any, store, parser, filePath: file })
+    const result = await author.handleSpeech('xx')
+    expect(result.created_slug).toBeNull()
+    expect(result.queued_for_retry).toBeUndefined()
+    expect(result.error).toContain('500')
   })
 })
