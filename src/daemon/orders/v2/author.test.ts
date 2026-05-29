@@ -182,4 +182,114 @@ describe('OrdersAuthor', () => {
     expect(result.queued_for_retry).toBeUndefined()
     expect(result.error).toContain('500')
   })
+
+  // ── Phase D tests ────────────────────────────────────────────────────────────
+
+  function fakeSchemaCache(types: Record<string, any>) {
+    return {
+      map: new Map(Object.entries(types)),
+      getType: (slug: string) => types[slug] ?? null,
+      resolveOrRefresh: async (slug: string) => types[slug] ?? null,
+    } as any
+  }
+
+  function fakeInstanceManager() {
+    const calls: any[] = []
+    return {
+      acquireForRule: async (rule_slug: string, slug: string, config: any, ca: string) => {
+        calls.push({ rule_slug, slug, config, ca })
+        return 'ti_x'
+      },
+      releaseForRule: async () => {},
+      calls,
+    } as any
+  }
+
+  function fakeConnectGuard(result: 'ready' | 'pending') {
+    const calls: any[] = []
+    return {
+      ensureConnected: async (tk: string, rs: string) => { calls.push({ tk, rs }); return result },
+      notifyComplete: () => {},
+      calls,
+    } as any
+  }
+
+  it('incoming_event rule with connected toolkit: acquires instance + activates', async () => {
+    const fake = makeFakeRouter({
+      proposed_rule: {
+        when: { state: { incoming_event: { trigger: 'GMAIL_NEW_GMAIL_MESSAGE' } } },
+        do: [{ action: 'notify', args: { message: 'x' } }],
+      },
+      slug_suggestion: 'mc',
+      similar_existing: null,
+      confidence: 0.95,
+    })
+    const schemaCache = fakeSchemaCache({ GMAIL_NEW_GMAIL_MESSAGE: { slug: 'GMAIL_NEW_GMAIL_MESSAGE', toolkit: 'gmail', config_schema: {}, payload_schema: {}, description: 'New email' } })
+    const instMgr = fakeInstanceManager()
+    const guard = fakeConnectGuard('ready')
+    const author = new OrdersAuthor({
+      router: fake.router as any, store, parser, filePath: file,
+      schemaCache, instanceManager: instMgr, connectGuard: guard,
+    })
+    const result = await author.handleSpeech('notify me about emails')
+    expect(result.created_slug).toBe('mc')
+    expect(guard.calls).toHaveLength(1)
+    expect(instMgr.calls).toHaveLength(1)
+  })
+
+  it('incoming_event rule with unconnected toolkit: state=pending_connection, no instance acquired', async () => {
+    const fake = makeFakeRouter({
+      proposed_rule: {
+        when: { state: { incoming_event: { trigger: 'GMAIL_NEW_GMAIL_MESSAGE' } } },
+        do: [{ action: 'notify', args: { message: 'x' } }],
+      },
+      slug_suggestion: 'pc',
+      similar_existing: null,
+      confidence: 0.95,
+    })
+    const schemaCache = fakeSchemaCache({ GMAIL_NEW_GMAIL_MESSAGE: { slug: 'GMAIL_NEW_GMAIL_MESSAGE', toolkit: 'gmail', config_schema: {}, payload_schema: {}, description: '' } })
+    const instMgr = fakeInstanceManager()
+    const guard = fakeConnectGuard('pending')
+    const author = new OrdersAuthor({
+      router: fake.router as any, store, parser, filePath: file,
+      schemaCache, instanceManager: instMgr, connectGuard: guard,
+    })
+    await author.handleSpeech('notify me')
+    const stored = store.get('pc')
+    expect(stored?.state).toBe('pending_connection')
+    expect(instMgr.calls).toHaveLength(0)
+  })
+
+  it('system prompt includes available triggers from schemaCache', async () => {
+    let capturedSystemBlocks: any = null
+    const fake = {
+      complete: async (req: any) => {
+        capturedSystemBlocks = req.system_blocks
+        return { parsed: { proposed_rule: { when: { event: 'foo' }, do: [{ action: 'log', args: {} }] }, slug_suggestion: 'x', similar_existing: null, confidence: 1 } }
+      },
+    }
+    const schemaCache = fakeSchemaCache({
+      GMAIL_NEW_GMAIL_MESSAGE: { slug: 'GMAIL_NEW_GMAIL_MESSAGE', toolkit: 'gmail', config_schema: {}, payload_schema: {}, description: 'new email' },
+      GITHUB_COMMIT_EVENT: { slug: 'GITHUB_COMMIT_EVENT', toolkit: 'github', config_schema: {}, payload_schema: {}, description: 'commit' },
+    })
+    const author = new OrdersAuthor({
+      router: fake as any, store, parser, filePath: file,
+      schemaCache,
+    })
+    await author.handleSpeech('hi')
+    expect(capturedSystemBlocks).not.toBeNull()
+    const text = capturedSystemBlocks[0].text
+    expect(text).toContain('GMAIL_NEW_GMAIL_MESSAGE')
+    expect(text).toContain('GITHUB_COMMIT_EVENT')
+  })
+
+  it('incoming_event compilation works without optional deps (backward compatible)', async () => {
+    const fake = makeFakeRouter({
+      proposed_rule: { when: { state: { incoming_event: { trigger: 'X_Y' } } }, do: [{ action: 'log', args: {} }] },
+      slug_suggestion: 'bc', similar_existing: null, confidence: 1,
+    })
+    const author = new OrdersAuthor({ router: fake.router as any, store, parser, filePath: file })
+    const result = await author.handleSpeech('test')
+    expect(result.created_slug).toBe('bc')
+  })
 })

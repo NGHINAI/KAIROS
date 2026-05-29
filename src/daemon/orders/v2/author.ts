@@ -10,6 +10,9 @@ import type { OrdersStore } from './store'
 import type { OrdersParser } from './parser'
 import type { Rule, Action, When } from './types'
 import type { PendingEditsQueue } from './pendingEdits'
+import type { TriggerSchemaCache } from '../../connectors/triggers/schemaCache'
+import type { TriggerInstanceManager } from '../../connectors/triggers/instanceManager'
+import type { ConnectGuard } from '../../connectors/triggers/connectGuard'
 
 const SYSTEM_PROMPT = `You are KAIROS's standing-orders compiler. The user just spoke a request like "remind me every Monday at 9 to send the standup". Convert it into a structured rule object.
 
@@ -40,6 +43,10 @@ export type OrdersAuthorDeps = {
   parser: OrdersParser
   filePath: string
   pendingQueue?: PendingEditsQueue   // NEW — optional; if omitted, behavior matches C.4.1
+  // NEW (Phase D — all optional)
+  schemaCache?: TriggerSchemaCache
+  instanceManager?: TriggerInstanceManager
+  connectGuard?: ConnectGuard
 }
 
 export type AuthorResult = {
@@ -51,6 +58,24 @@ export type AuthorResult = {
 
 export class OrdersAuthor {
   constructor(private deps: OrdersAuthorDeps) {}
+
+  private buildSystemPrompt(): string {
+    let prompt = SYSTEM_PROMPT
+    if (this.deps.schemaCache) {
+      // Access the internal map via getType iteration — we don't have a public listAll.
+      // For Phase D v1, we iterate using a slug list approach if known, OR access (cache as any).map.
+      const cache: any = this.deps.schemaCache as any
+      const map: Map<string, any> | undefined = cache.map
+      if (map && map.size > 0) {
+        prompt += `\n\nAvailable Composio triggers (toolkit:slug — description):\n`
+        for (const [slug, t] of map) {
+          prompt += `- ${t.toolkit}:${slug} — ${t.description}\n`
+        }
+        prompt += `\nFor rules like 'notify me when X', use:\n  when:\n    state:\n      incoming_event:\n        trigger: <TRIGGER_SLUG>\n  if:\n    - "payload.<field> == '<value>'"  # client-side filter\n`
+      }
+    }
+    return prompt
+  }
 
   async handleSpeech(text: string): Promise<AuthorResult> {
     try {
@@ -82,7 +107,7 @@ Produce the JSON object.`
     // NOTE: no try/catch around router.complete() — let throws propagate
     const result = await this.deps.router.complete({
       task_type: 'orders_compose' as any,
-      system_blocks: [{ text: SYSTEM_PROMPT, cache_hint: 'long' }],
+      system_blocks: [{ text: this.buildSystemPrompt(), cache_hint: 'long' }],
       prompt: userPrompt,
       structured: true,
       max_output_tokens: 1500,
@@ -112,6 +137,30 @@ Produce the JSON object.`
       created_at: now,
       description: `You said: "${text}"`,
     }
+    // Phase D — gate incoming_event rules through ConnectGuard + InstanceManager
+    if ('state' in rule.when && (rule.when.state as any).incoming_event) {
+      const ie = (rule.when.state as any).incoming_event
+      const schema = this.deps.schemaCache ? await this.deps.schemaCache.resolveOrRefresh(ie.trigger) : null
+      const toolkit = schema?.toolkit ?? 'unknown'
+
+      if (this.deps.connectGuard) {
+        const status = await this.deps.connectGuard.ensureConnected(toolkit, rule.slug)
+        if (status === 'pending') {
+          rule.state = 'pending_connection'
+        }
+      }
+
+      if (rule.state !== 'pending_connection' && this.deps.instanceManager) {
+        try {
+          // For v1, use a placeholder ca_id; daemon wire-up will refine via ConnectionStore lookup
+          await this.deps.instanceManager.acquireForRule(rule.slug, ie.trigger, ie.config ?? {}, 'local_default')
+        } catch (err) {
+          rule.state = 'suspended'
+          rule.description = (rule.description ?? '') + `\n\n(Failed to register trigger: ${err instanceof Error ? err.message : String(err)})`
+        }
+      }
+    }
+
     this.appendRuleBlock(rule, parsed.proposed_rule.cooldown)
     this.deps.store.upsert(rule)
     return { created_slug: slug }
