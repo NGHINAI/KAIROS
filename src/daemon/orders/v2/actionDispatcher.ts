@@ -16,8 +16,11 @@ export type ActionDispatcherDeps = {
   skillDispatcher: {
     invoke(slug: string, args: Record<string, unknown>): Promise<{ ok: boolean; output?: unknown; error?: string; duration_ms: number; sandbox: string }>
   }
+  /** Composio integration. Both fields together OR null to disable. */
   composio: {
-    invokeTool(toolkit: string, tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; output?: unknown; error?: string }>
+    resolver: { resolveOrRefresh(toolkit: string, tool: string): Promise<string | null> }
+    executeTool(args: { toolName: string; userId: string; arguments: any }): Promise<any>
+    userId: string
   } | null
   eventBus: RulesEventBus
 }
@@ -73,13 +76,18 @@ export class ActionDispatcher {
           skill_output_raw = r.output
         } else if (action.action === 'composio_tool') {
           if (!this.deps.composio) throw new Error('Composio not configured')
-          const r = await this.deps.composio.invokeTool(
+          const toolName = await this.deps.composio.resolver.resolveOrRefresh(
             args.toolkit as string,
             args.tool as string,
-            (args.args as Record<string, unknown>) ?? {}
           )
-          if (!r.ok) throw new Error(r.error ?? 'composio tool failed')
-          skill_output_raw = r.output
+          if (!toolName) throw new Error(`could not resolve composio tool '${args.toolkit}:${args.tool}'`)
+          const result = await this.deps.composio.executeTool({
+            toolName,
+            userId: this.deps.composio.userId,
+            arguments: (args.args as Record<string, unknown>) ?? {},
+          })
+          if (result && result.error) throw new Error(String(result.error))
+          skill_output_raw = result
         } else if (action.action === 'emit_event') {
           this.deps.eventBus.emit(
             args.name as string,

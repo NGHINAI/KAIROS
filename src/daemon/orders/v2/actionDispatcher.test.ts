@@ -28,10 +28,17 @@ function fakeSkillDispatcher() {
 function fakeComposio() {
   const calls: any[] = []
   return {
-    invokeTool: async (toolkit: string, tool: string, args: any) => {
-      calls.push({ toolkit, tool, args })
+    resolver: {
+      resolveOrRefresh: async (toolkit: string, tool: string) => {
+        // Trivial pass-through: just join the parts for predictable test fixture
+        return `${toolkit.toUpperCase()}_${tool.toUpperCase()}`
+      },
+    },
+    executeTool: async (args: any) => {
+      calls.push({ toolkit: args.toolName.split('_')[0]!.toLowerCase(), tool: args.toolName.split('_').slice(1).join('_').toLowerCase(), args: args.arguments })
       return { ok: true, output: 'composio-result' }
     },
+    userId: 'local',
     calls,
   }
 }
@@ -104,5 +111,80 @@ describe('ActionDispatcher', () => {
     const result = await d.dispatch([{ action: 'mystery', args: {} } as any], { trigger: {} })
     expect(result.ok).toBe(false)
     expect(result.error).toMatch(/unknown action/i)
+  })
+
+  function fakeComposioWithResolver(toolNameMap: Record<string, string>) {
+    const executeCalls: any[] = []
+    return {
+      composio: {
+        resolver: {
+          resolveOrRefresh: async (toolkit: string, tool: string) => toolNameMap[`${toolkit}:${tool}`] ?? null,
+        },
+        executeTool: async (args: any) => { executeCalls.push(args); return { ok: true, data: 'tool-result' } },
+        userId: 'local',
+      },
+      executeCalls,
+    }
+  }
+
+  it('composio_tool: resolver hit + executeTool called with toolName', async () => {
+    const cmp = fakeComposioWithResolver({ 'slack:send_message': 'SLACK_SEND_MESSAGE' })
+    const d = new ActionDispatcher({
+      intentRegistry: fakeIntentRegistry() as any,
+      skillDispatcher: fakeSkillDispatcher() as any,
+      composio: cmp.composio,
+      eventBus: new RulesEventBus(),
+    })
+    await d.dispatch([{ action: 'composio_tool', args: { toolkit: 'slack', tool: 'send_message', args: { channel: '#x', text: 'hi' } } } as Action], { trigger: {} })
+    expect(cmp.executeCalls).toHaveLength(1)
+    expect(cmp.executeCalls[0].toolName).toBe('SLACK_SEND_MESSAGE')
+    expect(cmp.executeCalls[0].userId).toBe('local')
+    expect(cmp.executeCalls[0].arguments).toEqual({ channel: '#x', text: 'hi' })
+  })
+
+  it('composio_tool: resolver miss returns failure result', async () => {
+    const cmp = fakeComposioWithResolver({})
+    const d = new ActionDispatcher({
+      intentRegistry: fakeIntentRegistry() as any,
+      skillDispatcher: fakeSkillDispatcher() as any,
+      composio: cmp.composio,
+      eventBus: new RulesEventBus(),
+    })
+    const result = await d.dispatch([{ action: 'composio_tool', args: { toolkit: 'discord', tool: 'send_message', args: {} } } as Action], { trigger: {} })
+    expect(result.ok).toBe(false)
+    expect(result.error).toMatch(/could not resolve/)
+  })
+
+  it('composio_tool: executeTool failure surfaces as ok=false', async () => {
+    const composio = {
+      resolver: { resolveOrRefresh: async () => 'SLACK_SEND_MESSAGE' },
+      executeTool: async () => ({ error: 'rate limited' }),
+      userId: 'local',
+    }
+    const d = new ActionDispatcher({
+      intentRegistry: fakeIntentRegistry() as any,
+      skillDispatcher: fakeSkillDispatcher() as any,
+      composio,
+      eventBus: new RulesEventBus(),
+    })
+    const result = await d.dispatch([{ action: 'composio_tool', args: { toolkit: 'slack', tool: 'send_message', args: {} } } as Action], { trigger: {} })
+    expect(result.ok).toBe(false)
+    expect(result.error).toContain('rate limited')
+  })
+
+  it('composio_tool: skill_output_raw captured for chaining', async () => {
+    const cmp = fakeComposioWithResolver({ 'slack:send_message': 'SLACK_SEND_MESSAGE' })
+    const reg = fakeIntentRegistry()
+    const d = new ActionDispatcher({
+      intentRegistry: reg as any,
+      skillDispatcher: fakeSkillDispatcher() as any,
+      composio: cmp.composio,
+      eventBus: new RulesEventBus(),
+    })
+    await d.dispatch([
+      { action: 'composio_tool', args: { toolkit: 'slack', tool: 'send_message', args: { channel: '#x' } } } as Action,
+      { action: 'notify', args: { message: '${skill_output.data}' } } as Action,
+    ], { trigger: {} })
+    expect(reg.calls[0]!.args.message).toBe('tool-result')
   })
 })
