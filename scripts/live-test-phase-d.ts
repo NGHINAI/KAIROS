@@ -1,17 +1,17 @@
-// scripts/live-test-phase-d-gmail.ts
-// Live end-to-end test of Phase D against real Composio + your real Gmail.
+// scripts/live-test-phase-d.ts
+// Live end-to-end test of Phase D against real Composio + a real connected toolkit (configurable via KAIROS_LIVE_TOOLKIT).
 //
 // Flow:
 //   1. Simulates KAIROS hearing "monitor my emails"
-//   2. Checks if Gmail is connected; if not, kicks off OAuth (browser opens)
+//   2. Checks if toolkit is connected; if not, kicks off OAuth (browser opens)
 //   3. Waits for OAuth completion (polls every 3s, up to 10 min)
 //   4. Looks up GMAIL_NEW_GMAIL_MESSAGE trigger type
-//   5. Creates a Composio trigger instance bound to your Gmail account
+//   5. Creates a Composio trigger instance bound to your account
 //   6. Subscribes to the Pusher channel via composio.triggers.subscribe()
 //   7. Listens for 10 minutes, printing every incoming event live
 //   8. Cleans up: deletes the trigger instance, unsubscribes
 //
-// Run: bun run scripts/live-test-phase-d-gmail.ts
+// Run: bun run scripts/live-test-phase-d.ts
 // Requires: COMPOSIO_API_KEY in .env (already set)
 
 import { exec } from 'child_process'
@@ -23,12 +23,23 @@ import { TriggerEventLog } from '../src/daemon/connectors/triggers/eventLog'
 import { TriggerNormalizer } from '../src/daemon/connectors/triggers/normalizer'
 import { TriggerMetrics } from '../src/daemon/connectors/triggers/metrics'
 
-const USER_ID = 'local'
-const TOOLKIT = 'gmail'
-const TRIGGER_SLUG = 'GMAIL_NEW_GMAIL_MESSAGE'
-const LISTEN_DURATION_MS = 10 * 60 * 1000   // 10 minutes
+// Configurable via env vars — defaults to gmail.
+// Override:  KAIROS_LIVE_TOOLKIT=googlecalendar
+//            KAIROS_LIVE_TRIGGER=GOOGLECALENDAR_GOOGLE_CALENDAR_EVENT_CREATED_TRIGGER
+//            bun run scripts/live-test-phase-d.ts
+const USER_ID = process.env.KAIROS_LIVE_USER_ID ?? 'local'
+const TOOLKIT = (process.env.KAIROS_LIVE_TOOLKIT ?? 'gmail').toLowerCase()
+const TRIGGER_SLUG = process.env.KAIROS_LIVE_TRIGGER ?? 'GMAIL_NEW_GMAIL_MESSAGE'
+const LISTEN_DURATION_MS = Number(process.env.KAIROS_LIVE_DURATION_MIN ?? 10) * 60 * 1000
 const POLL_INTERVAL_MS = 3000                // poll OAuth completion every 3s
 const OAUTH_TIMEOUT_MS = 10 * 60 * 1000      // give user 10 min to complete OAuth
+
+// Pretty display name (e.g. "gmail" → "Gmail", "googlecalendar" → "Google Calendar")
+const TOOLKIT_DISPLAY = TOOLKIT === 'gmail' ? 'Gmail'
+  : TOOLKIT === 'googlecalendar' ? 'Google Calendar'
+  : TOOLKIT === 'slack' ? 'Slack'
+  : TOOLKIT === 'github' ? 'GitHub'
+  : TOOLKIT.charAt(0).toUpperCase() + TOOLKIT.slice(1)
 
 const apiKey = process.env.COMPOSIO_API_KEY
 if (!apiKey) {
@@ -37,7 +48,7 @@ if (!apiKey) {
 }
 
 console.log('═════════════════════════════════════════════════════════════')
-console.log('  KAIROS Phase D — Live Gmail end-to-end test')
+console.log('  KAIROS Phase D — Live end-to-end test')
 console.log('═════════════════════════════════════════════════════════════')
 console.log()
 
@@ -50,11 +61,11 @@ console.log('[1/7] Initializing Composio client...')
 const composio = new ComposioClient({ apiKey })
 console.log('       ✓ ComposioClient ready')
 
-// ─── Step 3: Check existing Gmail connection ────────────────────────────────
+// ─── Step 3: Check existing connection ────────────────────────────────
 console.log()
-console.log('[2/7] Checking if Gmail is already connected for userId=' + USER_ID + '...')
+console.log(`[2/7] Checking if ${TOOLKIT_DISPLAY} is already connected for userId=${USER_ID}...`)
 
-async function findGmailConnection(connId?: string): Promise<{ id: string; status: string } | null> {
+async function findToolkitConnection(connId?: string): Promise<{ id: string; status: string } | null> {
   // If we know the specific connection ID we just initiated, fetch it directly — more reliable
   if (connId) {
     try {
@@ -71,21 +82,21 @@ async function findGmailConnection(connId?: string): Promise<{ id: string; statu
   return accounts.find(a => String(a.toolkit_slug ?? '').toLowerCase() === TOOLKIT) ?? null
 }
 
-let connection = await findGmailConnection()
+let connection = await findToolkitConnection()
 if (connection && connection.status === 'active') {
-  console.log(`       ✓ Gmail already connected (account=${connection.id})`)
+  console.log(`       ✓ ${TOOLKIT_DISPLAY} already connected (account=${connection.id})`)
 } else {
   if (connection) {
-    console.log(`       ⚠  Found Gmail connection with status=${connection.status}; will start fresh OAuth`)
+    console.log(`       ⚠  Found ${TOOLKIT_DISPLAY} connection with status=${connection.status}; will start fresh OAuth`)
   } else {
-    console.log('       ⚠  No Gmail connection found')
+    console.log(`       ⚠  No connection for "${TOOLKIT_DISPLAY}" found`)
   }
 
   // ─── Step 4: Surface the ConnectGuard-style prompt ────────────────────────
   console.log()
   console.log('🔔 INBOX PROMPT  (this is what KAIROS surfaces to the user via inbox + native notif):')
   console.log('   ┌────────────────────────────────────────────────────────┐')
-  console.log('   │ KAIROS needs Gmail access                              │')
+  console.log(`   │ KAIROS needs ${TOOLKIT_DISPLAY} access`)
   console.log('   │                                                        │')
   console.log("   │ I'd like to monitor your incoming emails for the rule  │")
   console.log("   │ you just spoke. Click below to grant access.           │")
@@ -93,7 +104,7 @@ if (connection && connection.status === 'active') {
   console.log()
   console.log('[3/7] Starting OAuth flow...')
 
-  // Get/create the auth config for Gmail (Composio managed OAuth)
+  // Get/create the auth config (Composio managed OAuth)
   const authConfigId = await composio.getOrCreateAuthConfig(TOOLKIT)
   console.log(`       authConfigId = ${authConfigId}`)
 
@@ -106,7 +117,7 @@ if (connection && connection.status === 'active') {
   exec(`open "${linkResult.redirect_url}"`, () => {})
   console.log()
   console.log(`Waiting up to ${OAUTH_TIMEOUT_MS / 60000} minutes for you to complete OAuth...`)
-  console.log('   (sign into Gmail, grant access — KAIROS will detect completion automatically)')
+  console.log(`   (sign into ${TOOLKIT_DISPLAY}, grant access — KAIROS will detect completion automatically)`)
   console.log()
 
   // ─── Step 5: Poll until OAuth completes ─────────────────────────────────
@@ -114,13 +125,13 @@ if (connection && connection.status === 'active') {
   let lastStatus = ''
   while (Date.now() - oauthStart < OAUTH_TIMEOUT_MS) {
     await new Promise(r => setTimeout(r, POLL_INTERVAL_MS))
-    connection = await findGmailConnection(linkResult.connection_id)
+    connection = await findToolkitConnection(linkResult.connection_id)
     if (connection && connection.status !== lastStatus) {
       console.log(`   → connection.status = ${connection.status}`)
       lastStatus = connection.status
     }
     if (connection?.status === 'active') {
-      console.log('       ✓ Gmail connected!')
+      console.log(`       ✓ ${TOOLKIT_DISPLAY} connected!`)
       break
     }
   }
@@ -153,15 +164,24 @@ if (triggerType) {
 
 // ─── Step 6: Create a trigger instance ──────────────────────────────────────
 console.log()
-console.log(`[5/7] Creating trigger instance for ${TRIGGER_SLUG} bound to your Gmail account...`)
+console.log(`[5/7] Creating trigger instance for ${TRIGGER_SLUG} bound to your ${TOOLKIT_DISPLAY} account...`)
 
 let triggerId: string | null = null
 try {
   const sdk: any = (composio as any).sdk
+  // Optional triggerConfig from env var (JSON), e.g. KAIROS_LIVE_CONFIG='{"interval":1}' for 1-min polling
+  let triggerConfig: Record<string, any> = {}
+  if (process.env.KAIROS_LIVE_CONFIG) {
+    try { triggerConfig = JSON.parse(process.env.KAIROS_LIVE_CONFIG) } catch (err) {
+      console.log(`       ⚠  KAIROS_LIVE_CONFIG parse error: ${err}`)
+    }
+  }
+  console.log(`       triggerConfig: ${JSON.stringify(triggerConfig)}`)
+
   // Real @composio/core@0.10.0 signature: triggers.create(userId, slug, body)
   const result = await sdk.triggers.create(USER_ID, TRIGGER_SLUG, {
     connectedAccountId: connection!.id,
-    triggerConfig: {},
+    triggerConfig,
   })
   triggerId = result.triggerId ?? result.id ?? result.trigger_id
   console.log(`       ✓ Trigger instance created: triggerId=${triggerId}`)
@@ -230,7 +250,7 @@ try {
 // ─── Step 8: Listen for 10 minutes ──────────────────────────────────────────
 console.log()
 console.log(`[7/7] Listening for ${LISTEN_DURATION_MS / 60000} minutes. Send yourself a test email to see it arrive.`)
-console.log('       (Gmail polls every ~15 min; an email might take that long to appear)')
+console.log('       (Some toolkits poll every ~15 min; an event might take that long to appear)')
 console.log('       Press Ctrl+C to stop early.')
 console.log()
 console.log('─── live event feed ─────────────────────────────────────────')
@@ -251,6 +271,7 @@ async function cleanup() {
   if (triggerId) {
     console.log(`Deleting trigger instance ${triggerId}...`)
     try {
+      const sdk: any = (composio as any).sdk
       await sdk.triggers.delete(triggerId)
       console.log('   ✓ Trigger instance deleted')
     } catch (err) {
