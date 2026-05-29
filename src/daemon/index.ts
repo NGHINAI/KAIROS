@@ -123,6 +123,9 @@ import { DryRunLogger } from './orders/v2/dryRunLogger'
 import { ScheduleAdapter } from './orders/v2/scheduleAdapter'
 import { watchOrdersFile } from './orders/v2/watcher'
 import { buildApprovalPrompt } from './orders/v2/approvalPrompt'
+import { ComposioToolResolver } from './orders/v2/composioToolResolver'
+import { PendingEditsQueue } from './orders/v2/pendingEdits'
+import { PendingEditsProcessor } from './orders/v2/pendingEditsProcessor'
 
 const VERSION = '0.2.0'
 
@@ -835,6 +838,8 @@ async function main(): Promise<void> {
         // ──────────────────────────────────────────────────────────────────────────
         let v2Watcher: (() => void) | null = null
         let v2ScheduleAdapter: ScheduleAdapter | null = null
+        let composioResolver: ComposioToolResolver | null = null
+        let pendingProcessor: PendingEditsProcessor | null = null
 
         if (config.orders?.v2_enabled !== false) {
           try {
@@ -853,11 +858,22 @@ async function main(): Promise<void> {
             const skillDispatcher = (globalThis as any).__kairosSkillDispatcher ?? null
             const composioClient = (globalThis as any).__kairosComposioClient ?? null
 
+            // ComposioToolResolver — populated only if Composio is configured
+            if (composioClient) {
+              composioResolver = new ComposioToolResolver({
+                composio: composioClient,
+                userId: 'local',
+              })
+              composioResolver.initialize().catch((err: unknown) => log(`[orders-v2] resolver init failed: ${err}`, 'warn'))
+            }
+
             const actionDispatcher = new OrdersActionDispatcher({
               intentRegistry,
               skillDispatcher: skillDispatcher ?? { invoke: async () => ({ ok: false, error: 'skill subsystem not initialized', duration_ms: 0, sandbox: 'declarative' }) },
-              composio: composioClient ? {
-                invokeTool: async (_toolkit: string, _tool: string, _args: any) => ({ ok: false, error: 'composio_tool action wired in C.4.2' }),
+              composio: (composioClient && composioResolver) ? {
+                resolver: composioResolver,
+                executeTool: async (args) => composioClient.executeTool(args),
+                userId: 'local',
               } : null,
               eventBus: rulesBus,
             })
@@ -923,10 +939,24 @@ async function main(): Promise<void> {
             }, 60 * 60 * 1000)
             ;(globalThis as any).__kairosOrdersV2ApprovalTimer = v2ApprovalTimer
 
+            const pendingQueue = new PendingEditsQueue(db)
+
             if (router) {
-              const ordersAuthor = new OrdersAuthor({ router, store: ordersV2Store, parser: ordersV2Parser, filePath: v2FilePath })
+              const ordersAuthor = new OrdersAuthor({ router, store: ordersV2Store, parser: ordersV2Parser, filePath: v2FilePath, pendingQueue })
               ;(globalThis as any).__kairosOrdersAuthor = ordersAuthor
             }
+
+            const _authorForProcessor = (globalThis as any).__kairosOrdersAuthor
+            if (_authorForProcessor) {
+              pendingProcessor = new PendingEditsProcessor({
+                queue: pendingQueue,
+                author: _authorForProcessor,
+                onFailed: (speech: string, err: string) => log(`[orders-v2] pending edit hit max retries: "${speech.slice(0, 50)}" — ${err}`, 'warn'),
+              })
+              pendingProcessor.start(5 * 60 * 1000)
+            }
+            ;(globalThis as any).__kairosOrdersV2PendingQueue = pendingQueue
+            ;(globalThis as any).__kairosOrdersV2PendingProcessor = pendingProcessor
 
             // Wire perception bus: subscribe to all events via wildcard '*'.
             // The proactive EventBus dispatches both targeted (source-keyed) and wildcard subscribers.
@@ -997,6 +1027,8 @@ async function main(): Promise<void> {
           if (v2Watcher) v2Watcher()
           if ((globalThis as any).__kairosOrdersV2ApprovalTimer) clearInterval((globalThis as any).__kairosOrdersV2ApprovalTimer)
           if (v2ScheduleAdapter) v2ScheduleAdapter.stopAll()
+          if (composioResolver) composioResolver.stop()
+          if (pendingProcessor) pendingProcessor.stop()
         }
       }
 
