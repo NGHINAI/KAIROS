@@ -1,3 +1,43 @@
+## [v0.5.1] - 2026-05-29
+
+**Phase D fix-up — events now actually flow end-to-end against real Composio.**
+
+Caught and fixed two production-critical bugs that v0.5.0's unit tests + validation gate (which used synthetic fakes) couldn't detect. Verified live against real Google Calendar events.
+
+### Fixed
+
+- **Chunked event reassembly** — Composio splits large payloads across the `chunked-trigger_to_client` Pusher binding (each chunk has `{id, index, chunk, final}`). v0.5.0 only bound to `trigger_to_client`, so realistic events (Calendar with attendees, Gmail with bodies, GitHub PRs with diffs) were silently dropped. `TriggerListener` now binds both channels and reassembles by id.
+- **V1/V2/V3 envelope normalization** — Composio supports three webhook envelope formats. v0.5.0's normalizer read naive top-level `triggerSlug`/`toolkitSlug` fields that don't exist in real V3 payloads. `TriggerNormalizer` rewritten using @composio/core SDK's own schemas as the spec — detects V3 (composio.* + metadata.trigger_slug) > V2 (type + data.trigger_id) > V1 (trigger_name + payload) > legacy permissive. 11 unit tests covering all four shapes.
+- **Live test cleanup** — `sdk is not defined` error during trigger-delete cleanup. Now uses `composio.sdk` in scope correctly.
+
+### Added
+
+- `scripts/discover-trigger-slugs.ts` — paginated `triggers.listTypes()` helper for finding the right trigger slug per toolkit
+- `scripts/live-test-phase-d.ts` (renamed from `-gmail` suffix; toolkit-agnostic via `KAIROS_LIVE_TOOLKIT` + `KAIROS_LIVE_TRIGGER` + `KAIROS_LIVE_CONFIG` env vars)
+- `TriggerNormalizer.detect()` exposes envelope version (`V1` | `V2` | `V3` | `legacy`) for future debugging
+- New TriggerListener tests: chunked reassembly happy path + partial-chunks-buffered-not-published
+
+### Verified live
+
+End-to-end against real Google Calendar:
+- Google Calendar event created → Composio polled → published over Pusher (chunked)
+- TriggerListener reassembled → handed to TriggerNormalizer
+- TriggerNormalizer detected V3 → extracted `trigger_slug=GOOGLECALENDAR_GOOGLE_CALENDAR_EVENT_CREATED_TRIGGER`, `toolkit=googlecalendar`
+- Event published to perception bus with correct slug + toolkit + payload
+- Clean shutdown deleted the trigger instance
+
+### Regression
+
+- Phase D gate: 20/20 PASS
+- Triggers subtree: 55/55
+- Full suite: 690 pass + 1 pre-existing FileEventsObserver flake (unchanged from baseline)
+
+### Tag
+
+`v0.5.1` — Phase D production-correct.
+
+---
+
 ## [v0.5.0] - 2026-05-29
 
 **Phase D complete.** KAIROS now receives real-time events from any connected service via Composio Triggers. STANDING_ORDERS v2 rules fire on incoming emails, Slack DMs, GitHub PRs, calendar invites, and 200+ other event types — automatically, with idempotency, refcounting, reconciliation, and connect-prompts.
