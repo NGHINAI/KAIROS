@@ -27,15 +27,24 @@ CREATE TABLE IF NOT EXISTS rule_trigger_links (
 CREATE INDEX IF NOT EXISTS idx_rule_trigger_links_trigger ON rule_trigger_links(trigger_id);
 `
 
+/**
+ * Composio Triggers API surface we depend on.
+ * Verified against @composio/core@0.10.0 — `create(userId, slug, body)` is POSITIONAL.
+ * `listActive` is camelCase, takes optional query params, returns { items }.
+ */
+export type ComposioTriggersAPI = {
+  create(
+    userId: string,
+    slug: string,
+    body?: { connectedAccountId?: string; triggerConfig?: Record<string, unknown> },
+  ): Promise<{ triggerId: string }>
+  listActive(query?: Record<string, unknown>): Promise<{ items: any[] }>
+  delete(triggerId: string): Promise<unknown>
+}
+
 export type TriggerInstanceManagerDeps = {
   db: Database
-  composio: {
-    triggers: {
-      create(slug: string, opts: { user_id?: string; connected_account_id?: string; trigger_config?: Record<string, unknown> }): Promise<{ triggerId: string }>
-      list_active(): Promise<{ items: any[] }>
-      delete(triggerId: string): Promise<void>
-    }
-  }
+  composio: { triggers: ComposioTriggersAPI }
   userId: string
 }
 
@@ -60,11 +69,12 @@ export class TriggerInstanceManager {
     if (existing) {
       trigger_id = existing.trigger_id
     } else {
-      const result = await this.deps.composio.triggers.create(trigger_slug, {
-        user_id: this.deps.userId,
-        connected_account_id,
-        trigger_config: config,
-      })
+      // @composio/core@0.10.0: positional (userId, slug, body)
+      const result = await this.deps.composio.triggers.create(
+        this.deps.userId,
+        trigger_slug,
+        { connectedAccountId: connected_account_id, triggerConfig: config },
+      )
       trigger_id = result.triggerId
       this.deps.db.run(
         `INSERT INTO trigger_instances (trigger_id, trigger_slug, connected_account_id, config_hash, created_at, rule_count)
@@ -98,7 +108,7 @@ export class TriggerInstanceManager {
     const local = this.listInstances().map(r => r.trigger_id)
     let remoteList: any[] = []
     try {
-      const { items } = await this.deps.composio.triggers.list_active()
+      const { items } = await this.deps.composio.triggers.listActive()
       remoteList = items
     } catch { return { orphaned_local: [], orphaned_remote: [], recreated: [] } }
 

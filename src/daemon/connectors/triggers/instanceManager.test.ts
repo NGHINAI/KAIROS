@@ -8,14 +8,15 @@ function fakeComposio(state: { instances?: any[] } = {}) {
   return {
     composio: {
       triggers: {
-        create: async (slug: string, opts: any) => {
+        // Real Composio API shape: positional (userId, slug, body)
+        create: async (userId: string, slug: string, body?: any) => {
           const id = 'ti_' + Math.random().toString(36).slice(2, 8)
-          const inst = { triggerId: id, slug, ...opts }
+          const inst = { triggerId: id, slug, userId, ...body }
           created.push(inst)
           ;(state.instances ??= []).push(inst)
           return { triggerId: id }
         },
-        list_active: async () => ({ items: state.instances ?? [] }),
+        listActive: async () => ({ items: state.instances ?? [] }),
         delete: async (id: string) => { deleted.push(id); state.instances = (state.instances ?? []).filter((i: any) => i.triggerId !== id) },
       },
     },
@@ -75,13 +76,13 @@ describe('TriggerInstanceManager', () => {
 
   it('reconcile detects orphaned local instances (deleted remotely)', async () => {
     await mgr.acquireForRule('a', 'X', {}, 'ca_1')
-    fake.composio.triggers.list_active = async () => ({ items: [] })
+    fake.composio.triggers.listActive = async () => ({ items: [] })
     const report = await mgr.reconcile()
     expect(report.orphaned_local).toHaveLength(1)
   })
 
   it('reconcile detects orphaned remote instances (no local rules)', async () => {
-    fake.composio.triggers.list_active = async () => ({ items: [{ triggerId: 'ti_remote', slug: 'X' }] })
+    fake.composio.triggers.listActive = async () => ({ items: [{ triggerId: 'ti_remote', slug: 'X' }] })
     const report = await mgr.reconcile()
     expect(report.orphaned_remote).toContain('ti_remote')
     expect(fake.deleted).toContain('ti_remote')

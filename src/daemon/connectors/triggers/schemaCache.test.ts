@@ -10,7 +10,7 @@ function fakeComposio(types: Record<string, any>, opts: { onCall?: () => void } 
   return {
     sdk: {
       triggers: {
-        get_type: async (slug: string) => {
+        getType: async (slug: string) => {
           calls++
           opts.onCall?.()
           if (!types[slug]) throw new Error(`unknown trigger: ${slug}`)

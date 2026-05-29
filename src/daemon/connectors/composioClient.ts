@@ -85,12 +85,18 @@ export class ComposioClient {
       statuses: opts.statuses,
     })
     const items = page?.items ?? []
-    return items.map((c: any) => ({
-      id: c.id,
-      toolkit_slug: c.toolkit ?? c.toolkit_slug,
-      status: this.normalizeStatus(c.status),
-      auth_config_id: c.auth_config_id ?? c.authConfigId,
-    }))
+    return items.map((c: any) => {
+      // Composio sometimes returns toolkit as an object {slug, name} not a string;
+      // normalize defensively so downstream consumers always get a string.
+      const rawToolkit = c.toolkit ?? c.toolkit_slug ?? ''
+      const toolkitSlug = typeof rawToolkit === 'string' ? rawToolkit : (rawToolkit?.slug ?? '')
+      return {
+        id: c.id,
+        toolkit_slug: String(toolkitSlug),
+        status: this.normalizeStatus(c.status),
+        auth_config_id: c.auth_config_id ?? c.authConfigId,
+      }
+    })
   }
 
   async deleteConnection(connectionId: string): Promise<void> {

@@ -894,7 +894,7 @@ async function main(): Promise<void> {
               })
 
               triggerListener = new TriggerListener({
-                composio: (_composioClientForTriggers as any).sdk ?? _composioClientForTriggers,
+                apiKey: composioApiKey,
                 eventLog: triggerEventLog,
                 normalizer: triggerNormalizer,
                 perceptionBus: bus as any,

@@ -13,7 +13,7 @@ const CACHE_TTL_MS = 24 * 60 * 60 * 1000
 const ONMISS_REFRESH_INTERVAL_MS = 60 * 60 * 1000
 
 export type TriggerSchemaCacheDeps = {
-  composio: { sdk: { triggers: { get_type: (slug: string) => Promise<any> } } }
+  composio: { sdk: { triggers: { getType: (slug: string) => Promise<any> } } }
   cachePath?: string
   slugsToLoad?: string[]
   now?: () => number
@@ -37,7 +37,7 @@ export class TriggerSchemaCache {
     if (this.deps.slugsToLoad) {
       for (const slug of this.deps.slugsToLoad) {
         try {
-          const t = await this.deps.composio.sdk.triggers.get_type(slug)
+          const t = await this.deps.composio.sdk.triggers.getType(slug)
           this.map.set(slug, this.normalize(t))
         } catch { /* skip — slug unknown */ }
       }
@@ -57,7 +57,7 @@ export class TriggerSchemaCache {
     if (now - last < ONMISS_REFRESH_INTERVAL_MS) return null
     this.lastMissRefreshAt.set(slug, now)
     try {
-      const t = await this.deps.composio.sdk.triggers.get_type(slug)
+      const t = await this.deps.composio.sdk.triggers.getType(slug)
       const normalized = this.normalize(t)
       this.map.set(slug, normalized)
       this.saveCache()

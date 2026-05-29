@@ -40,29 +40,46 @@ const homeBase = mkdtempSync(join(tmpdir(), 'kairos-phase-d-'))
 
 function fakeComposioSDK() {
   const instances: any[] = []
-  let triggerCallback: ((event: any) => void) | null = null
+  let pusherTriggerHandler: ((event: any) => void) | null = null
+  let pusherDisconnected = false
+
+  const fakePusher = {
+    subscribe(_channelName: string) {
+      const ch: any = { handlers: {} as Record<string, (data?: any) => void> }
+      // Auto-succeed subscription
+      setTimeout(() => ch.handlers['pusher:subscription_succeeded']?.(), 0)
+      return {
+        bind(event: string, handler: (data?: any) => void) {
+          ch.handlers[event] = handler
+          if (event === 'trigger_to_client') pusherTriggerHandler = handler
+        },
+      }
+    },
+    disconnect() { pusherDisconnected = true },
+    connection: {
+      bind(_event: string, _handler: any) {},
+      state: 'connected',
+    },
+  }
+
   return {
-    // composio.triggers.subscribe — used by TriggerListener
+    // Real Composio API shape (camelCase, positional create signature)
     triggers: {
-      subscribe: async (cb: (e: any) => void) => {
-        triggerCallback = cb
-        return { unsubscribe: () => { triggerCallback = null } }
-      },
-      create: async (slug: string, opts: any) => {
+      create: async (userId: string, slug: string, body?: any) => {
         const id = 'ti_' + Math.random().toString(36).slice(2, 8)
-        instances.push({ triggerId: id, slug, ...opts })
+        instances.push({ triggerId: id, slug, userId, ...body })
         return { triggerId: id }
       },
-      list_active: async () => ({ items: instances }),
+      listActive: async () => ({ items: instances }),
       delete: async (id: string) => {
         const idx = instances.findIndex(i => i.triggerId === id)
         if (idx >= 0) instances.splice(idx, 1)
       },
     },
-    // composio.sdk.triggers.get_type — used by TriggerSchemaCache
+    // composio.sdk.triggers.getType — used by TriggerSchemaCache
     sdk: {
       triggers: {
-        get_type: async (slug: string) => ({
+        getType: async (slug: string) => ({
           slug,
           toolkit: { slug: slug.toLowerCase().split('_')[0] },
           config: {},
@@ -71,10 +88,14 @@ function fakeComposioSDK() {
         }),
       },
     },
-    // test helper: deliver a raw event to the subscriber
-    deliver: (e: any) => triggerCallback?.(e),
+    // Listener uses these injected dependencies (fetchCredentials + pusherFactory)
+    fetchCredentials: async () => ({ pusherKey: 'pk-test', pusherCluster: 'mt1', projectId: 'proj-test' }),
+    pusherFactory: async () => fakePusher,
+    // test helper: deliver a raw event to the subscriber (bound to 'trigger_to_client')
+    deliver: (e: any) => pusherTriggerHandler?.(e),
     instances,
-    isSubscribed: () => triggerCallback !== null,
+    isSubscribed: () => pusherTriggerHandler !== null,
+    isDisconnected: () => pusherDisconnected,
   } as any
 }
 
@@ -116,7 +137,9 @@ try {
   const norm = new TriggerNormalizer()
   const metrics = new TriggerMetrics(db)
   listener = new TriggerListener({
-    composio: composio as any,
+    apiKey: 'ak-test',
+    fetchCredentials: composio.fetchCredentials,
+    pusherFactory: composio.pusherFactory,
     eventLog: evtLog,
     normalizer: norm,
     perceptionBus: bus,
@@ -398,7 +421,7 @@ try {
   })
   await im3.acquireForRule('a', 'X', {}, 'ca_1')
   // Simulate remote deleted all instances
-  composioForReconcile.triggers.list_active = async () => ({ items: [] })
+  composioForReconcile.triggers.listActive = async () => ({ items: [] })
   const report = await im3.reconcile()
   record(report.orphaned_local.length === 1, `T+00:40 orphan detected (n=${report.orphaned_local.length})`)
 } catch (e) {
@@ -409,8 +432,11 @@ try {
 
 try {
   const healths: string[] = []
+  const fakeLiveSDK = fakeComposioSDK()
   const liveListener = new TriggerListener({
-    composio: fakeComposioSDK() as any,
+    apiKey: 'ak-test',
+    fetchCredentials: fakeLiveSDK.fetchCredentials,
+    pusherFactory: fakeLiveSDK.pusherFactory,
     eventLog: new TriggerEventLog(new Database(':memory:')),
     normalizer: new TriggerNormalizer(),
     perceptionBus: fakeBus(),
