@@ -1,7 +1,7 @@
 // src/daemon/orders/v2/types.ts
 // Core types for STANDING_ORDERS v2 — the DSL Rule shape and its serialized form.
 
-export type LifecycleState = 'pending' | 'active' | 'suspended' | 'dry_run' | 'legacy'
+export type LifecycleState = 'pending' | 'active' | 'suspended' | 'dry_run' | 'legacy' | 'pending_connection'
 export type CreatedBy = 'voice' | 'manual' | 'crystallized' | 'migrated_v1'
 
 export type Duration = string                       // "20h", "5m", "30s", "1d"
@@ -19,6 +19,12 @@ export type StateSelector =
   | { file_events:  { path_matches?: string } }
   | { browser_tabs: { opened?: boolean } }
   | { pattern:      { repeats: number; window: Duration; same?: 'file' | 'app' | 'url' } }
+  | {
+      incoming_event: {
+        trigger: string                  // Composio trigger slug, e.g. 'GMAIL_NEW_GMAIL_MESSAGE'
+        config?: Record<string, unknown> // optional triggerConfig hints (server-side filter)
+      }
+    }
 
 /** Condition is a raw string in the source DSL; evaluator parses it. */
 export type Condition = string
