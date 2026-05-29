@@ -326,6 +326,7 @@ describe('OrdersAuthor', () => {
         ]
         return []
       },
+      listAllToolkits: () => ['gmail', 'googlecalendar'],
     }
 
     const author = new OrdersAuthor({
@@ -338,14 +339,118 @@ describe('OrdersAuthor', () => {
     expect(capturedSystemBlocks).not.toBeNull()
     const text = capturedSystemBlocks[0].text
     // LLM sees friendly tool names AND required arg lists, grouped per toolkit
-    expect(text).toContain('Available Composio action tools')
+    expect(text).toContain('CONNECTED Composio toolkits')
     expect(text).toContain('gmail:')
     expect(text).toContain('send_email: required=[recipient_email, subject, body]')
     expect(text).toContain('create_draft: required=[recipient_email, subject]')
     expect(text).toContain('googlecalendar:')
     expect(text).toContain('create_event: required=[calendar_id, summary, start_time, end_time]')
     // Anti-hallucination guidance
-    expect(text).toContain('Do NOT invent tool names')
+    expect(text).toContain('do NOT invent')
+  })
+
+  it('prompt also lists AVAILABLE-but-unconnected toolkits so LLM can propose unconnected tools', async () => {
+    let capturedSystemBlocks: any = null
+    const fake = {
+      router: {
+        async complete(req: any) {
+          capturedSystemBlocks = req.system_blocks
+          return { parsed: { proposed_rule: { when: { cron: '0 9 * * 1' }, do: [{ action: 'log', args: {} }] }, slug_suggestion: 'a', similar_existing: null, confidence: 1 }, text: '' } as any
+        },
+      },
+    }
+    const fakeToolResolver: any = {
+      listToolsForToolkit: (tk: string) => tk === 'gmail' ? [{ slug: 'GMAIL_SEND_EMAIL', friendly: 'send_email', toolkit: 'gmail', description: '', inputParameters: { required: ['recipient_email'] } }] : [],
+      listAllToolkits: () => ['gmail', 'slack', 'linear', 'notion'],   // 4 toolkits in catalog
+    }
+    const author = new OrdersAuthor({
+      router: fake.router as any, store, parser, filePath: file,
+      toolResolver: fakeToolResolver,
+      getConnectedToolkits: () => ['gmail'],   // only gmail is connected
+    })
+    await author.handleSpeech('do something')
+    const text = capturedSystemBlocks[0].text
+    expect(text).toContain('CONNECTED Composio toolkits')
+    expect(text).toContain('AVAILABLE-but-unconnected')
+    expect(text).toContain('slack, linear, notion')
+    // Guidance to still propose unconnected-toolkit rules
+    expect(text).toContain('KAIROS will request OAuth')
+  })
+
+  it('composio_tool action referencing unconnected toolkit → ConnectGuard fired, rule pending_connection', async () => {
+    const fake = makeFakeRouter({
+      proposed_rule: {
+        when: { cron: '0 9 * * 1' },
+        do: [{ action: 'composio_tool', args: { toolkit: 'slack', tool: 'send_message', args: { channel: '#general', text: 'hi' } } }],
+      },
+      slug_suggestion: 'morning-slack', similar_existing: null, confidence: 1,
+    })
+    const guard = fakeConnectGuard('pending')   // user hasn't authed Slack
+    const fakeToolResolver: any = {
+      listToolsForToolkit: () => [],
+      listAllToolkits: () => ['gmail', 'slack'],
+    }
+    const author = new OrdersAuthor({
+      router: fake.router as any, store, parser, filePath: file,
+      connectGuard: guard,
+      toolResolver: fakeToolResolver,
+      getConnectedToolkits: () => ['gmail'],   // gmail connected, slack NOT
+    })
+    const result = await author.handleSpeech('post to slack every morning')
+    expect(result.created_slug).toBe('morning-slack')
+    const stored = store.get('morning-slack')!
+    expect(stored.state).toBe('pending_connection')
+    expect(guard.calls).toHaveLength(1)
+    expect(guard.calls[0]!.tk).toBe('slack')
+    expect(guard.calls[0]!.rs).toBe('morning-slack')
+  })
+
+  it('composio_tool action referencing CONNECTED toolkit does NOT invoke ConnectGuard (no needless OAuth)', async () => {
+    const fake = makeFakeRouter({
+      proposed_rule: {
+        when: { cron: '0 9 * * 1' },
+        do: [{ action: 'composio_tool', args: { toolkit: 'gmail', tool: 'send_email', args: { recipient_email: 'a@b.c', subject: 's', body: 'b' } } }],
+      },
+      slug_suggestion: 'morning-mail', similar_existing: null, confidence: 1,
+    })
+    const guard = fakeConnectGuard('ready')
+    const fakeToolResolver: any = { listToolsForToolkit: () => [], listAllToolkits: () => ['gmail'] }
+    const author = new OrdersAuthor({
+      router: fake.router as any, store, parser, filePath: file,
+      connectGuard: guard,
+      toolResolver: fakeToolResolver,
+      getConnectedToolkits: () => ['gmail'],   // gmail connected
+    })
+    const result = await author.handleSpeech('email me daily')
+    expect(result.created_slug).toBe('morning-mail')
+    expect(store.get('morning-mail')!.state).toBe('dry_run')   // normal default; not pending_connection
+    expect(guard.calls).toHaveLength(0)                          // skipped because already connected
+  })
+
+  it('multiple composio_tool actions across toolkits — fires ConnectGuard for each unconnected, dedupes', async () => {
+    const fake = makeFakeRouter({
+      proposed_rule: {
+        when: { cron: '0 9 * * 1' },
+        do: [
+          { action: 'composio_tool', args: { toolkit: 'slack', tool: 'send_message', args: {} } },
+          { action: 'composio_tool', args: { toolkit: 'linear', tool: 'create_issue', args: {} } },
+          { action: 'composio_tool', args: { toolkit: 'slack', tool: 'add_reaction', args: {} } },  // dup toolkit
+        ],
+      },
+      slug_suggestion: 'multi', similar_existing: null, confidence: 1,
+    })
+    const guard = fakeConnectGuard('pending')
+    const fakeToolResolver: any = { listToolsForToolkit: () => [], listAllToolkits: () => ['slack', 'linear'] }
+    const author = new OrdersAuthor({
+      router: fake.router as any, store, parser, filePath: file,
+      connectGuard: guard,
+      toolResolver: fakeToolResolver,
+      getConnectedToolkits: () => [],
+    })
+    await author.handleSpeech('multi')
+    expect(guard.calls).toHaveLength(2)   // slack + linear, deduped (not 3)
+    expect(guard.calls.map((c: any) => c.tk).sort()).toEqual(['linear', 'slack'])
+    expect(store.get('multi')!.state).toBe('pending_connection')
   })
 
   it('prompt omits composio action tools section when no toolkits connected', async () => {
@@ -358,7 +463,7 @@ describe('OrdersAuthor', () => {
         },
       },
     }
-    const fakeToolResolver: any = { listToolsForToolkit: () => [] }
+    const fakeToolResolver: any = { listToolsForToolkit: () => [], listAllToolkits: () => [] }
     const author = new OrdersAuthor({
       router: fake.router as any, store, parser, filePath: file,
       toolResolver: fakeToolResolver,
@@ -366,6 +471,7 @@ describe('OrdersAuthor', () => {
     })
     await author.handleSpeech('test')
     const text = capturedSystemBlocks[0].text
-    expect(text).not.toContain('Available Composio action tools')
+    expect(text).not.toContain('CONNECTED Composio toolkits')
+    expect(text).not.toContain('AVAILABLE-but-unconnected')
   })
 })

@@ -102,6 +102,15 @@ export class ComposioToolResolver {
     return out
   }
 
+  /** All toolkit slugs that have at least one action tool in the catalog.
+   *  Used by OrdersAuthor to tell the LLM about available-but-unconnected toolkits
+   *  so it can propose rules referencing them — KAIROS will then prompt OAuth. */
+  listAllToolkits(): string[] {
+    const set = new Set<string>()
+    for (const d of this.descriptors.values()) set.add(d.toolkit)
+    return [...set].sort()
+  }
+
   // ── Refresh + cache ────────────────────────────────────────────────────
 
   async refresh(): Promise<void> {

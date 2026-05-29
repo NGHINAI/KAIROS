@@ -1,3 +1,47 @@
+## [v0.5.4] - 2026-05-29
+
+**Phase D unconnected-toolkit handling in authoring.**
+
+v0.5.3 grounded `OrdersAuthor` in connected-toolkit schemas — but said nothing about toolkits the user hasn't authed yet. So if you said "post to Slack every morning" and Slack wasn't connected, the LLM would either hallucinate or refuse. Fixed.
+
+### Fixed
+
+- **`OrdersAuthor` prompt now also lists AVAILABLE-but-unconnected toolkits** (toolkit slugs only, no tool details — keeps prompt small). Explicit guidance: *"If the user's request needs an unconnected toolkit, STILL propose the rule. KAIROS will (1) request OAuth, (2) resolve the canonical tool slug, (3) activate the rule."* Anti-refusal nudge.
+- **Post-LLM `composio_tool` action gate** — after the LLM proposes a rule, `OrdersAuthor` scans `do[]` for `composio_tool` actions whose toolkit isn't in `getConnectedToolkits()`. For each unconnected toolkit, it invokes `ConnectGuard.ensureConnected(toolkit, rule.slug)` to kick off OAuth. If any return `pending`, the rule is saved with `state: 'pending_connection'` — the same pattern the trigger path uses at `author.ts:200-210`.
+- **Dedupe across multiple actions** — if a rule's `do[]` references the same toolkit twice (or three Slack actions), `ConnectGuard` is only called once per toolkit. Parallel-safe.
+- **Connected toolkits short-circuit** — if a `composio_tool` action references a toolkit the user has already authed, `ConnectGuard` is NOT invoked. No needless OAuth round-trip.
+
+### Added
+
+- `ComposioToolResolver.listAllToolkits()` — returns all toolkit slugs that have at least one action tool in the catalog. Used by the prompt to enumerate available-but-unconnected toolkits.
+- 4 new author tests:
+  1. Prompt lists AVAILABLE-but-unconnected toolkits + OAuth guidance
+  2. Unconnected-toolkit action → ConnectGuard fired → rule `pending_connection`
+  3. Connected-toolkit action → ConnectGuard skipped → rule normal `dry_run`
+  4. Multi-action rule dedupes ConnectGuard calls per unique toolkit
+
+### Verified-not-hardcoded
+
+Audited production code for hardcoded toolkit-specific logic. Zero hits in the execution stack (`composioClient`, `composioToolResolver`, `actionDispatcher`, `triggerNormalizer`). The only literal toolkit names in production code are:
+- Intent-matcher synonym aliases (Discord bot keyword parsing — user-input layer, not Composio-exec layer)
+- Example text in comments/prompts (illustrative only)
+
+The system is fully generalized: any toolkit Composio adds to its catalog becomes available without code changes.
+
+### Regression
+
+- Triggers subtree: 59/59
+- Resolver subtree: 11/11
+- Author subtree: 19/19 (4 new)
+- Phase D gate: 20/20 PASS
+- Full suite: 781 pass + 1 pre-existing fs.watch flake
+
+### Tag
+
+`v0.5.4` — Phase D authoring handles unconnected toolkits end-to-end.
+
+---
+
 ## [v0.5.3] - 2026-05-29
 
 **Phase D round-trip closed end-to-end + three production bugs fixed + authoring path grounded in real schemas.**
