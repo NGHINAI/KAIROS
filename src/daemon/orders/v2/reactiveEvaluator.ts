@@ -32,6 +32,16 @@ export class ReactiveEvaluator {
       await this.handleNamedEvent(eventName, (payload.payload as Record<string, unknown>) ?? {})
       return
     }
+    if (kind === 'incoming_event') {
+      const env = payload as { payload?: Record<string, unknown> }
+      const rules = this.deps.store.listActiveByWhenKind('state')
+      for (const r of rules) {
+        if (!('state' in r.when)) continue
+        if (!this.matchesSelector(r.when.state, kind, payload)) continue
+        await this.maybeFire(r, { trigger: payload, payload: env.payload ?? {} })
+      }
+      return
+    }
     const rules = this.deps.store.listActiveByWhenKind('state')
     for (const r of rules) {
       if (!('state' in r.when)) continue
@@ -74,6 +84,12 @@ export class ReactiveEvaluator {
     }
     if ('browser_tabs' in sel && kind === 'browser_tabs') return true
     if ('pattern' in sel && kind === 'pattern') return true
+    if ('incoming_event' in sel && kind === 'incoming_event') {
+      const ie = sel.incoming_event
+      const env = payload as { trigger_slug?: string }
+      if (ie.trigger !== env.trigger_slug) return false
+      return true
+    }
     return false
   }
 

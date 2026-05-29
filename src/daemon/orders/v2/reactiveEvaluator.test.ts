@@ -138,4 +138,75 @@ describe('ReactiveEvaluator', () => {
     await evaluator.handleEvent('clipboard', { text: 'random' })
     expect(dispatcher.calls).toHaveLength(0)
   })
+
+  // incoming_event tests (Phase D)
+  function mkEnvelope(overrides: Partial<{
+    trigger_slug: string; toolkit: string; payload: Record<string, unknown>;
+    raw: Record<string, unknown>; received_at: number; event_id: string
+  }> = {}) {
+    return {
+      trigger_slug: 'GMAIL_NEW_GMAIL_MESSAGE',
+      toolkit: 'gmail',
+      payload: { from: 'mark@cuban.com', subject: 'hi' },
+      raw: {},
+      received_at: Date.now(),
+      event_id: 'e1',
+      ...overrides,
+    }
+  }
+
+  it('fires incoming_event rule on matching trigger_slug', async () => {
+    const r: Rule = {
+      schema_version: 1, slug: 'mc',
+      when: { state: { incoming_event: { trigger: 'GMAIL_NEW_GMAIL_MESSAGE' } } } as any,
+      do: [{ action: 'notify', args: { message: 'matched' } }],
+      state: 'active', created_by: 'manual', created_at: Date.now(),
+    }
+    store.upsert(r)
+    await evaluator.handleEvent('incoming_event', mkEnvelope() as any)
+    expect(dispatcher.calls).toHaveLength(1)
+  })
+
+  it('does not fire incoming_event rule on mismatched trigger_slug', async () => {
+    const r: Rule = {
+      schema_version: 1, slug: 'mc2',
+      when: { state: { incoming_event: { trigger: 'GITHUB_PR_OPENED' } } } as any,
+      do: [{ action: 'log', args: {} }],
+      state: 'active', created_by: 'manual', created_at: Date.now(),
+    }
+    store.upsert(r)
+    await evaluator.handleEvent('incoming_event', mkEnvelope() as any)
+    expect(dispatcher.calls).toHaveLength(0)
+  })
+
+  it('if/unless predicates run against inner payload (payload.from etc.)', async () => {
+    const r: Rule = {
+      schema_version: 1, slug: 'mc3',
+      when: { state: { incoming_event: { trigger: 'GMAIL_NEW_GMAIL_MESSAGE' } } } as any,
+      if: ["payload.from == 'mark@cuban.com'"],
+      do: [{ action: 'log', args: {} }],
+      state: 'active', created_by: 'manual', created_at: Date.now(),
+    }
+    store.upsert(r)
+    await evaluator.handleEvent('incoming_event', mkEnvelope() as any)
+    expect(dispatcher.calls).toHaveLength(1)
+
+    dispatcher.calls.length = 0
+    await evaluator.handleEvent('incoming_event', mkEnvelope({ payload: { from: 'someone@else.com' } }) as any)
+    expect(dispatcher.calls).toHaveLength(0)
+  })
+
+  it('dry-run path: incoming_event rule with dry_run_until > now logs instead of dispatching', async () => {
+    const r: Rule = {
+      schema_version: 1, slug: 'mc4',
+      when: { state: { incoming_event: { trigger: 'GMAIL_NEW_GMAIL_MESSAGE' } } } as any,
+      do: [{ action: 'notify', args: { message: 'x' } }],
+      state: 'dry_run', dry_run_until: Date.now() + 60_000,
+      created_by: 'manual', created_at: Date.now(),
+    }
+    store.upsert(r)
+    await evaluator.handleEvent('incoming_event', mkEnvelope() as any)
+    expect(dispatcher.calls).toHaveLength(0)
+    expect(store.listDryRunLog('mc4')).toHaveLength(1)
+  })
 })
