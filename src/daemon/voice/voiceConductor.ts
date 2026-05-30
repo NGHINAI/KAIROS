@@ -52,6 +52,12 @@ export class VoiceConductor {
     this.state = 'stopped'
   }
 
+  /** Swap the event bus at runtime — used so the daemon can wire bootstrap's
+   *  stub bus to the real wrap-API WS broadcast after both are constructed. */
+  replaceBus(bus: { publish(kind: string, payload: any): void }): void {
+    this.deps.bus = bus
+  }
+
   async proactiveSpeak(text: string): Promise<void> {
     const speakId = 'spk_' + Math.random().toString(36).slice(2, 8)
     this.deps.bus.publish('voice.agent.utterance', {

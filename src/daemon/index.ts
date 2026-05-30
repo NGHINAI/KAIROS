@@ -140,6 +140,22 @@ import { ConnectGuard } from './connectors/triggers/connectGuard'
 
 const VERSION = '0.2.0'
 
+/** Map perception-bus voice event kinds to the WS event names the Electron UI
+ *  expects on /v1/voice/events. Unknown kinds pass through unchanged. */
+function voiceEventName(busKind: string): string {
+  const map: Record<string, string> = {
+    'voice.user.utterance': 'stt_final',
+    'voice.agent.utterance': 'agent_done',
+    'voice.hotkey.down': 'listening_started',
+    'voice.hotkey.up': 'listening_stopped',
+    'voice.stt.partial': 'stt_partial',
+    'voice.error': 'error',
+    'voice.sidecar.error': 'sidecar_error',
+    'voice.agent.utterance.interrupted': 'agent_interrupted',
+  }
+  return map[busKind] ?? busKind
+}
+
 function parseDaemonArgs() {
   const { values } = parseArgs({
     args: Bun.argv.slice(2),
@@ -1317,6 +1333,18 @@ async function main(): Promise<void> {
     },
   })
   log(`[wrap-api] ${wrapApi.baseUrl} — /v1/* surface ready`)
+
+  // 10e. Wire voice conductor bus → wrap-API WebSocket broadcast.
+  // bootstrapVoice() installs a no-op bus stub; swap it for one that pushes
+  // events out to every connected /v1/voice/events WS client (Electron, etc.).
+  if (voiceBundle) {
+    voiceBundle.conductor.replaceBus({
+      publish: (kind: string, payload: any) => {
+        wrapApi.broadcast({ event: voiceEventName(kind), ...payload })
+      },
+    })
+    log('[voice] conductor bus wired to wrap-API WebSocket broadcast')
+  }
 
   // 11. Write ready flag (shim watches for this)
   writeReadyFlag(config.sandboxDir)
