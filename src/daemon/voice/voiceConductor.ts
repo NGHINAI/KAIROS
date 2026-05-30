@@ -35,10 +35,19 @@ export class VoiceConductor {
   private fetchImpl: typeof fetch
   private conversationId: string
   private currentSpeakId: string | null = null
+  private externalUtteranceHandler?: (utterance: string, conversationId: string) => Promise<void>
 
   constructor(private deps: VoiceConductorDeps) {
     this.fetchImpl = (deps.fetchImpl ?? fetch) as typeof fetch
     this.conversationId = deps.conversationId ?? 'conv_default'
+  }
+
+  /** Wire an external handler (e.g. the agent Conductor) to take over utterance
+   *  processing. When set, stt_final events route to this handler INSTEAD of the
+   *  legacy wrap-API call. The utterance is still published to the bus for
+   *  observability (TrajWriter, Hermes Dreaming, perception). */
+  setUserUtteranceHandler(fn: (utterance: string, conversationId: string) => Promise<void>): void {
+    this.externalUtteranceHandler = fn
   }
 
   async start(): Promise<void> {
@@ -114,6 +123,21 @@ export class VoiceConductor {
       text: transcript, conversationId: this.conversationId, at: Date.now(),
     })
     this.state = 'thinking'
+    if (this.externalUtteranceHandler) {
+      // E.2.1 agent path: route to the agent Conductor. The handler is
+      // responsible for emitting agent_* events (via wrapApi.broadcast) and
+      // driving TTS itself. We just hand off and return to idle.
+      try {
+        await this.externalUtteranceHandler(transcript, this.conversationId)
+      } catch (err) {
+        this.deps.bus.publish('voice.error', {
+          error: err instanceof Error ? err.message : String(err),
+        })
+      } finally {
+        this.state = 'idle'
+      }
+      return
+    }
     if (this.deps.externalLLMHandling) {
       // Caller handles LLM + TTS via streaming. We're done here.
       this.state = 'idle'

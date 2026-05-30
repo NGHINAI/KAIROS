@@ -137,8 +137,40 @@ import { TriggerSchemaCache } from './connectors/triggers/schemaCache'
 import { TriggerInstanceManager } from './connectors/triggers/instanceManager'
 import { TriggerMetrics } from './connectors/triggers/metrics'
 import { ConnectGuard } from './connectors/triggers/connectGuard'
+import { Conductor } from './agents/conductor'
+import { ContextBuilderStub } from './agents/contextBuilder'
+import type { CompletionRequest, TaskType, SystemBlock } from './llm/types'
 
 const VERSION = '0.2.0'
+
+/** Translate the Conductor's {messages, system, max_tokens, temperature} body
+ *  into a CompletionRequest for ModelRouter. The Conductor sends messages-shape
+ *  bodies (one optional system message + a user message); we collapse them into
+ *  system_blocks + prompt, which is what providers expect. */
+function buildAgentLlmCompleter(
+  router: ModelRouter,
+  taskType: TaskType,
+): { complete: (body: any) => Promise<{ text: string }> } {
+  return {
+    async complete(body: any): Promise<{ text: string }> {
+      const messages = Array.isArray(body?.messages) ? body.messages : []
+      const systemMsgs = messages.filter((m: any) => m?.role === 'system').map((m: any) => String(m.content ?? ''))
+      const userMsgs = messages.filter((m: any) => m?.role === 'user').map((m: any) => String(m.content ?? ''))
+      const system_blocks: SystemBlock[] = systemMsgs
+        .filter((t: string) => t.trim().length > 0)
+        .map((text: string) => ({ text, cache_hint: 'long' as const }))
+      const prompt = userMsgs.join('\n\n')
+      const req: CompletionRequest = {
+        task_type: taskType,
+        system_blocks,
+        prompt,
+        max_output_tokens: typeof body?.max_tokens === 'number' ? body.max_tokens : undefined,
+      }
+      const result = await router.complete(req)
+      return { text: result.text }
+    },
+  }
+}
 
 /** Map perception-bus voice event kinds to the WS event names the Electron UI
  *  expects on /v1/voice/events. Unknown kinds pass through unchanged. */
@@ -1344,6 +1376,31 @@ async function main(): Promise<void> {
       },
     })
     log('[voice] conductor bus wired to wrap-API WebSocket broadcast')
+
+    // 10f. E.2.1 — Construct the agent Conductor and wire it to VoiceConductor.
+    // The agent Conductor takes over utterance handling: classify → fast/smart
+    // route → emit agent_* events. ContextBuilderStub is a placeholder until
+    // E.2.3 supplies a real layered-context builder.
+    //
+    // Note: voiceRouter is the ModelRouter from 10c. Each tier maps to a
+    // distinct task_type so the router can pick an appropriate provider/model.
+    // Conductor sends {messages, max_tokens} bodies — buildAgentLlmCompleter
+    // translates each into a CompletionRequest the router can handle.
+    const voiceRouterForAgent = (voiceBundle as any).__voiceRouter as ModelRouter | undefined
+    const agentRouter = voiceRouterForAgent ?? buildRouter(db, config.proactive.providerConfigPath, config.mode ?? 'byo')
+    const agentConductor = new Conductor({
+      classifyLlm: buildAgentLlmCompleter(agentRouter, 'classify'),
+      fastLlm:     buildAgentLlmCompleter(agentRouter, 'narrative'),
+      smartLlm:    buildAgentLlmCompleter(agentRouter, 'action_compose'),
+      tools: [],                            // E.2.3 fills this
+      contextBuilder: new ContextBuilderStub(),
+      onEvent: (e: any) => wrapApi.broadcast({ event: e.kind, ...e }),
+    })
+
+    voiceBundle.conductor.setUserUtteranceHandler(async (utterance, conversationId) => {
+      await agentConductor.handle({ utterance, conversationId })
+    })
+    log('[voice] agent conductor wired into VoiceConductor utterance handler')
   }
 
   // 11. Write ready flag (shim watches for this)
