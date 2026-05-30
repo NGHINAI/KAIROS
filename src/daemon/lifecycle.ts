@@ -80,7 +80,8 @@ export function cleanupRuntime(sandboxDir: string): void {
 }
 
 /**
- * Pick a port. Random ephemeral in sandbox mode, fixed 9876 in production.
+ * Pick a port. Random ephemeral in sandbox mode, fixed (default 8765) in production.
+ * Port 9876 is reserved for the wrap-API server (Electron WS hardcodes it).
  */
 export function pickPort(config: Config): number {
   if (config.port === 'random') {

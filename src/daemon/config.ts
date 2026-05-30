@@ -9,7 +9,11 @@ const DEFAULTS: Config = {
   sandboxDir: process.cwd(),
   isSandbox: false,
   verbose: false,
-  port: 9876,
+  // Legacy daemon HTTP server port. Was 9876 historically but that's now reserved
+  // for the wrap-API on KAIROS_DAEMON_PORT (Electron WS hardcodes 9876). When
+  // KAIROS_WITH_VOICE=true the wrap-api binds 9876, so the legacy server has to
+  // live elsewhere; 8765 picked as a free, memorable default.
+  port: 8765,
   tick: {
     defaultIntervalMs: 60_000,
     minSleepMs: 30_000,

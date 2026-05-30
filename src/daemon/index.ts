@@ -1203,11 +1203,10 @@ async function main(): Promise<void> {
 
   // 10d. Wrap-API server (Phase E.2.0 — Cloud-shaped local /v1/* HTTP surface)
   // ---------------------------------------------------------------------------
-  // Bound on KAIROS_DAEMON_PORT (default 9876). NOTE: the legacy server above
-  // also defaults to 9876 in non-sandbox mode. To avoid a port collision when
-  // running both, set KAIROS_DAEMON_PORT to a different free port (e.g. 9879)
-  // when smoke-testing this task. Phase E.2 will eventually retire the legacy
-  // server; for now we treat the wrap-api as additive.
+  // Bound on KAIROS_DAEMON_PORT (default 9876). The legacy server above now
+  // defaults to 8765 so it can coexist with the wrap-api on 9876. Phase E.2
+  // will eventually retire the legacy server; for now we treat the wrap-api
+  // as additive.
   //
   // Adapters are wired to real subsystems where they exist. Subsystems that
   // are scoped inside the proactive/memory blocks are reached via the
