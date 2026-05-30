@@ -138,7 +138,9 @@ import { TriggerInstanceManager } from './connectors/triggers/instanceManager'
 import { TriggerMetrics } from './connectors/triggers/metrics'
 import { ConnectGuard } from './connectors/triggers/connectGuard'
 import { Conductor } from './agents/conductor'
-import { ContextBuilderStub } from './agents/contextBuilder'
+import { ContextBuilder } from './agents/contextBuilder'
+import { SoulDigestLoader } from './agents/loaders/soulDigestLoader'
+import { buildIntrospectionTools } from './agents/introspectionTools'
 import type { CompletionRequest, TaskType, SystemBlock } from './llm/types'
 
 const VERSION = '0.2.0'
@@ -275,6 +277,7 @@ async function main(): Promise<void> {
   const decisionEngine = new DecisionEngine(db, config)
   const taskRunner = new TaskRunner(db, config)
   const memoryStore = new MemoryStore(db, config)
+  ;(globalThis as { __kairosMemoryStore?: MemoryStore }).__kairosMemoryStore = memoryStore
   const voice = new Voice(config.sandboxDir)
 
   // 6b. New self-evolving modules
@@ -520,6 +523,12 @@ async function main(): Promise<void> {
       ;(globalThis as { __kairosMemoryInjector?: MemoryInjector }).__kairosMemoryInjector = memoryInjector
       // Phase E.2.0: stash episodicStore so wrap-api /v1/memory/* can reach it.
       ;(globalThis as { __kairosEpisodicStore?: EpisodicStore }).__kairosEpisodicStore = episodicStore
+      // Phase E.2.3 (Task 3.4): stash extra memory subsystems so introspection
+      // tools and ContextBuilder loaders can reach them via globalThis.
+      ;(globalThis as any).__kairosEpisodicMemory = episodic
+      ;(globalThis as any).__kairosSemanticMemory = semantic
+      ;(globalThis as any).__kairosSemanticStore = semanticStore
+      ;(globalThis as any).__kairosDreamer = dreamer
       log(`C.2.6 memory subsystem active — vector-augmented recall ${localEmbedder ? 'enabled' : 'disabled (keyword-only)'}`)
       const idle = new IdleDetector()
 
@@ -1379,8 +1388,8 @@ async function main(): Promise<void> {
 
     // 10f. E.2.1 — Construct the agent Conductor and wire it to VoiceConductor.
     // The agent Conductor takes over utterance handling: classify → fast/smart
-    // route → emit agent_* events. ContextBuilderStub is a placeholder until
-    // E.2.3 supplies a real layered-context builder.
+    // route → emit agent_* events. Phase E.2.3 / Task 3.4 swapped the stub
+    // ContextBuilder for the real layered-context builder + introspection tools.
     //
     // Note: voiceRouter is the ModelRouter from 10c. Each tier maps to a
     // distinct task_type so the router can pick an appropriate provider/model.
@@ -1388,12 +1397,155 @@ async function main(): Promise<void> {
     // translates each into a CompletionRequest the router can handle.
     const voiceRouterForAgent = (voiceBundle as any).__voiceRouter as ModelRouter | undefined
     const agentRouter = voiceRouterForAgent ?? buildRouter(db, config.proactive.providerConfigPath, config.mode ?? 'byo')
+
+    // SoulDigestLoader: reads ~/.kairos/soul.md (or KAIROS_SOUL_PATH override).
+    const soulLoader = new SoulDigestLoader({
+      soulPath: process.env.KAIROS_SOUL_PATH ?? join(homedir(), '.kairos', 'soul.md'),
+      maxTokens: 200,
+    })
+
+    // Introspection tools — kairos_* tools the LLM can call to reflect on
+    // its own state (persona, skills, orders, memory, dreams, connections).
+    // Each dep tolerates missing globalThis stashes and returns empty/null.
+    const introspectionTools = buildIntrospectionTools({
+      soulLoader,
+      skillRegistry: {
+        listActive: async () => {
+          const reg = (globalThis as any).__kairosSkillRegistry
+          if (!reg) return []
+          const skills =
+            typeof reg.activeSkills === 'function' ? await reg.activeSkills()
+            : typeof reg.listActive === 'function' ? await reg.listActive()
+            : typeof reg.listSkills === 'function' ? reg.listSkills()
+            : []
+          return skills.map((s: any) => ({ id: s.id ?? s.slug ?? s.name, description: s.description }))
+        },
+      },
+      ordersStore: {
+        list: async () => {
+          const store = (globalThis as any).__kairosOrdersV2Store
+          if (!store) return []
+          const rules = typeof store.listAll === 'function' ? await store.listAll() : []
+          return rules.map((r: any) => ({ id: r.id ?? r.slug, slug: r.slug, yaml: r.yaml ?? r.rule ?? '' }))
+        },
+      },
+      semanticMemory: {
+        add: async (entry: { subject: string; body: string; importance?: number }) => {
+          const mem = (globalThis as any).__kairosSemanticMemory
+          if (!mem || typeof mem.add !== 'function') return { id: 0 }
+          return mem.add(entry)
+        },
+        search: async (q: string, n: number) => {
+          const recall = (globalThis as any).__kairosRecall
+          if (!recall) return []
+          try { return await recall.hybrid(q, n) } catch { return [] }
+        },
+      },
+      episodicMemory: {
+        recent: async (n: number) => {
+          const ep = (globalThis as any).__kairosEpisodicMemory ?? (globalThis as any).__kairosEpisodicStore
+          if (!ep) return []
+          try {
+            if (typeof ep.recent === 'function') return ep.recent(n)
+            return []
+          } catch { return [] }
+        },
+        search: async (q: string, n: number) => {
+          const ep = (globalThis as any).__kairosEpisodicStore ?? (globalThis as any).__kairosEpisodicMemory
+          if (!ep) return []
+          try {
+            if (typeof ep.recall === 'function') return ep.recall(q, n)
+            if (typeof ep.search === 'function') return ep.search(q, n)
+            return []
+          } catch { return [] }
+        },
+      },
+      memoryStore: {
+        read: async () => {
+          const ms = (globalThis as any).__kairosMemoryStore
+          if (!ms || typeof ms.read !== 'function') return '(empty)'
+          try { return ms.read() } catch { return '(empty)' }
+        },
+      },
+      dreamLog: {
+        last: async () => {
+          const dl = (globalThis as any).__kairosDreamLog ?? (globalThis as any).__kairosDreamer
+          if (!dl) return null
+          try {
+            if (typeof dl.last === 'function') return dl.last()
+            if (typeof dl.lastDream === 'function') return dl.lastDream()
+            return null
+          } catch { return null }
+        },
+        search: async () => [],
+      },
+      connectionStore: {
+        list: async () => {
+          const cs = (globalThis as any).__kairosConnectionStore
+          if (!cs) return []
+          try {
+            const conns =
+              typeof cs.listByUser === 'function' ? await cs.listByUser('local')
+              : typeof cs.list === 'function' ? await cs.list()
+              : []
+            return conns.map((c: any) => ({
+              toolkit: c.toolkit ?? c.toolkit_slug ?? c.toolkitSlug,
+              status: c.status,
+            }))
+          } catch { return [] }
+        },
+      },
+    })
+
+    // Real layered ContextBuilder — session-prefix cache (persona / orders /
+    // memory overview / tools) plus per-turn delta (recent conversation +
+    // injected memory hits).
+    const contextBuilder = new ContextBuilder({
+      loaders: {
+        soulDigest: () => soulLoader.load(),
+        standingOrdersSummary: async () => {
+          const store = (globalThis as any).__kairosOrdersV2Store
+          if (!store) return ''
+          try {
+            const orders = typeof store.listAll === 'function' ? await store.listAll() : []
+            if (orders.length === 0) return ''
+            return orders.map((o: any) =>
+              `- ${o.slug ?? o.id}: ${(o.yaml ?? o.rule ?? '').toString().slice(0, 80)}`,
+            ).join('\n')
+          } catch { return '' }
+        },
+        memoryOverview: async () => {
+          const ms = (globalThis as any).__kairosMemoryStore
+          if (!ms || typeof ms.read !== 'function') return ''
+          try {
+            const raw = ms.read()
+            return raw.length > 3200 ? raw.slice(0, 3200) + '\n...(truncated)' : raw
+          } catch { return '' }
+        },
+        kairosSkills: async () => [],   // Task 3.5 fills this with skillToolAdapter
+        introspectionTools: async () => introspectionTools,
+      },
+      memoryInjector: {
+        inject: async (q: string, opts?: any) => {
+          const inj = (globalThis as any).__kairosMemoryInjector
+          if (!inj) return []
+          try { return await inj.inject(q, opts) } catch { return [] }
+        },
+      },
+      conversationStore: {
+        recentTurns: async (id: string, n: number) => {
+          try { return await voiceBundle!.conversationStore.recentTurns(id, n) }
+          catch { return [] }
+        },
+      },
+    })
+
     const agentConductor = new Conductor({
       classifyLlm: buildAgentLlmCompleter(agentRouter, 'classify'),
       fastLlm:     buildAgentLlmCompleter(agentRouter, 'narrative'),
       smartLlm:    buildAgentLlmCompleter(agentRouter, 'action_compose'),
-      tools: [],                            // E.2.3 fills this
-      contextBuilder: new ContextBuilderStub(),
+      tools: introspectionTools,
+      contextBuilder,
       onEvent: (e: any) => wrapApi.broadcast({ event: e.kind, ...e }),
     })
 
