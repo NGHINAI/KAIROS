@@ -43,7 +43,9 @@ export class SayBackend {
   }
 
   async speak(text: string, opts: SpeakOptions = {}): Promise<void> {
-    if (!text.trim()) return
+    const safe = typeof text === 'string' ? text.trim() : ''
+    if (!safe) return
+    text = safe
     this.stop()
     const voice = opts.voice ?? this.defaultVoice
     const rate = String(opts.rate ?? this.defaultRate)

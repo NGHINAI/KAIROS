@@ -48,22 +48,41 @@ export class ClaudeCodeAdapter {
     const signal = body.signal ?? controller?.signal
     const timer = controller ? setTimeout(() => controller.abort(), this.timeoutMs) : null
 
+    // Strip any inherited ANTHROPIC_API_KEY (Claude Code parent shells inject it).
+    // Otherwise `claude` prefers it over the subscription OAuth — and if it's expired,
+    // we get "Invalid API key" even though the subscription is valid.
+    const childEnv: Record<string, string> = {}
+    for (const [k, v] of Object.entries(process.env)) {
+      if (k === 'ANTHROPIC_API_KEY' || k === 'ANTHROPIC_AUTH_TOKEN') continue
+      if (typeof v === 'string') childEnv[k] = v
+    }
     try {
       const proc = spawn({
         cmd: args,
         stdout: 'pipe',
         stderr: 'pipe',
         signal,
+        env: childEnv,
       })
       const [stdout, stderr, exitCode] = await Promise.all([
         new Response(proc.stdout as any).text(),
         new Response(proc.stderr as any).text(),
         proc.exited,
       ])
+      const out = (stdout ?? '').trim()
+      const err = (stderr ?? '').trim()
       if (exitCode !== 0) {
-        throw new Error(`claude exited ${exitCode}: ${stderr.trim().slice(0, 500)}`)
+        throw new Error(`claude exited ${exitCode}: ${(err || out).slice(0, 500)}`)
       }
-      return { text: stdout.trim() || '(no response)' }
+      // claude can return success exit with empty stdout if there's an auth or model issue;
+      // surface it loud rather than letting downstream consumers handle undefined.
+      if (!out) {
+        const hint = err
+          ? `claude returned no output. stderr: ${err.slice(0, 400)}`
+          : 'claude returned empty response. Try running `claude /login` and `claude -p "hi"` in a fresh terminal to verify auth.'
+        throw new Error(hint)
+      }
+      return { text: out }
     } finally {
       if (timer) clearTimeout(timer)
     }

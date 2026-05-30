@@ -19,15 +19,38 @@ import { spawn } from 'bun'
 import { startWrapApi } from '../src/daemon/wrapApi/server'
 import { LLMAdapter } from '../src/daemon/wrapApi/adapters/llmAdapter'
 import { ClaudeCodeAdapter } from '../src/daemon/wrapApi/adapters/claudeCodeAdapter'
+import { OpenRouterAdapter } from '../src/daemon/wrapApi/adapters/openRouterAdapter'
 import { VoiceAdapter } from '../src/daemon/wrapApi/adapters/voiceAdapter'
 import { ConversationStore } from '../src/daemon/voice/conversationStore'
 import { VoiceConductor } from '../src/daemon/voice/voiceConductor'
 import { SidecarClient } from '../src/daemon/voice/sidecarClient'
 import { SayBackend } from '../src/daemon/voice/sayBackend'
+import { StreamingSpeaker } from '../src/daemon/voice/streamingSpeaker'
 
-// LLM backend selection — prefer Claude Code subscription, fall back to API key
-async function selectLLMBackend(): Promise<{ kind: 'claude-code' | 'api-key'; complete: (b: any) => Promise<any> }> {
-  // Try Claude Code first — uses user's subscription, no key management
+// LLM backend selection. Priority:
+//   1. OpenRouter (streaming + cheapest fast model) if OPENROUTER_API_KEY set
+//   2. Claude Code subscription (if installed)
+//   3. Direct Anthropic SDK (if API key set)
+type LLMBackend = {
+  kind: 'openrouter' | 'claude-code' | 'api-key'
+  model: string
+  complete: (b: any) => Promise<any>
+  stream?: (b: any) => AsyncGenerator<{ kind: 'delta'; text: string } | { kind: 'done'; text: string } | { kind: 'error'; message: string }, void, unknown>
+}
+
+async function selectLLMBackend(): Promise<LLMBackend> {
+  // Tier 1: OpenRouter (preferred for speed)
+  if (process.env.OPENROUTER_API_KEY && !process.env.KAIROS_FORCE_CLAUDE) {
+    const model = process.env.KAIROS_MODEL ?? 'openai/gpt-4o-mini'
+    console.log(`       ✓ model: ${model} (via OpenRouter)`)
+    const adapter = new OpenRouterAdapter({ defaultModel: model })
+    return {
+      kind: 'openrouter', model,
+      complete: (b) => adapter.complete(b),
+      stream: (b) => adapter.stream(b),
+    }
+  }
+  // Tier 2: Claude Code subscription
   const claudeAvailable = await (async () => {
     try {
       const proc = spawn({ cmd: ['claude', '--version'], stdout: 'pipe', stderr: 'pipe' })
@@ -36,18 +59,19 @@ async function selectLLMBackend(): Promise<{ kind: 'claude-code' | 'api-key'; co
     } catch { return false }
   })()
   if (claudeAvailable && !process.env.KAIROS_FORCE_API_KEY) {
-    const adapter = new ClaudeCodeAdapter({ defaultModel: 'haiku' })
-    return { kind: 'claude-code', complete: (b) => adapter.complete(b) }
+    const model = (process.env.KAIROS_MODEL ?? 'haiku') as 'haiku' | 'sonnet' | 'opus'
+    console.log(`       ✓ model: ${model} (via Claude Code)`)
+    const adapter = new ClaudeCodeAdapter({ defaultModel: model })
+    return { kind: 'claude-code', model, complete: (b) => adapter.complete(b) }
   }
+  // Tier 3: direct Anthropic API
   const apiKey = process.env.KAIROS_ANTHROPIC_KEY ?? process.env.ANTHROPIC_API_KEY
   if (!apiKey) {
-    console.error('✗ no LLM backend available:')
-    console.error('  - Claude Code (recommended): install + run `claude /login`')
-    console.error('  - OR set ANTHROPIC_API_KEY env var')
+    console.error('✗ no LLM backend available. Set OPENROUTER_API_KEY (recommended) or install Claude Code.')
     process.exit(1)
   }
   const adapter = new LLMAdapter({ apiKey, defaultModel: 'claude-haiku-4-5' })
-  return { kind: 'api-key', complete: (b) => adapter.complete(b) }
+  return { kind: 'api-key', model: 'claude-haiku-4-5', complete: (b) => adapter.complete(b) }
 }
 
 const helperBinary = process.env.KAIROS_VOICE_HELPER ??
@@ -75,6 +99,7 @@ const conversationStore = new ConversationStore(db)
 const llmBackend = await selectLLMBackend()
 console.log(`       ✓ LLM backend: ${llmBackend.kind}`)
 const voice = new VoiceAdapter({ llm: { complete: llmBackend.complete }, store: conversationStore })
+const supportsStreaming = !!llmBackend.stream
 
 const api = await startWrapApi({
   port: 0, hostname: '127.0.0.1',
@@ -100,16 +125,89 @@ const sayBackend = new SayBackend({
 })
 
 let lastAgentText = ''
+let tUserEnd = 0
+let tLlmStart = 0
+let tLlmEnd = 0
+let tSpeakStart = 0
+// Streaming pipeline: hijack the wrap-API request and stream LLM → TTS directly.
+// Bypasses the standard request-response flow when streaming is available.
+const streamingSayBackend = new SayBackend({
+  defaultVoice: process.env.KAIROS_VOICE_NAME ?? 'Zoe (Premium)',
+  defaultRate: Number(process.env.KAIROS_VOICE_RATE ?? 180),
+})
+let activeStream: { speaker: StreamingSpeaker; abort: AbortController } | null = null
+
+async function handleUserSpeechStreaming(transcript: string, conversationId: string): Promise<void> {
+  if (!llmBackend.stream) return
+  // Cancel any in-flight stream (barge-in)
+  if (activeStream) {
+    activeStream.speaker.cancel()
+    activeStream.abort.abort()
+  }
+  const speaker = new StreamingSpeaker({
+    backend: streamingSayBackend,
+    voice: process.env.KAIROS_VOICE_NAME ?? 'Zoe (Premium)',
+    rate: Number(process.env.KAIROS_VOICE_RATE ?? 180),
+  })
+  const abort = new AbortController()
+  activeStream = { speaker, abort }
+
+  const history = await conversationStore.recentTurns(conversationId, 10)
+  const messages = [
+    ...history.map(t => ({ role: t.role === 'agent' ? ('assistant' as const) : ('user' as const), content: t.text })),
+    { role: 'user' as const, content: transcript },
+  ]
+  await conversationStore.appendTurn(conversationId, { role: 'user', text: transcript, at: Date.now() })
+
+  const system = 'You are KAIROS, a proactive AI co-worker. Respond conversationally, as if speaking. Keep responses brief (1-2 sentences typical). Plain spoken English only — no markdown.'
+
+  const tTurnStart = Date.now()
+  let tFirstToken = 0
+  let collected = ''
+  console.log(`  🔊 KAIROS: `)
+  for await (const ev of llmBackend.stream({ messages, system, signal: abort.signal })) {
+    if (ev.kind === 'error') {
+      console.error(`  ✗ LLM error: ${ev.message}`)
+      activeStream = null
+      return
+    }
+    if (ev.kind === 'delta') {
+      if (!tFirstToken) tFirstToken = Date.now()
+      collected += ev.text
+      process.stdout.write(ev.text)
+      speaker.feed(ev.text)
+    } else if (ev.kind === 'done') {
+      if (ev.text) collected = ev.text
+      break
+    }
+  }
+  console.log()
+  await speaker.end()
+  await conversationStore.appendTurn(conversationId, { role: 'agent', text: collected, at: Date.now() })
+  const tFinish = Date.now()
+  console.log(`     [first token: ${tFirstToken - tTurnStart}ms · total to-speak-done: ${tFinish - tTurnStart}ms]`)
+  if (activeStream?.abort === abort) activeStream = null
+}
+
 const conductor = new VoiceConductor({
   sidecar: sidecar as any,
   store: conversationStore,
   bus: {
     publish: (kind, payload) => {
       if (kind === 'voice.user.utterance') {
+        tUserEnd = Date.now()
+        tLlmStart = Date.now()
         console.log(`\n  🎙  YOU: "${payload.text}"`)
+        // Streaming path: if backend supports it, take the wheel.
+        if (supportsStreaming) {
+          void handleUserSpeechStreaming(payload.text, payload.conversationId)
+        }
       } else if (kind === 'voice.agent.utterance') {
+        tLlmEnd = Date.now()
+        tSpeakStart = Date.now()
         lastAgentText = payload.text
-        console.log(`  🔊 KAIROS: "${payload.text}"`)
+        const llmMs = tLlmEnd - tLlmStart
+        console.log(`  🔊 KAIROS: "${payload.text}"  [LLM: ${llmMs}ms]`)
       } else if (kind === 'voice.hotkey.down') {
         process.stdout.write('  ● listening...')
       } else if (kind === 'voice.hotkey.up') {
@@ -118,15 +216,20 @@ const conductor = new VoiceConductor({
         console.log(`  ⏸  (interrupted)`)
       } else if (kind === 'voice.error') {
         console.log(`  ✗ error: ${payload.error}`)
+      } else if (kind === 'voice.sidecar.error') {
+        console.log(`  ⚠  sidecar: ${payload.code}${payload.message ? ' — ' + payload.message : ''}`)
+      } else if (kind === 'voice.stt.partial') {
+        process.stdout.write(`\r  …${payload.text}                             `)
       }
     },
   },
   wrapApiBaseUrl: api.baseUrl,
   speakBackend: sayBackend,
+  externalLLMHandling: supportsStreaming,
 })
 
 try {
-  await sidecar.start()
+  // conductor.start() calls sidecar.start() internally — don't double-spawn
   await conductor.start()
   console.log('       ✓ sidecar connected, conductor running')
 } catch (err) {
