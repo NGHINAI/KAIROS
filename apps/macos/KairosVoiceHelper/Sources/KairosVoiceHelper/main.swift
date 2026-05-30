@@ -31,11 +31,20 @@ AVCaptureDevice.requestAccess(for: .audio) { granted in
     NSLog("KAIROS mic permission requested → granted=\(granted)")
 }
 
+// STT mode is selected by the Bun daemon via KAIROS_STT_MODE env var.
+//   "apple" (default) — uses on-device SFSpeechRecognizer with live partials.
+//   "cloud"           — buffers PCM and emits {"event":"audio_blob",...} on stop;
+//                        Bun POSTs that to Groq/OpenRouter Whisper.
+let sttMode = (ProcessInfo.processInfo.environment["KAIROS_STT_MODE"] ?? "apple").lowercased()
+let cloudSTT = (sttMode == "cloud")
+NSLog("KAIROS helper: STT mode = \(sttMode)")
+
 let bus = ProtocolBus(socketPath: socketPath)
 let synth = SpeechSynthesizer(bus: bus)
-let recognizer = SpeechRecognizer(bus: bus)
+let recognizer: SpeechRecognizer? = cloudSTT ? nil : SpeechRecognizer(bus: bus)
+let recorder: BufferRecorder? = cloudSTT ? BufferRecorder(bus: bus) : nil
 let vad = SileroVAD(bus: bus)
-let audio = AudioEngine(bus: bus, recognizer: recognizer, vad: vad, synth: synth)
+let audio = AudioEngine(bus: bus, recognizer: recognizer, recorder: recorder, vad: vad, synth: synth)
 let bargeIn = BargeInDetector(bus: bus, vad: vad, synth: synth)
 let hotkey = HotKeyManager(bus: bus)
 
@@ -47,9 +56,11 @@ bus.onCommand { cmd in
     case .stopSpeaking:
         synth.stop()
     case .startListening:
-        recognizer.startListening()
+        recognizer?.startListening()
+        recorder?.startListening()
     case .stopListening:
-        recognizer.stopListening()
+        recognizer?.stopListening()
+        recorder?.stopListening()
     case .setHotkey(let modifier, let action):
         hotkey.setHotkey(modifier: modifier, action: action)
     case .setVoice:

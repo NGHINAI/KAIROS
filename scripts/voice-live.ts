@@ -26,6 +26,22 @@ import { VoiceConductor } from '../src/daemon/voice/voiceConductor'
 import { SidecarClient } from '../src/daemon/voice/sidecarClient'
 import { SayBackend } from '../src/daemon/voice/sayBackend'
 import { StreamingSpeaker } from '../src/daemon/voice/streamingSpeaker'
+import { whisperFromEnv, type WhisperAdapter } from '../src/daemon/voice/whisperAdapter'
+
+// STT backend selection. Env: KAIROS_STT = apple | groq | openrouter (default: apple)
+// All three feed the same downstream pipeline; only the transcription source differs.
+type SttBackend = 'apple' | 'groq' | 'openrouter'
+const sttBackend: SttBackend = ((process.env.KAIROS_STT ?? 'apple').toLowerCase() as SttBackend)
+let whisperClient: WhisperAdapter | null = null
+if (sttBackend === 'groq' || sttBackend === 'openrouter') {
+  whisperClient = whisperFromEnv(sttBackend)
+  if (!whisperClient) {
+    const keyName = sttBackend === 'groq' ? 'GROQ_API_KEY' : 'OPENROUTER_API_KEY'
+    console.error(`✗ KAIROS_STT=${sttBackend} but ${keyName} is not set. Aborting.`)
+    process.exit(1)
+  }
+}
+const cloudSttMode = sttBackend !== 'apple'
 
 // LLM backend selection. Priority:
 //   1. OpenRouter (streaming + cheapest fast model) if OPENROUTER_API_KEY set
@@ -101,8 +117,11 @@ console.log(`       ✓ LLM backend: ${llmBackend.kind}`)
 const voice = new VoiceAdapter({ llm: { complete: llmBackend.complete }, store: conversationStore })
 const supportsStreaming = !!llmBackend.stream
 
+// Pinned port lets the Electron UI find us without an out-of-band port file.
+// Override with KAIROS_DAEMON_PORT if 9876 is taken.
+const daemonPort = Number(process.env.KAIROS_DAEMON_PORT ?? 9876)
 const api = await startWrapApi({
-  port: 0, hostname: '127.0.0.1',
+  port: daemonPort, hostname: '127.0.0.1',
   adapters: {
     llm: { complete: llmBackend.complete },
     voice: { chat: (b) => voice.chat(b), cancel: async () => voice.cancel() },
@@ -113,10 +132,18 @@ const api = await startWrapApi({
   },
 })
 console.log(`       ✓ wrap-API at ${api.baseUrl}`)
+console.log(`       ✓ Voice events WebSocket: ws://127.0.0.1:${daemonPort}/v1/voice/events`)
+
+console.log(`       ✓ STT backend: ${sttBackend}${whisperClient ? ` (cloud Whisper)` : ' (Apple on-device)'}`)
 
 console.log('[2/4] Spawning Swift KairosVoiceHelper sidecar...')
 console.log(`       binary: ${helperBinary}`)
-const sidecar = new SidecarClient({ helperBinary })
+const sidecar = new SidecarClient({
+  helperBinary,
+  // KAIROS_STT_MODE=cloud disables SFSpeechRecognizer in the helper and
+  // enables BufferRecorder, which emits {"event":"audio_blob"} on stop.
+  env: cloudSttMode ? { KAIROS_STT_MODE: 'cloud' } : undefined,
+})
 
 console.log('[3/4] Connecting to UDS + booting voice conductor...')
 const sayBackend = new SayBackend({
@@ -168,6 +195,7 @@ async function handleUserSpeechStreaming(transcript: string, conversationId: str
   for await (const ev of llmBackend.stream({ messages, system, signal: abort.signal })) {
     if (ev.kind === 'error') {
       console.error(`  ✗ LLM error: ${ev.message}`)
+      api.broadcast({ event: 'agent_error', message: ev.message })
       activeStream = null
       return
     }
@@ -176,6 +204,7 @@ async function handleUserSpeechStreaming(transcript: string, conversationId: str
       collected += ev.text
       process.stdout.write(ev.text)
       speaker.feed(ev.text)
+      api.broadcast({ event: 'agent_delta', text: ev.text })
     } else if (ev.kind === 'done') {
       if (ev.text) collected = ev.text
       break
@@ -183,6 +212,7 @@ async function handleUserSpeechStreaming(transcript: string, conversationId: str
   }
   console.log()
   await speaker.end()
+  api.broadcast({ event: 'agent_done', text: collected })
   await conversationStore.appendTurn(conversationId, { role: 'agent', text: collected, at: Date.now() })
   const tFinish = Date.now()
   console.log(`     [first token: ${tFirstToken - tTurnStart}ms · total to-speak-done: ${tFinish - tTurnStart}ms]`)
@@ -198,7 +228,7 @@ const conductor = new VoiceConductor({
         tUserEnd = Date.now()
         tLlmStart = Date.now()
         console.log(`\n  🎙  YOU: "${payload.text}"`)
-        // Streaming path: if backend supports it, take the wheel.
+        api.broadcast({ event: 'stt_final', text: payload.text })
         if (supportsStreaming) {
           void handleUserSpeechStreaming(payload.text, payload.conversationId)
         }
@@ -208,18 +238,25 @@ const conductor = new VoiceConductor({
         lastAgentText = payload.text
         const llmMs = tLlmEnd - tLlmStart
         console.log(`  🔊 KAIROS: "${payload.text}"  [LLM: ${llmMs}ms]`)
+        if (!supportsStreaming) api.broadcast({ event: 'agent_done', text: payload.text })
       } else if (kind === 'voice.hotkey.down') {
         process.stdout.write('  ● listening...')
+        api.broadcast({ event: 'listening_started' })
       } else if (kind === 'voice.hotkey.up') {
         process.stdout.write(' ✓\n')
+        api.broadcast({ event: 'listening_stopped' })
       } else if (kind === 'voice.agent.utterance.interrupted') {
         console.log(`  ⏸  (interrupted)`)
+        api.broadcast({ event: 'agent_interrupted' })
       } else if (kind === 'voice.error') {
         console.log(`  ✗ error: ${payload.error}`)
+        api.broadcast({ event: 'error', message: payload.error })
       } else if (kind === 'voice.sidecar.error') {
         console.log(`  ⚠  sidecar: ${payload.code}${payload.message ? ' — ' + payload.message : ''}`)
+        api.broadcast({ event: 'sidecar_error', code: payload.code, message: payload.message })
       } else if (kind === 'voice.stt.partial') {
         process.stdout.write(`\r  …${payload.text}                             `)
+        api.broadcast({ event: 'stt_partial', text: payload.text })
       }
     },
   },
@@ -232,6 +269,64 @@ try {
   // conductor.start() calls sidecar.start() internally — don't double-spawn
   await conductor.start()
   console.log('       ✓ sidecar connected, conductor running')
+
+  // Cloud STT path: when helper is in KAIROS_STT_MODE=cloud, it emits
+  // {"event":"audio_blob"} on stopListening with a base64 WAV. We POST that
+  // to the configured Whisper API and pump the resulting transcript through
+  // the same handleUserSpeechStreaming() that the Apple-STT path uses.
+  const cloudConversationId = `voice-${Date.now().toString(36)}`
+  if (cloudSttMode && whisperClient) {
+    sidecar.onEvent(async (e: any) => {
+      if (e.event !== 'audio_blob') return
+      const wavBase64 = String(e.wavBase64 ?? '')
+      if (!wavBase64) {
+        api.broadcast({ event: 'error', message: 'empty audio blob' })
+        return
+      }
+      api.broadcast({ event: 'transcribing' })
+      const t0 = Date.now()
+      try {
+        const wavBytes = Uint8Array.from(atob(wavBase64), (c) => c.charCodeAt(0))
+        const result = await whisperClient!.transcribe(wavBytes)
+        const elapsed = Date.now() - t0
+        const text = result.text.trim()
+        if (!text) {
+          api.broadcast({ event: 'stt_final', text: '' })
+          return
+        }
+        console.log(`\n  🎙  YOU [${sttBackend} ${elapsed}ms]: "${text}"`)
+        api.broadcast({ event: 'stt_final', text })
+        if (supportsStreaming) {
+          void handleUserSpeechStreaming(text, cloudConversationId)
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error(`  ✗ STT error: ${msg}`)
+        api.broadcast({ event: 'error', message: `STT: ${msg}` })
+      }
+    })
+  }
+
+  // WS command handler: lets the Electron UI drive listening + interruption.
+  api.onCommand((cmd) => {
+    if (!cmd || typeof cmd !== 'object') return
+    switch (cmd.cmd) {
+      case 'start_listening':
+        void sidecar.send({ cmd: 'start_listening', mode: 'push_to_talk' } as any)
+        break
+      case 'stop_listening':
+        void sidecar.send({ cmd: 'stop_listening' } as any)
+        break
+      case 'cancel_speak':
+        void sidecar.send({ cmd: 'stop_speaking' } as any)
+        if (activeStream) {
+          activeStream.speaker.cancel()
+          activeStream.abort.abort()
+          activeStream = null
+        }
+        break
+    }
+  })
 } catch (err) {
   console.error('✗ failed to start sidecar:', err)
   console.error()

@@ -1,23 +1,28 @@
 // AudioEngine.swift — minimal AVAudioEngine for mic capture only.
 //
-// v1: just feeds mic buffers to STT + VAD. No output routing — AVSpeechSynthesizer
-// handles its own playback through Apple's internal audio session.
-//
-// v1.5 (when barge-in is priority): re-introduce VoiceProcessingIO with matching
-// input+output formats so KAIROS doesn't hear itself.
+// Feeds mic buffers to:
+//   - SpeechRecognizer (Apple STT)  — default
+//   - BufferRecorder   (cloud STT)  — when KAIROS_STT_MODE=cloud
+// Plus VAD in either case.
 
 import AVFoundation
 
 final class AudioEngine {
     private let engine = AVAudioEngine()
     private let bus: ProtocolBus
-    private let recognizer: SpeechRecognizer
+    private let recognizer: SpeechRecognizer?
+    private let recorder: BufferRecorder?
     private let vad: SileroVAD
     private let synth: SpeechSynthesizer
 
-    init(bus: ProtocolBus, recognizer: SpeechRecognizer, vad: SileroVAD, synth: SpeechSynthesizer) {
+    init(bus: ProtocolBus,
+         recognizer: SpeechRecognizer?,
+         recorder: BufferRecorder?,
+         vad: SileroVAD,
+         synth: SpeechSynthesizer) {
         self.bus = bus
         self.recognizer = recognizer
+        self.recorder = recorder
         self.vad = vad
         self.synth = synth
     }
@@ -31,8 +36,6 @@ final class AudioEngine {
         var maxAmpInWindow: Float = 0
 
         input.installTap(onBus: 0, bufferSize: 1024, format: nativeFormat) { [weak self] buffer, time in
-            // Diagnostic: every ~30 buffers (~700ms), log peak amplitude so we can
-            // see if real audio is flowing or just silence.
             if let ch = buffer.floatChannelData?[0] {
                 let n = Int(buffer.frameLength)
                 var peak: Float = 0
@@ -47,7 +50,8 @@ final class AudioEngine {
                     maxAmpInWindow = 0
                 }
             }
-            self?.recognizer.feed(buffer: buffer, time: time)
+            self?.recognizer?.feed(buffer: buffer, time: time)
+            self?.recorder?.feed(buffer: buffer, time: time)
             self?.vad.feed(buffer: buffer)
         }
 
@@ -55,9 +59,6 @@ final class AudioEngine {
             engine.prepare()
             try engine.start()
         } catch {
-            // Mic permission denied or audio unavailable — non-fatal.
-            // TTS still works (AVSpeechSynthesizer uses its own output path).
-            // STT + hotkey degraded; user can still hear KAIROS speak.
             bus.emit([
                 "event": "error",
                 "code": "audio_engine_start_failed",

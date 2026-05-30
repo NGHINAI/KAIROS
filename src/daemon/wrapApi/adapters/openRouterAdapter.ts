@@ -5,6 +5,46 @@
 // /v1/llm/complete on the wrap-API. When KAIROS Cloud ships, this swaps for a
 // Cloud-side proxy with zero changes to the daemon, sidecar, or anything else.
 
+/**
+ * Build the OpenRouter `provider` field from env vars.
+ *
+ *   KAIROS_OR_PROVIDER         — pin to ONE provider only, e.g. "OpenAI" or "Groq".
+ *                                Adds {"only":["OpenAI"], "allow_fallbacks": false}.
+ *   KAIROS_OR_PROVIDER_ORDER   — comma-separated priority list, e.g. "Groq,OpenAI".
+ *                                Adds {"order":["Groq","OpenAI"], "allow_fallbacks": …}.
+ *   KAIROS_OR_PROVIDER_IGNORE  — comma-separated providers to never use.
+ *   KAIROS_OR_ALLOW_FALLBACKS  — "true"/"false". Used with order. Default true.
+ *   KAIROS_OR_PROVIDER_SORT    — "throughput" | "price" | "latency". Default throughput.
+ *
+ * Provider names are case-sensitive on OpenRouter. Common ones:
+ *   OpenAI, Anthropic, Groq, DeepInfra, Together, Lepton, Fireworks, Cerebras,
+ *   Google, Mistral, Cohere, Perplexity. Full list: https://openrouter.ai/docs/features/provider-routing
+ */
+export function buildProviderRouting(): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  const only = process.env.KAIROS_OR_PROVIDER
+  if (only) {
+    out.only = [only]
+    out.allow_fallbacks = false
+  }
+  const orderRaw = process.env.KAIROS_OR_PROVIDER_ORDER
+  if (orderRaw) {
+    out.order = orderRaw.split(',').map((s) => s.trim()).filter(Boolean)
+  }
+  const ignoreRaw = process.env.KAIROS_OR_PROVIDER_IGNORE
+  if (ignoreRaw) {
+    out.ignore = ignoreRaw.split(',').map((s) => s.trim()).filter(Boolean)
+  }
+  const allowFallbacks = process.env.KAIROS_OR_ALLOW_FALLBACKS
+  if (allowFallbacks !== undefined) {
+    out.allow_fallbacks = allowFallbacks.toLowerCase() === 'true'
+  }
+  // Sort is only meaningful if no explicit `only` or `order` was set — but
+  // sending it alongside is harmless; OpenRouter ignores it in that case.
+  out.sort = process.env.KAIROS_OR_PROVIDER_SORT ?? 'throughput'
+  return out
+}
+
 export type Msg = { role: 'user' | 'assistant' | 'system'; content: string }
 
 export type CompleteBody = {
@@ -80,6 +120,7 @@ export class OpenRouterAdapter {
         : body.messages,
       stream: true,
       max_tokens: body.max_tokens ?? this.defaultMaxTokens,
+      provider: buildProviderRouting(),
     }
     if (body.temperature !== undefined) reqBody.temperature = body.temperature
 

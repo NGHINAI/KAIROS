@@ -1,8 +1,11 @@
 // src/daemon/wrapApi/server.ts
 // In-process Bun HTTP server hosting /v1/* — the "Cloud-shaped local API."
 // Migration to api.kairos.ai later = config flip on the daemon's base URL.
+//
+// Now also exposes a WebSocket at /v1/voice/events for Electron (or any UI
+// client) to subscribe to live voice events and send commands.
 
-import type { Server } from 'bun'
+import type { ServerWebSocket } from 'bun'
 
 export type WrapApiAdapters = {
   llm:      { complete: (body: any) => Promise<any> }
@@ -19,11 +22,24 @@ export type WrapApiOpts = {
   adapters: WrapApiAdapters
 }
 
-export type WrapApiServer = { port: number; baseUrl: string; stop(): Promise<void> }
+export type WrapApiServer = {
+  port: number
+  baseUrl: string
+  /** Push a JSON event to every connected /v1/voice/events client. */
+  broadcast: (event: Record<string, any>) => void
+  /** Register a handler invoked for each command (JSON message) from any client. */
+  onCommand: (cb: (cmd: any) => void) => void
+  /** Number of currently connected WebSocket clients. */
+  clientCount: () => number
+  stop(): Promise<void>
+}
 
 export async function startWrapApi(opts: WrapApiOpts): Promise<WrapApiServer> {
   const hostname = opts.hostname ?? '127.0.0.1'
   const a = opts.adapters
+
+  const wsClients = new Set<ServerWebSocket<unknown>>()
+  const commandHandlers: ((cmd: any) => void)[] = []
 
   const wrap = (handler: (req: Request) => Promise<Response>) => async (req: Request) => {
     try {
@@ -49,7 +65,7 @@ export async function startWrapApi(opts: WrapApiOpts): Promise<WrapApiServer> {
       return Response.json(await handler())
     })
 
-  const server: Server = Bun.serve({
+  const server = Bun.serve({
     hostname, port: opts.port ?? 0,
     routes: {
       '/v1/health':               () => new Response('ok'),
@@ -67,12 +83,47 @@ export async function startWrapApi(opts: WrapApiOpts): Promise<WrapApiServer> {
       '/v1/settings/get':         get(a.settings.get.bind(a.settings)),
       '/v1/settings/update':      post(a.settings.update.bind(a.settings)),
     },
-    fetch() { return new Response('Not Found', { status: 404 }) },
+    fetch(req, srv) {
+      // Voice events WebSocket — Bun upgrades on this path.
+      const url = new URL(req.url)
+      if (url.pathname === '/v1/voice/events') {
+        if (srv.upgrade(req)) return
+        return new Response('Upgrade failed', { status: 426 })
+      }
+      return new Response('Not Found', { status: 404 })
+    },
+    websocket: {
+      open(ws) {
+        wsClients.add(ws)
+        ws.send(JSON.stringify({ event: 'subscribed', clients: wsClients.size }))
+      },
+      close(ws) {
+        wsClients.delete(ws)
+      },
+      message(_ws, raw) {
+        const text = typeof raw === 'string' ? raw : new TextDecoder().decode(raw)
+        try {
+          const cmd = JSON.parse(text)
+          for (const h of commandHandlers) h(cmd)
+        } catch {
+          // ignore malformed
+        }
+      },
+    },
   })
 
+  const port = server.port ?? 0
   return {
-    port: server.port,
-    baseUrl: `http://${hostname}:${server.port}`,
+    port,
+    baseUrl: `http://${hostname}:${port}`,
+    broadcast(event) {
+      const line = JSON.stringify(event)
+      for (const ws of wsClients) {
+        try { ws.send(line) } catch { wsClients.delete(ws) }
+      }
+    },
+    onCommand(cb) { commandHandlers.push(cb) },
+    clientCount() { return wsClients.size },
     stop: async () => { server.stop() },
   }
 }

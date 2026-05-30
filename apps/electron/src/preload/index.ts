@@ -1,4 +1,5 @@
-// Preload: safe bridge between renderer (Web) and main (Node).
+// Preload: minimal bridge — main only signals hotkey + provides daemon port.
+// The renderer opens its own WebSocket to the Bun daemon for voice events.
 
 import { contextBridge, ipcRenderer } from 'electron'
 
@@ -6,11 +7,5 @@ contextBridge.exposeInMainWorld('kairos', {
   onHotkey: (cb: () => void) => {
     ipcRenderer.on('hotkey:toggle', () => cb())
   },
-  onSpeechEvent: (cb: (e: any) => void) => {
-    ipcRenderer.on('speech:event', (_e, payload) => cb(payload))
-  },
-  speak: (text: string, voice?: string) =>
-    ipcRenderer.invoke('speech:speak', { text, voice }),
-  transcribe: (wavBase64: string) =>
-    ipcRenderer.invoke('speech:transcribe', { wavBase64 }),
+  daemonPort: () => ipcRenderer.invoke('daemon:port') as Promise<number>,
 })

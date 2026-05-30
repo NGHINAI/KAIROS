@@ -12,6 +12,7 @@ let package = Package(
             name: "KairosSpeechHelper",
             path: "Sources/KairosSpeechHelper",
             linkerSettings: [
+                .linkedFramework("AppKit"),
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("Speech"),
             ]

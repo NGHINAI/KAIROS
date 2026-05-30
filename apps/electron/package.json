@@ -2,9 +2,11 @@
   "name": "@kairos/electron",
   "version": "0.6.0-electron-alpha",
   "private": true,
-  "main": "dist/main/index.js",
+  "main": "dist/main/main/index.js",
   "scripts": {
-    "dev": "vite build --watch & electron .",
+    "dev:vite": "vite",
+    "dev:electron": "NODE_ENV=development electron .",
+    "dev": "bun run build:main && (bun run dev:vite & sleep 3 && bun run dev:electron; kill %1 2>/dev/null)",
     "build:main": "tsc -p tsconfig.main.json",
     "build:renderer": "vite build",
     "build": "bun run build:main && bun run build:renderer",
