@@ -1,14 +1,10 @@
-// AudioEngine.swift — AVAudioEngine graph for KAIROS voice.
+// AudioEngine.swift — minimal AVAudioEngine for mic capture only.
 //
-// Pipeline:
-//   inputNode (VoiceProcessingIO ON → FaceTime-grade echo cancellation)
-//     │
-//     ├─→ Tap (16kHz mono Float32 buffers) → SpeechRecognizer (Apple STT)
-//     │                                    → SileroVAD (CoreML, ANE)
-//     │
-//   playerNode ← receives PCM from SpeechSynthesizer / cloud TTS
-//     │
-//   mainMixerNode → outputNode
+// v1: just feeds mic buffers to STT + VAD. No output routing — AVSpeechSynthesizer
+// handles its own playback through Apple's internal audio session.
+//
+// v1.5 (when barge-in is priority): re-introduce VoiceProcessingIO with matching
+// input+output formats so KAIROS doesn't hear itself.
 
 import AVFoundation
 
@@ -28,39 +24,26 @@ final class AudioEngine {
 
     func start() {
         let input = engine.inputNode
+        let nativeFormat = input.outputFormat(forBus: 0)
 
-        // Enable VoiceProcessingIO — Apple's built-in echo cancellation + noise
-        // suppression (same DSP that drives FaceTime). Critical for barge-in:
-        // STT and VAD will see only the user's voice, not KAIROS's own TTS.
-        do {
-            try input.setVoiceProcessingEnabled(true)
-        } catch {
-            NSLog("VoiceProcessingIO not available: \(error)")
-        }
-
-        // Install tap for STT + VAD (16kHz mono Float32, ~64ms buffer at 1024 samples)
-        let format = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: 16000,
-            channels: 1,
-            interleaved: false
-        )
-
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, time in
+        // Install tap at the mic's native format. Recognizer + VAD downsample internally.
+        input.installTap(onBus: 0, bufferSize: 1024, format: nativeFormat) { [weak self] buffer, time in
             self?.recognizer.feed(buffer: buffer, time: time)
             self?.vad.feed(buffer: buffer)
         }
 
-        // Wire up the player node for TTS playback
-        engine.attach(synth.playerNode)
-        engine.connect(synth.playerNode, to: engine.mainMixerNode, format: nil)
-
-        // Start the engine
         do {
             engine.prepare()
             try engine.start()
         } catch {
-            bus.emit(["event": "error", "code": "audio_engine_start_failed", "message": "\(error)"])
+            // Mic permission denied or audio unavailable — non-fatal.
+            // TTS still works (AVSpeechSynthesizer uses its own output path).
+            // STT + hotkey degraded; user can still hear KAIROS speak.
+            bus.emit([
+                "event": "error",
+                "code": "audio_engine_start_failed",
+                "message": "\(error)"
+            ])
         }
     }
 

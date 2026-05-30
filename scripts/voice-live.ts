@@ -15,16 +15,40 @@
 import { Database } from 'bun:sqlite'
 import { join } from 'path'
 import { existsSync } from 'fs'
+import { spawn } from 'bun'
 import { startWrapApi } from '../src/daemon/wrapApi/server'
 import { LLMAdapter } from '../src/daemon/wrapApi/adapters/llmAdapter'
+import { ClaudeCodeAdapter } from '../src/daemon/wrapApi/adapters/claudeCodeAdapter'
 import { VoiceAdapter } from '../src/daemon/wrapApi/adapters/voiceAdapter'
 import { ConversationStore } from '../src/daemon/voice/conversationStore'
 import { VoiceConductor } from '../src/daemon/voice/voiceConductor'
 import { SidecarClient } from '../src/daemon/voice/sidecarClient'
 import { SayBackend } from '../src/daemon/voice/sayBackend'
 
-const apiKey = process.env.KAIROS_ANTHROPIC_KEY ?? process.env.ANTHROPIC_API_KEY
-if (!apiKey) { console.error('✗ ANTHROPIC_API_KEY not set'); process.exit(1) }
+// LLM backend selection — prefer Claude Code subscription, fall back to API key
+async function selectLLMBackend(): Promise<{ kind: 'claude-code' | 'api-key'; complete: (b: any) => Promise<any> }> {
+  // Try Claude Code first — uses user's subscription, no key management
+  const claudeAvailable = await (async () => {
+    try {
+      const proc = spawn({ cmd: ['claude', '--version'], stdout: 'pipe', stderr: 'pipe' })
+      const code = await proc.exited
+      return code === 0
+    } catch { return false }
+  })()
+  if (claudeAvailable && !process.env.KAIROS_FORCE_API_KEY) {
+    const adapter = new ClaudeCodeAdapter({ defaultModel: 'haiku' })
+    return { kind: 'claude-code', complete: (b) => adapter.complete(b) }
+  }
+  const apiKey = process.env.KAIROS_ANTHROPIC_KEY ?? process.env.ANTHROPIC_API_KEY
+  if (!apiKey) {
+    console.error('✗ no LLM backend available:')
+    console.error('  - Claude Code (recommended): install + run `claude /login`')
+    console.error('  - OR set ANTHROPIC_API_KEY env var')
+    process.exit(1)
+  }
+  const adapter = new LLMAdapter({ apiKey, defaultModel: 'claude-haiku-4-5' })
+  return { kind: 'api-key', complete: (b) => adapter.complete(b) }
+}
 
 const helperBinary = process.env.KAIROS_VOICE_HELPER ??
   join(import.meta.dir, '..', 'apps', 'macos', 'KairosVoiceHelper', '.build', 'release', 'KairosVoiceHelper')
@@ -48,13 +72,14 @@ console.log()
 console.log('[1/4] Starting Bun wrap-API server...')
 const db = new Database(':memory:')
 const conversationStore = new ConversationStore(db)
-const llm = new LLMAdapter({ apiKey, defaultModel: 'claude-haiku-4-5' })
-const voice = new VoiceAdapter({ llm, store: conversationStore })
+const llmBackend = await selectLLMBackend()
+console.log(`       ✓ LLM backend: ${llmBackend.kind}`)
+const voice = new VoiceAdapter({ llm: { complete: llmBackend.complete }, store: conversationStore })
 
 const api = await startWrapApi({
   port: 0, hostname: '127.0.0.1',
   adapters: {
-    llm: { complete: (b) => llm.complete(b) },
+    llm: { complete: llmBackend.complete },
     voice: { chat: (b) => voice.chat(b), cancel: async () => voice.cancel() },
     memory: { append: async () => ({}), get: async () => ({}) },
     orders: { add: async () => ({ slug: 'stub' }), list: async () => [] },
