@@ -37,3 +37,28 @@ test("Conductor calls trajWriter.append after each turn", async () => {
   expect(trajCalls[0].user_input).toBe("hello")
   expect(trajCalls[0].intent_tier).toBe("fast")
 })
+
+test("Conductor smart-path: emits agent_planning + agent_done", async () => {
+  const events: any[] = []
+
+  const fakeRunPlanner = async (_input: string, _opts: any) => ({
+    finalOutput: "Done — found 5 items.",
+    toolCalls: [{ id: "t1", name: "gmail_list", args: { since: "today" }, result: { count: 5 } }],
+  })
+
+  const conductor = new Conductor({
+    classifyLlm: { complete: async () => ({ text: JSON.stringify({ tier: "smart", reason: "multi-step", confidence: 0.9 }) }) } as any,
+    fastLlm: { complete: async () => ({ text: "Checking..." }) } as any,
+    smartLlm: { complete: async () => ({ text: "" }) } as any,
+    tools: [{ name: "gmail_list", description: "", parameters: {}, execute: async () => ({ count: 5 }) }],
+    contextBuilder: { build: async () => ({ system: "", tools: [] }) } as any,
+    onEvent: (e: any) => events.push(e),
+    runPlanner: fakeRunPlanner,
+    speakBackend: { speak: async () => {} } as any,
+  })
+  await conductor.handle({ conversationId: "test", utterance: "summarize my emails" })
+
+  const kinds = events.map((e) => e.kind)
+  expect(kinds).toContain("agent_planning")
+  expect(kinds).toContain("agent_done")
+})
