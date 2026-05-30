@@ -141,6 +141,7 @@ import { Conductor } from './agents/conductor'
 import { ContextBuilder } from './agents/contextBuilder'
 import { SoulDigestLoader } from './agents/loaders/soulDigestLoader'
 import { buildIntrospectionTools } from './agents/introspectionTools'
+import { skillsAsTools } from './agents/skillToolAdapter'
 import type { CompletionRequest, TaskType, SystemBlock } from './llm/types'
 
 const VERSION = '0.2.0'
@@ -835,6 +836,10 @@ async function main(): Promise<void> {
               tsRunner,
               pythonRunner: pythonRunner as PythonRunner,
             })
+            // Stash the dispatcher on globalThis so the agent ContextBuilder
+            // can wire skillsAsTools() against it. The OrdersActionDispatcher
+            // also reads this key.
+            ;(globalThis as any).__kairosSkillDispatcher = dispatcher
 
             // AwmWorker — induction pipeline. Requires router + persona TrajWriter.
             const _trajWriterForAwm = (globalThis as { __kairosTrajWriter?: TrajWriter }).__kairosTrajWriter
@@ -1522,7 +1527,42 @@ async function main(): Promise<void> {
             return raw.length > 3200 ? raw.slice(0, 3200) + '\n...(truncated)' : raw
           } catch { return '' }
         },
-        kairosSkills: async () => [],   // Task 3.5 fills this with skillToolAdapter
+        kairosSkills: async () => {
+          // Prefer AWM (agentskills.io) registry — that's what the SkillDispatcher
+          // resolves against. Fall back to the legacy manifest-based registry.
+          const reg = (globalThis as any).__kairosAwmSkillRegistry
+            ?? (globalThis as any).__kairosSkillRegistry
+          const disp = (globalThis as any).__kairosSkillDispatcher
+          if (!reg || !disp) return []
+          try {
+            // The two registries expose different list methods; normalize.
+            let rawList: any[] = []
+            if (typeof reg.activeSkills === 'function') {
+              const out = reg.activeSkills()
+              rawList = Array.isArray(out) ? out : await out
+            } else if (typeof reg.listActiveMetadata === 'function') {
+              rawList = reg.listActiveMetadata()
+            } else if (typeof reg.listSkills === 'function') {
+              rawList = reg.listSkills()
+            }
+            // Normalize entries to { id, name, description, parameters }
+            const skills = rawList.map((s: any) => ({
+              id: s.id ?? s.slug ?? s.name,
+              name: s.name,
+              description: s.description,
+              parameters: s.parameters,
+            }))
+            // SkillDispatcher exposes .invoke(); the adapter expects .dispatch().
+            const dispatcherShim = {
+              dispatch: async (id: string, args: any) => {
+                if (typeof disp.dispatch === 'function') return disp.dispatch(id, args)
+                if (typeof disp.invoke === 'function') return disp.invoke(id, args ?? {})
+                throw new Error('skill dispatcher has no dispatch/invoke method')
+              },
+            }
+            return skillsAsTools({ activeSkills: () => skills } as any, dispatcherShim as any)
+          } catch { return [] }
+        },
         introspectionTools: async () => introspectionTools,
       },
       memoryInjector: {
