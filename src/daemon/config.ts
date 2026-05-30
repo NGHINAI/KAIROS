@@ -73,6 +73,7 @@ const DEFAULTS: Config = {
     enabled: true,
     configPath: join(process.env.HOME ?? '', '.kairos', 'restraint-config.json'),
   },
+  withVoice: false,
   mode: (process.env.KAIROS_MODE as 'byo' | 'hosted' | 'local' | undefined) ?? 'byo',
   embedding: {
     enabled: process.env.KAIROS_EMBED_ENABLED === 'false' ? false : true,
@@ -156,7 +157,11 @@ function deepMerge<T extends Record<string, unknown>>(base: T, overrides: Partia
   return result
 }
 
-export function loadConfig(sandboxDir: string, isSandbox: boolean, verbose: boolean): Config {
+export function loadConfig(
+  sandboxDir: string = process.cwd(),
+  isSandbox: boolean = false,
+  verbose: boolean = false,
+): Config {
   let config: Config = { ...DEFAULTS, sandboxDir, verbose }
 
   if (isSandbox) {
@@ -179,6 +184,10 @@ export function loadConfig(sandboxDir: string, isSandbox: boolean, verbose: bool
   config.sandboxDir = sandboxDir
   config.isSandbox = isSandbox
   config.verbose = verbose || isSandbox
+
+  // Env-flag overrides
+  const withVoice = (process.env.KAIROS_WITH_VOICE ?? 'false').toLowerCase() === 'true'
+  config.withVoice = withVoice
 
   return config
 }

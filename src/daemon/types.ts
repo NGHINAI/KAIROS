@@ -76,6 +76,7 @@ export type Config = {
     enabled: boolean
     configPath: string   // ~/.kairos/restraint-config.json
   }
+  withVoice: boolean  // KAIROS_WITH_VOICE — embed voice into the main daemon
   mode?: 'byo' | 'hosted' | 'local'
   embedding?: {
     enabled?: boolean
