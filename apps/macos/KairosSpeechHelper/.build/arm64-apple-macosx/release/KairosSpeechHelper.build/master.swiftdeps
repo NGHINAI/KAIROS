@@ -1,0 +1,6 @@
+version: "Apple Swift version 6.0.3 (swiftlang-6.0.3.1.10 clang-1600.0.30.1)"
+options: "a409d2f9fa172d12e3a34fac35b48e5e713ef05e2127510bd71e9f2ba4c9c312"
+build_start_time: [1780127872, 32244000]
+build_end_time: [1780127906, 166724000]
+inputs:
+  "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosSpeechHelper/Sources/KairosSpeechHelper/main.swift": [1780127865, 708848619]

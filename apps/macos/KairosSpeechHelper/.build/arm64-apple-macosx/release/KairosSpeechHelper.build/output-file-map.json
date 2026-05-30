@@ -1,0 +1,12 @@
+{
+  "": {
+    "dependencies": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosSpeechHelper/.build/arm64-apple-macosx/release/KairosSpeechHelper.build/KairosSpeechHelper.d",
+    "object": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosSpeechHelper/.build/arm64-apple-macosx/release/KairosSpeechHelper.build/KairosSpeechHelper.o",
+    "swift-dependencies": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosSpeechHelper/.build/arm64-apple-macosx/release/KairosSpeechHelper.build/master.swiftdeps"
+  },
+  "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosSpeechHelper/Sources/KairosSpeechHelper/main.swift": {
+    "object": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosSpeechHelper/.build/arm64-apple-macosx/release/KairosSpeechHelper.build/main.swift.o",
+    "swiftmodule": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosSpeechHelper/.build/arm64-apple-macosx/release/KairosSpeechHelper.build/main~partial.swiftmodule",
+    "swift-dependencies": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosSpeechHelper/.build/arm64-apple-macosx/release/KairosSpeechHelper.build/main.swiftdeps"
+  }
+}

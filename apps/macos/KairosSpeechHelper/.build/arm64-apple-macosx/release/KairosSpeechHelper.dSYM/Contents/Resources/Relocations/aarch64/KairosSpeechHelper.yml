@@ -1,0 +1,42 @@
+---
+triple:          'arm64-apple-darwin'
+binary-path:     '/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosSpeechHelper/.build/arm64-apple-macosx/release/KairosSpeechHelper'
+relocations:
+  - { offset: 0xF8A4F, size: 0x8, addend: 0x0, symName: '_$s18KairosSpeechHelper5synthSo19AVSpeechSynthesizerCvp', symObjAddr: 0xEF20, symBinAddr: 0x10000C7B0, symSize: 0x0 }
+  - { offset: 0xF8A69, size: 0x8, addend: 0x0, symName: '_$s18KairosSpeechHelper13synthDelegateAA05SynthE0Cvp', symObjAddr: 0xEF28, symBinAddr: 0x10000C7B8, symSize: 0x0 }
+  - { offset: 0xF8B5E, size: 0x8, addend: 0x0, symName: '_$s18KairosSpeechHelper14currentSpeakIdSSSgvp', symObjAddr: 0xEF30, symBinAddr: 0x10000C7C0, symSize: 0x0 }
+  - { offset: 0xF8CFB, size: 0x8, addend: 0x0, symName: _KairosSpeechHelper_main, symObjAddr: 0x0, symBinAddr: 0x100003E08, symSize: 0x3BC }
+  - { offset: 0xF8E97, size: 0x8, addend: 0x0, symName: '_$s18KairosSpeechHelper13SynthDelegateCMa', symObjAddr: 0x3BC, symBinAddr: 0x1000041C4, symSize: 0x20 }
+  - { offset: 0xF8EB6, size: 0x8, addend: 0x0, symName: '_$s18KairosSpeechHelperySo37SFSpeechRecognizerAuthorizationStatusVcfU_', symObjAddr: 0x3DC, symBinAddr: 0x1000041E4, symSize: 0xA8 }
+  - { offset: 0xF8F20, size: 0x8, addend: 0x0, symName: '_$sSo37SFSpeechRecognizerAuthorizationStatusVIegy_ABIeyBy_TR', symObjAddr: 0x484, symBinAddr: 0x10000428C, symSize: 0x3C }
+  - { offset: 0xF8F38, size: 0x8, addend: 0x0, symName: _block_copy_helper, symObjAddr: 0x4C0, symBinAddr: 0x1000042C8, symSize: 0x10 }
+  - { offset: 0xF8F4C, size: 0x8, addend: 0x0, symName: _block_destroy_helper, symObjAddr: 0x4D0, symBinAddr: 0x1000042D8, symSize: 0x8 }
+  - { offset: 0xF8F60, size: 0x8, addend: 0x0, symName: ___swift_instantiateConcreteTypeFromMangledName, symObjAddr: 0x4D8, symBinAddr: 0x1000042E0, symSize: 0x40 }
+  - { offset: 0xF8F74, size: 0x8, addend: 0x0, symName: '_$s18KairosSpeechHelper8readLoopyyF', symObjAddr: 0x518, symBinAddr: 0x100004320, symSize: 0x220 }
+  - { offset: 0xF8FD1, size: 0x8, addend: 0x0, symName: '_$s18KairosSpeechHelper8readLoopyyFyyYbcfU_', symObjAddr: 0x738, symBinAddr: 0x100004540, symSize: 0x2E0 }
+  - { offset: 0xF9287, size: 0x8, addend: 0x0, symName: '_$s18KairosSpeechHelper13handleCommandyySDySSypGF', symObjAddr: 0xCE4, symBinAddr: 0x100004AEC, symSize: 0x518 }
+  - { offset: 0xF9432, size: 0x8, addend: 0x0, symName: '_$sIegh_IeyBh_TR', symObjAddr: 0x11FC, symBinAddr: 0x100005004, symSize: 0x2C }
+  - { offset: 0xF946B, size: 0x8, addend: 0x0, symName: '_$s18KairosSpeechHelper10transcribeyySSF', symObjAddr: 0x1228, symBinAddr: 0x100005030, symSize: 0xB40 }
+  - { offset: 0xF9958, size: 0x8, addend: 0x0, symName: '_$s18KairosSpeechHelper10transcribeyySSFySo25SFSpeechRecognitionResultCSg_s5Error_pSgtcfU_', symObjAddr: 0x221C, symBinAddr: 0x100006024, symSize: 0x6C0 }
+  - { offset: 0xF9C56, size: 0x8, addend: 0x0, symName: '_$s18KairosSpeechHelper5speak4text5voice4rate0D2IdySS_SSSgSdSgSStF', symObjAddr: 0x1D68, symBinAddr: 0x100005B70, symSize: 0x4B4 }
+  - { offset: 0xF9EDA, size: 0x8, addend: 0x0, symName: '_$sSo25SFSpeechRecognitionResultCSgs5Error_pSgIeggg_ACSo7NSErrorCSgIeyByy_TR', symObjAddr: 0x28DC, symBinAddr: 0x1000066E4, symSize: 0x78 }
+  - { offset: 0xF9EFD, size: 0x8, addend: 0x0, symName: '_$ss22__RawDictionaryStorageC4findys10_HashTableV6BucketV6bucket_Sb5foundtxSHRzlFSS_Tg5', symObjAddr: 0x2A20, symBinAddr: 0x100006828, symSize: 0x64 }
+  - { offset: 0xF9F35, size: 0x8, addend: 0x0, symName: '_$ss22__RawDictionaryStorageC4find_9hashValues10_HashTableV6BucketV6bucket_Sb5foundtx_SitSHRzlFSS_Tg5', symObjAddr: 0x2A84, symBinAddr: 0x10000688C, symSize: 0xE0 }
+  - { offset: 0xFA01B, size: 0x8, addend: 0x0, symName: '_$s10Foundation4DataV15_RepresentationOWOe', symObjAddr: 0x2C60, symBinAddr: 0x100006A68, symSize: 0x44 }
+  - { offset: 0xFA0DF, size: 0x8, addend: 0x0, symName: '_$s8Dispatch0A13WorkItemFlagsVACs10SetAlgebraAAWl', symObjAddr: 0x3168, symBinAddr: 0x100006F70, symSize: 0x48 }
+  - { offset: 0xFA0F3, size: 0x8, addend: 0x0, symName: '_$sSay8Dispatch0A13WorkItemFlagsVGSayxGSTsWl', symObjAddr: 0x31B0, symBinAddr: 0x100006FB8, symSize: 0x4C }
+  - { offset: 0xFA107, size: 0x8, addend: 0x0, symName: ___swift_instantiateConcreteTypeFromMangledNameAbstract, symObjAddr: 0x31FC, symBinAddr: 0x100007004, symSize: 0x44 }
+  - { offset: 0xFA11B, size: 0x8, addend: 0x0, symName: '_$s10Foundation4DataV15_RepresentationOWOy', symObjAddr: 0x3240, symBinAddr: 0x100007048, symSize: 0x44 }
+  - { offset: 0xFA12F, size: 0x8, addend: 0x0, symName: '_$sypWOc', symObjAddr: 0x3284, symBinAddr: 0x10000708C, symSize: 0x3C }
+  - { offset: 0xFA143, size: 0x8, addend: 0x0, symName: '_$s10Foundation4DataVSgWOe', symObjAddr: 0x32C0, symBinAddr: 0x1000070C8, symSize: 0x14 }
+  - { offset: 0xFA157, size: 0x8, addend: 0x0, symName: '_$s18KairosSpeechHelper10transcribeyySSFySo25SFSpeechRecognitionResultCSg_s5Error_pSgtcfU_TA', symObjAddr: 0x3334, symBinAddr: 0x10000713C, symSize: 0x4C }
+  - { offset: 0xFA16B, size: 0x8, addend: 0x0, symName: '_$sSS_yptWOc', symObjAddr: 0x33B8, symBinAddr: 0x1000071C0, symSize: 0x48 }
+  - { offset: 0xFA17F, size: 0x8, addend: 0x0, symName: '_$sypWOb', symObjAddr: 0x3400, symBinAddr: 0x100007208, symSize: 0x10 }
+  - { offset: 0xFA3A5, size: 0x8, addend: 0x0, symName: '_$sSlsSQ7ElementRpzrlE10firstIndex2of0C0QzSgAB_tF10Foundation4DataV_Tg5', symObjAddr: 0xA38, symBinAddr: 0x100004840, symSize: 0x28C }
+  - { offset: 0xFA580, size: 0x8, addend: 0x0, symName: '_$sSD17dictionaryLiteralSDyxq_Gx_q_td_tcfCSS_ypTgm5Tf4g_n', symObjAddr: 0x2B64, symBinAddr: 0x10000696C, symSize: 0xFC }
+  - { offset: 0xFA6A9, size: 0x8, addend: 0x0, symName: '_$sSTsE5first5where7ElementQzSgSbADKXE_tKFSaySo22AVSpeechSynthesisVoiceCG_Tg5071$s18KairosSpeechHelper5speak4text5voice4rate0D2IdySS_SSSgSdSgSStFSbSo22deF6CXEfU_SSTf1cn_nTf4ng_n', symObjAddr: 0x2CA4, symBinAddr: 0x100006AAC, symSize: 0x21C }
+  - { offset: 0xFAAEE, size: 0x8, addend: 0x0, symName: '_$s18KairosSpeechHelper13SynthDelegateC17speechSynthesizer_9didFinishySo08AVSpeechG0C_So0J9UtteranceCtFTo', symObjAddr: 0x2954, symBinAddr: 0x10000675C, symSize: 0x34 }
+  - { offset: 0xFAB1F, size: 0x8, addend: 0x0, symName: '_$s18KairosSpeechHelper13SynthDelegateC17speechSynthesizer_9didCancelySo08AVSpeechG0C_So0J9UtteranceCtFTo', symObjAddr: 0x2988, symBinAddr: 0x100006790, symSize: 0x2C }
+  - { offset: 0xFAB5D, size: 0x8, addend: 0x0, symName: '_$s18KairosSpeechHelper13SynthDelegateCACycfcTo', symObjAddr: 0x29B4, symBinAddr: 0x1000067BC, symSize: 0x3C }
+  - { offset: 0xFAB92, size: 0x8, addend: 0x0, symName: '_$s18KairosSpeechHelper13SynthDelegateCfD', symObjAddr: 0x29F0, symBinAddr: 0x1000067F8, symSize: 0x30 }
+...

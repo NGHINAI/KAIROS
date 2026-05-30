@@ -1,0 +1,44 @@
+{
+  "name": "@kairos/electron",
+  "version": "0.6.0-electron-alpha",
+  "private": true,
+  "main": "dist/main/index.js",
+  "scripts": {
+    "dev": "vite build --watch & electron .",
+    "build:main": "tsc -p tsconfig.main.json",
+    "build:renderer": "vite build",
+    "build": "bun run build:main && bun run build:renderer",
+    "start": "electron .",
+    "package": "electron-builder",
+    "clean": "rm -rf dist out node_modules/.vite"
+  },
+  "build": {
+    "appId": "ai.kairos.desktop",
+    "productName": "KAIROS",
+    "directories": { "output": "out" },
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": "dmg",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "KAIROS needs your microphone to hear you when you press the hotkey to talk.",
+        "NSSpeechRecognitionUsageDescription": "KAIROS uses on-device speech recognition to understand what you say."
+      }
+    },
+    "files": ["dist/**", "package.json"]
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@types/react": "^19.0.7",
+    "@types/react-dom": "^19.0.3",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^34.0.0",
+    "electron-builder": "^25.1.8",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7"
+  }
+}
