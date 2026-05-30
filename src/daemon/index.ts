@@ -1587,6 +1587,35 @@ async function main(): Promise<void> {
       tools: introspectionTools,
       contextBuilder,
       onEvent: (e: any) => wrapApi.broadcast({ event: e.kind, ...e }),
+      trajWriter: {
+        append: async (entry) => {
+          const tw = (globalThis as any).__kairosTrajWriter
+          if (!tw) return
+          try {
+            // Translate the agent-turn entry into the TrajEntry shape used
+            // by the persona TrajWriter. record() is sync but kept inside
+            // try/catch — the Conductor swallows its own write errors.
+            if (typeof tw.append === 'function') {
+              await tw.append(entry)
+              return
+            }
+            if (typeof tw.record === 'function') {
+              tw.record({
+                ts: entry.at ?? Date.now(),
+                task_goal: entry.user_input ?? '',
+                intent_id: `agent_turn:${entry.intent_tier ?? 'unknown'}`,
+                args_summary: entry.intent_reason ?? '',
+                steps: [{
+                  action: `tier=${entry.intent_tier ?? 'unknown'}`,
+                  result_summary: (entry.agent_output ?? '').slice(0, 500),
+                }],
+                outcome: entry.agent_output ? 'success' : 'partial',
+                duration_ms: entry.latency_ms ?? 0,
+              })
+            }
+          } catch { /* never break the turn on traj write failure */ }
+        },
+      },
     })
 
     voiceBundle.conductor.setUserUtteranceHandler(async (utterance, conversationId) => {
