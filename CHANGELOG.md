@@ -1,3 +1,77 @@
+## [v0.6.0-alpha] - 2026-05-29
+
+**Phase E.1 voice — Bun side complete, Swift sidecar source written, end-to-end demo audible.**
+
+KAIROS now has a voice. Push-to-talk hotkey, real Claude Haiku 4.5 responses, audible Apple "Ava Enhanced" TTS through Mac speakers — all via the new in-process `/v1/*` wrap-API that swaps to KAIROS Cloud later with one config flip.
+
+### Added — Bun side (fully built, tested, working)
+
+- **`src/daemon/voice/sayBackend.ts`** — Stage-0 TTS via macOS `say` command. Proves the audio pipeline today. Pluggable for the Swift sidecar when built.
+- **`src/daemon/voice/conversationStore.ts`** — SQLite turn history. Persona-aware LLM responses use this for context.
+- **`src/daemon/voice/sidecarSimulator.ts`** — In-process mock of the Swift sidecar. Same JSON protocol. All tests use it.
+- **`src/daemon/voice/voiceConductor.ts`** — Main orchestrator. Subscribes to sidecar events, routes to wrap-API, hands responses to speakBackend, publishes voice events to perception bus for memory consolidation.
+- **`src/daemon/voice/types.ts`** — Single source of truth for `VoiceEvent`, `SidecarCmd`, `SidecarEvent` shapes.
+- **`src/daemon/wrapApi/server.ts`** — In-process Bun HTTP server on 127.0.0.1:9876 hosting `/v1/health`, `/v1/llm/complete`, `/v1/voice/chat`, `/v1/voice/cancel`, `/v1/memory/*`, `/v1/orders/*`, `/v1/composio/*`, `/v1/settings/*`. Migration to api.kairos.ai later = base-URL config flip.
+- **`src/daemon/wrapApi/adapters/llmAdapter.ts`** — Anthropic SDK wrap (Claude Haiku 4.5 default). Only file that knows we're using Claude — everything else calls /v1/llm/complete.
+- **`src/daemon/wrapApi/adapters/voiceAdapter.ts`** — `/v1/voice/chat` orchestration: persona-aware system prompt + recent turn history → LLM → response + speakId.
+- **`scripts/voice-demo.ts`** — End-to-end audible demo. Real LLM call. Real audio.
+- **`scripts/validate-phase-e1.ts`** — 22-assertion validation gate.
+
+### Added — Swift sidecar source (ready to xcodebuild)
+
+- **`apps/macos/KairosVoiceHelper/`** — Complete Swift source for the audio sidecar.
+  - `Package.swift`, `main.swift`
+  - `SidecarProtocol.swift` — UDS + JSON-line protocol matching the SidecarSimulator byte-for-byte
+  - `AudioEngine.swift` — AVAudioEngine + VoiceProcessingIO (FaceTime-grade echo cancellation)
+  - `SpeechRecognizer.swift` — SFSpeechRecognizer (Sequoia 15+) wrapper
+  - `SpeechSynthesizer.swift` — AVSpeechSynthesizer wrapper, voice picker, finish/cancel events
+  - `SileroVAD.swift` — CoreML wrapper (ANE-accelerated) for barge-in detection
+  - `BargeInDetector.swift` — VAD-during-TTS coordination
+  - `HotKeyManager.swift` — CGEventTap on flagsChanged for global push-to-talk
+  - `BUILD.md` — xcodebuild + signing + LaunchAgent installation instructions
+
+### Live-verified end-to-end
+
+`bun scripts/voice-demo.ts` with `ANTHROPIC_API_KEY` set produced:
+
+```
+[bus] voice.hotkey.down + voice.user.utterance
+  → wrap-API /v1/voice/chat (real Claude Haiku 4.5 call, ~1s)
+  → voice.agent.utterance: "Hey there! I'm KAIROS, your AI co-worker
+     who's here to help you think through problems, get stuff done,
+     and make your work day better."
+  → Mac speakers spoke the response with "Ava (Enhanced)"
+```
+
+### Architecture decisions
+
+- **No BYOK** — KAIROS provides everything. Embedded LLM key for pre-Cloud private use.
+- **In-process wrap-API** — Cloud-shaped local contract. Migration is base-URL flip.
+- **Voice-only configuration** — No dashboard. KAIROS modifies itself via /v1/* endpoints.
+- **Stage-0 SayBackend** — Audio works today without xcodebuild + TCC + Apple Developer cert.
+- **SidecarSimulator + Swift sidecar share identical JSON protocol** — Real sidecar drops in with no daemon code change.
+
+### Regression
+
+- Phase E.1 gate: **22/22 PASS**
+- Phase D gate: **20/20 PASS** (no regression)
+- Full suite: **831 pass** + 2 pre-existing `fs.watch` flakes (unchanged from v0.5.4)
+- New tests: 51 across 7 voice + wrap-API files
+
+### Deferred to v0.6.x
+
+- Swift sidecar build pipeline (Xcode + signing + LaunchAgent install)
+- Onboarding voice state machine (TCC prompts + conversational persona builder)
+- 15-min check-in proactive scheduler
+- Conversational settings change endpoints (wired in adapters but not yet voice-discoverable)
+- Memory perception bus → trajectory log integration (publish points are in; consumer side is existing C.3.1)
+
+### Tag
+
+`v0.6.0-alpha` — Phase E.1 audible end-to-end via stage-0 path.
+
+---
+
 ## [v0.5.4] - 2026-05-29
 
 **Phase D unconnected-toolkit handling in authoring.**
