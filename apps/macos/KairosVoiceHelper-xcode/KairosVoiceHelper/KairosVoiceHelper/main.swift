@@ -6,6 +6,7 @@
 
 import Foundation
 import AppKit
+import AVFoundation
 
 let socketPath: String = {
     // Use /tmp by default — no spaces, no entitlement issues, simpler for dev.
@@ -22,6 +23,13 @@ app.setActivationPolicy(.accessory)
 
 // Make stdout unbuffered so events reach Bun immediately
 setbuf(stdout, nil)
+
+// Explicitly request microphone permission. AVAudioEngine.inputNode access
+// doesn't reliably trigger the TCC prompt — this call does. Once user grants,
+// the app appears in System Settings → Privacy & Security → Microphone.
+AVCaptureDevice.requestAccess(for: .audio) { granted in
+    NSLog("KAIROS mic permission requested → granted=\(granted)")
+}
 
 let bus = ProtocolBus(socketPath: socketPath)
 let synth = SpeechSynthesizer(bus: bus)

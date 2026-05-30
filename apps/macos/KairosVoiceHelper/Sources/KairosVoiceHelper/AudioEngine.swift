@@ -25,9 +25,28 @@ final class AudioEngine {
     func start() {
         let input = engine.inputNode
         let nativeFormat = input.outputFormat(forBus: 0)
+        NSLog("KAIROS audio: input native format = \(nativeFormat)")
 
-        // Install tap at the mic's native format. Recognizer + VAD downsample internally.
+        var tapBufferCount = 0
+        var maxAmpInWindow: Float = 0
+
         input.installTap(onBus: 0, bufferSize: 1024, format: nativeFormat) { [weak self] buffer, time in
+            // Diagnostic: every ~30 buffers (~700ms), log peak amplitude so we can
+            // see if real audio is flowing or just silence.
+            if let ch = buffer.floatChannelData?[0] {
+                let n = Int(buffer.frameLength)
+                var peak: Float = 0
+                for i in 0..<n {
+                    let v = abs(ch[i])
+                    if v > peak { peak = v }
+                }
+                if peak > maxAmpInWindow { maxAmpInWindow = peak }
+                tapBufferCount += 1
+                if tapBufferCount % 30 == 0 {
+                    NSLog("KAIROS audio: mic peak amplitude over last ~700ms = \(maxAmpInWindow)")
+                    maxAmpInWindow = 0
+                }
+            }
             self?.recognizer.feed(buffer: buffer, time: time)
             self?.vad.feed(buffer: buffer)
         }
