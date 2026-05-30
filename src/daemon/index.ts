@@ -33,6 +33,7 @@ import { DecisionEngine } from './decisionEngine'
 import { TaskRunner } from './taskRunner'
 import { MemoryStore } from './memory'
 import { Voice } from './voice'
+import { bootstrapVoice } from './voice/bootstrap'
 import { sendMacNotification, setSandboxDir as setNotifySandboxDir } from './notify'
 import { postToDiscord, isDiscordConfigured } from './discord'
 import { buildRouter, ModelRouter } from './llm'
@@ -1175,6 +1176,24 @@ async function main(): Promise<void> {
       await registry.stopAll()
       if (memoryStop) await memoryStop()
     }
+  }
+
+  // 10c. Voice subsystem (Phase E.2 — wired under KAIROS_WITH_VOICE flag)
+  let voiceBundle: Awaited<ReturnType<typeof bootstrapVoice>> | undefined
+  if (config.withVoice) {
+    log('[voice] bootstrapping voice subsystem (KAIROS_WITH_VOICE=true)')
+    const helperBinary = process.env.KAIROS_VOICE_HELPER
+      ?? join(import.meta.dir, '..', '..', 'apps', 'macos', 'KairosVoiceHelper', '.build', 'release', 'KairosVoiceHelper')
+    // ModelRouter for voice — independent of the proactive subsystem so it
+    // works even when proactive is disabled. The bootstrap currently accepts
+    // an llm hook but doesn't invoke it; wiring is forward-looking.
+    const voiceRouter = buildRouter(db, config.proactive.providerConfigPath, config.mode ?? 'byo')
+    voiceBundle = await bootstrapVoice({
+      db,
+      helperBinary,
+      llm: { complete: (body) => voiceRouter.complete(body) },
+    })
+    log('[voice] sidecar connected, conductor running')
   }
 
   // 11. Write ready flag (shim watches for this)
