@@ -47,6 +47,15 @@ export function buildProviderRouting(): Record<string, unknown> {
 
 export type Msg = { role: 'user' | 'assistant' | 'system'; content: string }
 
+export interface ToolSchema {
+  type: 'function'
+  function: {
+    name: string
+    description: string
+    parameters: Record<string, any>   // JSON Schema
+  }
+}
+
 export type CompleteBody = {
   messages: Msg[]
   system?: string
@@ -54,6 +63,8 @@ export type CompleteBody = {
   max_tokens?: number
   temperature?: number
   signal?: AbortSignal
+  tools?: ToolSchema[]
+  tool_choice?: 'auto' | 'none' | { type: 'function'; function: { name: string } }
 }
 
 export type CompleteResult = { text: string; tokensIn?: number; tokensOut?: number }
@@ -62,6 +73,7 @@ export type StreamEvent =
   | { kind: 'delta'; text: string }
   | { kind: 'done';  text: string; tokensIn?: number; tokensOut?: number }
   | { kind: 'error'; message: string }
+  | { kind: 'tool_use'; id: string; name: string; args_json: string }
 
 export type OpenRouterAdapterDeps = {
   apiKey?: string
@@ -123,6 +135,10 @@ export class OpenRouterAdapter {
       provider: buildProviderRouting(),
     }
     if (body.temperature !== undefined) reqBody.temperature = body.temperature
+    if (body.tools && body.tools.length > 0) {
+      reqBody.tools = body.tools
+      if (body.tool_choice) reqBody.tool_choice = body.tool_choice
+    }
 
     const resp = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
@@ -148,6 +164,7 @@ export class OpenRouterAdapter {
     let fullText = ''
     let tokensIn: number | undefined
     let tokensOut: number | undefined
+    const toolCallAcc: Record<number, { id?: string; name?: string; args: string }> = {}
 
     try {
       while (true) {
@@ -163,10 +180,21 @@ export class OpenRouterAdapter {
           if (data === '[DONE]') continue
           try {
             const parsed = JSON.parse(data)
-            const delta = parsed?.choices?.[0]?.delta?.content
-            if (typeof delta === 'string' && delta.length > 0) {
-              fullText += delta
-              yield { kind: 'delta', text: delta }
+            const delta = parsed?.choices?.[0]?.delta
+            const content = delta?.content
+            if (typeof content === 'string' && content.length > 0) {
+              fullText += content
+              yield { kind: 'delta', text: content }
+            }
+            if (delta && Array.isArray(delta.tool_calls)) {
+              for (const tc of delta.tool_calls) {
+                const tcIdx = tc.index ?? 0
+                if (!toolCallAcc[tcIdx]) toolCallAcc[tcIdx] = { args: '' }
+                const acc = toolCallAcc[tcIdx]
+                if (tc.id)                  acc.id = tc.id
+                if (tc.function?.name)      acc.name = tc.function.name
+                if (tc.function?.arguments) acc.args += tc.function.arguments
+              }
             }
             if (parsed?.usage) {
               tokensIn = parsed.usage.prompt_tokens
@@ -177,6 +205,12 @@ export class OpenRouterAdapter {
       }
     } finally {
       try { reader.releaseLock() } catch { /* swallow */ }
+    }
+
+    for (const acc of Object.values(toolCallAcc)) {
+      if (acc.id && acc.name) {
+        yield { kind: 'tool_use', id: acc.id, name: acc.name, args_json: acc.args }
+      }
     }
 
     yield { kind: 'done', text: fullText, tokensIn, tokensOut }
