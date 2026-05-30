@@ -22,7 +22,6 @@ final class SpeechSynthesizer: NSObject, AVSpeechSynthesizerDelegate {
     func speak(text: String, voice: String?, rate: Double?, speakId: String) {
         let utterance = AVSpeechUtterance(string: text)
         if let voiceName = voice {
-            // Match by identifier or display name
             if let v = AVSpeechSynthesisVoice.speechVoices().first(where: {
                 $0.identifier == voiceName || $0.name == voiceName
             }) {
@@ -33,7 +32,6 @@ final class SpeechSynthesizer: NSObject, AVSpeechSynthesizerDelegate {
             utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
         }
         if let r = rate {
-            // AVSpeechUtterance.rate is 0.0...1.0 (0.5 = default)
             utterance.rate = Float(max(0.0, min(1.0, r)))
         }
         currentSpeakId = speakId

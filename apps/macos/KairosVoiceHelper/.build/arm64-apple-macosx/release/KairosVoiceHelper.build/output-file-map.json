@@ -1,0 +1,47 @@
+{
+  "": {
+    "dependencies": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/.build/arm64-apple-macosx/release/KairosVoiceHelper.build/KairosVoiceHelper.d",
+    "object": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/.build/arm64-apple-macosx/release/KairosVoiceHelper.build/KairosVoiceHelper.o",
+    "swift-dependencies": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/.build/arm64-apple-macosx/release/KairosVoiceHelper.build/master.swiftdeps"
+  },
+  "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/Sources/KairosVoiceHelper/AudioEngine.swift": {
+    "object": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/.build/arm64-apple-macosx/release/KairosVoiceHelper.build/AudioEngine.swift.o",
+    "swiftmodule": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/.build/arm64-apple-macosx/release/KairosVoiceHelper.build/AudioEngine~partial.swiftmodule",
+    "swift-dependencies": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/.build/arm64-apple-macosx/release/KairosVoiceHelper.build/AudioEngine.swiftdeps"
+  },
+  "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/Sources/KairosVoiceHelper/BargeInDetector.swift": {
+    "object": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/.build/arm64-apple-macosx/release/KairosVoiceHelper.build/BargeInDetector.swift.o",
+    "swiftmodule": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/.build/arm64-apple-macosx/release/KairosVoiceHelper.build/BargeInDetector~partial.swiftmodule",
+    "swift-dependencies": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/.build/arm64-apple-macosx/release/KairosVoiceHelper.build/BargeInDetector.swiftdeps"
+  },
+  "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/Sources/KairosVoiceHelper/HotKeyManager.swift": {
+    "object": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/.build/arm64-apple-macosx/release/KairosVoiceHelper.build/HotKeyManager.swift.o",
+    "swiftmodule": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/.build/arm64-apple-macosx/release/KairosVoiceHelper.build/HotKeyManager~partial.swiftmodule",
+    "swift-dependencies": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/.build/arm64-apple-macosx/release/KairosVoiceHelper.build/HotKeyManager.swiftdeps"
+  },
+  "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/Sources/KairosVoiceHelper/SidecarProtocol.swift": {
+    "object": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/.build/arm64-apple-macosx/release/KairosVoiceHelper.build/SidecarProtocol.swift.o",
+    "swiftmodule": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/.build/arm64-apple-macosx/release/KairosVoiceHelper.build/SidecarProtocol~partial.swiftmodule",
+    "swift-dependencies": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/.build/arm64-apple-macosx/release/KairosVoiceHelper.build/SidecarProtocol.swiftdeps"
+  },
+  "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/Sources/KairosVoiceHelper/SileroVAD.swift": {
+    "object": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/.build/arm64-apple-macosx/release/KairosVoiceHelper.build/SileroVAD.swift.o",
+    "swiftmodule": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/.build/arm64-apple-macosx/release/KairosVoiceHelper.build/SileroVAD~partial.swiftmodule",
+    "swift-dependencies": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/.build/arm64-apple-macosx/release/KairosVoiceHelper.build/SileroVAD.swiftdeps"
+  },
+  "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/Sources/KairosVoiceHelper/SpeechRecognizer.swift": {
+    "object": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/.build/arm64-apple-macosx/release/KairosVoiceHelper.build/SpeechRecognizer.swift.o",
+    "swiftmodule": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/.build/arm64-apple-macosx/release/KairosVoiceHelper.build/SpeechRecognizer~partial.swiftmodule",
+    "swift-dependencies": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/.build/arm64-apple-macosx/release/KairosVoiceHelper.build/SpeechRecognizer.swiftdeps"
+  },
+  "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/Sources/KairosVoiceHelper/SpeechSynthesizer.swift": {
+    "object": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/.build/arm64-apple-macosx/release/KairosVoiceHelper.build/SpeechSynthesizer.swift.o",
+    "swiftmodule": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/.build/arm64-apple-macosx/release/KairosVoiceHelper.build/SpeechSynthesizer~partial.swiftmodule",
+    "swift-dependencies": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/.build/arm64-apple-macosx/release/KairosVoiceHelper.build/SpeechSynthesizer.swiftdeps"
+  },
+  "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/Sources/KairosVoiceHelper/main.swift": {
+    "object": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/.build/arm64-apple-macosx/release/KairosVoiceHelper.build/main.swift.o",
+    "swiftmodule": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/.build/arm64-apple-macosx/release/KairosVoiceHelper.build/main~partial.swiftmodule",
+    "swift-dependencies": "/Users/nirmalghinaiya/Desktop/kairos-sandbox/apps/macos/KairosVoiceHelper/.build/arm64-apple-macosx/release/KairosVoiceHelper.build/main.swiftdeps"
+  }
+}

@@ -32,7 +32,6 @@ final class SileroVAD {
         // Try the bundled resource first, fall back to standard SwiftPM search paths.
         let candidates: [String?] = [
             Bundle.main.path(forResource: "silero_vad", ofType: "mlmodelc"),
-            Bundle.module.path(forResource: "silero_vad", ofType: "mlmodelc"),
         ]
         for candidate in candidates {
             guard let path = candidate else { continue }

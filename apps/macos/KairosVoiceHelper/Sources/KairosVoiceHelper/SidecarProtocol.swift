@@ -1,21 +1,17 @@
-// SidecarProtocol.swift — Unix domain socket + line-delimited JSON.
+// SidecarProtocol.swift — stdin/stdout JSON-line protocol.
 //
-// Listens on the well-known UDS path. Accepts ONE Bun daemon connection at a
-// time. Reads JSON commands line-by-line; writes JSON events line-by-line.
-// Hot-pluggable: if Bun disconnects, sidecar waits for a new connection.
+// Bun spawns the sidecar; commands flow in via stdin, events out via stdout.
+// No socket dance. Matches Claude Code's tool architecture. Simple and reliable.
 
 import Foundation
 
 final class ProtocolBus {
-    private let socketPath: String
-    private var listenSocket: Int32 = -1
-    private var clientSocket: Int32 = -1
-    private let queue = DispatchQueue(label: "kairos.voice.protocol")
-    private let writeQueue = DispatchQueue(label: "kairos.voice.protocol.write")
     private var onCommandHandler: ((SidecarCmd) -> Void)?
+    private var readerQueue = DispatchQueue(label: "kairos.voice.protocol.read")
+    private let writeQueue = DispatchQueue(label: "kairos.voice.protocol.write")
 
     init(socketPath: String) {
-        self.socketPath = socketPath
+        // socketPath is unused in stdio mode but kept for API compatibility.
     }
 
     func onCommand(_ handler: @escaping (SidecarCmd) -> Void) {
@@ -23,72 +19,36 @@ final class ProtocolBus {
     }
 
     func start() {
-        queue.async { self.runListener() }
+        readerQueue.async { self.runReader() }
     }
 
     func emit(_ payload: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: payload),
               let line = String(data: data, encoding: .utf8) else { return }
-        let withNewline = line + "\n"
         writeQueue.async {
-            guard self.clientSocket >= 0 else { return }
-            _ = withNewline.withCString { ptr in
-                write(self.clientSocket, ptr, strlen(ptr))
-            }
+            FileHandle.standardOutput.write((line + "\n").data(using: .utf8)!)
         }
     }
 
-    private func runListener() {
-        unlink(socketPath)
-        listenSocket = socket(AF_UNIX, SOCK_STREAM, 0)
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        socketPath.withCString { sp in
-            withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
-                ptr.withMemoryRebound(to: CChar.self, capacity: Int(getMaxPathLen())) { dst in
-                    _ = strncpy(dst, sp, Int(getMaxPathLen()) - 1)
-                }
-            }
-        }
-        let bound = withUnsafePointer(to: &addr) { ap -> Int32 in
-            ap.withMemoryRebound(to: sockaddr.self, capacity: 1) { sp in
-                bind(listenSocket, sp, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-        guard bound >= 0 else { NSLog("KAIROS sidecar: bind failed: \(errno)"); return }
-        listen(listenSocket, 1)
-
+    private func runReader() {
+        let stdin = FileHandle.standardInput
+        var buffer = Data()
         while true {
-            clientSocket = accept(listenSocket, nil, nil)
-            guard clientSocket >= 0 else { sleep(1); continue }
-            handleClient()
-            close(clientSocket)
-            clientSocket = -1
-        }
-    }
-
-    private func handleClient() {
-        var buf = [UInt8](repeating: 0, count: 8192)
-        var pending = Data()
-        while true {
-            let n = read(clientSocket, &buf, buf.count)
-            if n <= 0 { return }
-            pending.append(buf, count: n)
-            while let nl = pending.firstIndex(of: 0x0a) {
-                let lineData = pending.subdata(in: 0..<nl)
-                pending.removeSubrange(0...nl)
-                guard !lineData.isEmpty,
-                      let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else { continue }
-                if let cmd = SidecarCmd(json: json) {
-                    onCommandHandler?(cmd)
-                }
+            let chunk = stdin.availableData
+            if chunk.isEmpty {
+                // stdin closed → daemon disconnected; exit cleanly
+                exit(0)
+            }
+            buffer.append(chunk)
+            while let nl = buffer.firstIndex(of: 0x0a) {
+                let line = buffer.subdata(in: 0..<nl)
+                buffer.removeSubrange(0...nl)
+                guard !line.isEmpty,
+                      let json = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                      let cmd = SidecarCmd(json: json) else { continue }
+                onCommandHandler?(cmd)
             }
         }
-    }
-
-    private func getMaxPathLen() -> Int32 {
-        // sun_path is fixed at 104 on macOS
-        return 104
     }
 }
 

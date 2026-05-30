@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>KairosVoiceHelper</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.kairos.voicehelper</string>
+    <key>CFBundleName</key>
+    <string>KAIROS Voice Helper</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.6.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>KAIROS needs your microphone to hear you when you press the hotkey to talk.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>KAIROS uses on-device speech recognition to understand what you say.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>KAIROS uses keyboard events to detect your push-to-talk hotkey.</string>
+</dict>
+</plist>
