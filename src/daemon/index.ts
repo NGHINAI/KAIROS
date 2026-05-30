@@ -1204,6 +1204,15 @@ async function main(): Promise<void> {
     discordBot?.stop()
     scheduler.stop()
     if (proactiveStop) void proactiveStop()
+    if (voiceBundle) {
+      // VoiceConductor.stop() only halts the speak backend; the sidecar
+      // subprocess is owned by SidecarClient and must be stopped explicitly
+      // or it leaks past SIGINT/SIGTERM.
+      void (async () => {
+        try { await voiceBundle!.conductor.stop() } catch (e) { log(`[voice] conductor stop error: ${e}`) }
+        try { await voiceBundle!.sidecar.stop() } catch (e) { log(`[voice] sidecar stop error: ${e}`) }
+      })()
+    }
     gracefulShutdown({ sandboxDir: config.sandboxDir, db, server })
   })
 
