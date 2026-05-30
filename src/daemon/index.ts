@@ -34,6 +34,9 @@ import { TaskRunner } from './taskRunner'
 import { MemoryStore } from './memory'
 import { Voice } from './voice'
 import { bootstrapVoice } from './voice/bootstrap'
+import { startWrapApi, type WrapApiServer } from './wrapApi/server'
+import { LLMAdapter } from './wrapApi/adapters/llmAdapter'
+import { VoiceAdapter } from './wrapApi/adapters/voiceAdapter'
 import { sendMacNotification, setSandboxDir as setNotifySandboxDir } from './notify'
 import { postToDiscord, isDiscordConfigured } from './discord'
 import { buildRouter, ModelRouter } from './llm'
@@ -467,6 +470,8 @@ async function main(): Promise<void> {
 
       memoryInjector = new MemoryInjector({ l2: episodicStore, l3: semanticStore, l4: proceduralAdapter })
       ;(globalThis as { __kairosMemoryInjector?: MemoryInjector }).__kairosMemoryInjector = memoryInjector
+      // Phase E.2.0: stash episodicStore so wrap-api /v1/memory/* can reach it.
+      ;(globalThis as { __kairosEpisodicStore?: EpisodicStore }).__kairosEpisodicStore = episodicStore
       log(`C.2.6 memory subsystem active — vector-augmented recall ${localEmbedder ? 'enabled' : 'disabled (keyword-only)'}`)
       const idle = new IdleDetector()
 
@@ -1196,6 +1201,124 @@ async function main(): Promise<void> {
     log('[voice] sidecar connected, conductor running')
   }
 
+  // 10d. Wrap-API server (Phase E.2.0 — Cloud-shaped local /v1/* HTTP surface)
+  // ---------------------------------------------------------------------------
+  // Bound on KAIROS_DAEMON_PORT (default 9876). NOTE: the legacy server above
+  // also defaults to 9876 in non-sandbox mode. To avoid a port collision when
+  // running both, set KAIROS_DAEMON_PORT to a different free port (e.g. 9879)
+  // when smoke-testing this task. Phase E.2 will eventually retire the legacy
+  // server; for now we treat the wrap-api as additive.
+  //
+  // Adapters are wired to real subsystems where they exist. Subsystems that
+  // are scoped inside the proactive/memory blocks are reached via the
+  // `globalThis.__kairos*` stashes already set during their construction.
+  // When a subsystem isn't active (e.g. Composio not configured), the adapter
+  // returns a graceful "not enabled" stub.
+  const wrapApiPort = Number(process.env.KAIROS_DAEMON_PORT) || 9876
+  const llmApiKey = process.env.KAIROS_ANTHROPIC_KEY ?? process.env.ANTHROPIC_API_KEY ?? ''
+  const llmAdapter = new LLMAdapter({ apiKey: llmApiKey, defaultModel: 'claude-haiku-4-5' })
+  const voiceAdapter = voiceBundle
+    ? new VoiceAdapter({ llm: { complete: (b) => llmAdapter.complete(b) }, store: voiceBundle.conversationStore })
+    : null
+
+  const wrapApi: WrapApiServer = await startWrapApi({
+    port: wrapApiPort,
+    hostname: '127.0.0.1',
+    adapters: {
+      // /v1/llm/complete — direct Anthropic SDK (matches LLMAdapter.complete shape:
+      // { messages, system, model, max_tokens, temperature, signal }). The
+      // proactive subsystem's ModelRouter uses a different request shape
+      // (task_type + prompt), so we don't bridge to it here.
+      llm: { complete: (body) => llmAdapter.complete(body) },
+
+      // /v1/voice/chat — chat completion routed through VoiceAdapter, which
+      // handles ConversationStore history + persona system prompt. When voice
+      // is disabled, return a clear "not enabled" payload.
+      voice: voiceAdapter
+        ? { chat: (b) => voiceAdapter.chat(b), cancel: async () => voiceAdapter.cancel() }
+        : { chat: async () => ({ text: 'voice not enabled', speakId: 'spk_disabled' }), cancel: async () => {} },
+
+      // /v1/memory/* — backed by EpisodicStore.record / .recall (hybrid FTS +
+      // vector). Available only when the memory subsystem is enabled.
+      memory: {
+        append: async (b: { source?: string; text?: string }) => {
+          const store = (globalThis as { __kairosEpisodicStore?: EpisodicStore }).__kairosEpisodicStore
+          if (!store) return { error: 'memory subsystem not enabled' }
+          const id = await store.record({ source: b.source ?? 'wrap-api', text: b.text ?? '' })
+          return { id }
+        },
+        get: async (b: { query?: string; limit?: number }) => {
+          const store = (globalThis as { __kairosEpisodicStore?: EpisodicStore }).__kairosEpisodicStore
+          if (!store) return { error: 'memory subsystem not enabled', hits: [] }
+          const hits = await store.recall(b.query ?? '', b.limit ?? 8)
+          return { hits }
+        },
+      },
+
+      // /v1/orders/* — backed by OrdersStore v2. The plan's "add/list/disable"
+      // verbs map to upsert/listAll/remove on the actual store.
+      orders: {
+        add: async (b: any) => {
+          const store = (globalThis as any).__kairosOrdersV2Store
+          if (!store) return { error: 'orders subsystem not enabled' }
+          // Body is expected to be a Rule (or { rule: Rule }); accept either.
+          const rule = b?.rule ?? b
+          if (!rule || !rule.slug) return { error: 'rule.slug required' }
+          store.upsert(rule)
+          return { slug: rule.slug }
+        },
+        list: async () => {
+          const store = (globalThis as any).__kairosOrdersV2Store
+          if (!store) return []
+          return store.listAll()
+        },
+        disable: async (slug: string) => {
+          const store = (globalThis as any).__kairosOrdersV2Store
+          if (!store) return { error: 'orders subsystem not enabled' }
+          store.remove(slug)
+          return { slug, disabled: true }
+        },
+      },
+
+      // /v1/composio/* — backed by ConnectionStore (state) and ConnectionFlow
+      // (OAuth initiation). Plan's verbs adapted:
+      //   listConnections → connectionStore.listByUser('local')
+      //   connect         → connectionFlow.connect({ userId: 'local', toolkitSlug })
+      //   disconnect      → connectionStore.markStatus + remove (no disconnect on flow)
+      composio: {
+        listConnections: async () => {
+          const store = (globalThis as any).__kairosConnectionStore
+          if (!store) return []
+          return store.listByUser('local')
+        },
+        connect: async (b: { toolkit?: string; toolkitSlug?: string }) => {
+          const flow = (globalThis as any).__kairosConnectionFlow
+          if (!flow) return { error: 'composio subsystem not enabled' }
+          const toolkitSlug = b.toolkitSlug ?? b.toolkit
+          if (!toolkitSlug) return { error: 'toolkit/toolkitSlug required' }
+          return flow.connect({ userId: 'local', toolkitSlug })
+        },
+        disconnect: async (b: { toolkit?: string; toolkitSlug?: string }) => {
+          const store = (globalThis as any).__kairosConnectionStore
+          if (!store) return { error: 'composio subsystem not enabled' }
+          const toolkitSlug = b.toolkitSlug ?? b.toolkit
+          if (!toolkitSlug) return { error: 'toolkit/toolkitSlug required' }
+          store.markStatus('local', toolkitSlug, 'revoked')
+          store.remove('local', toolkitSlug)
+          return { toolkit: toolkitSlug, disconnected: true }
+        },
+      },
+
+      // /v1/settings/* — read-only snapshot of the daemon config. Update is a
+      // no-op stub (Phase E.2 doesn't yet need live settings mutation).
+      settings: {
+        get: async () => ({ ...config }),
+        update: async (_b: any) => ({ updated: [] }),
+      },
+    },
+  })
+  log(`[wrap-api] ${wrapApi.baseUrl} — /v1/* surface ready`)
+
   // 11. Write ready flag (shim watches for this)
   writeReadyFlag(config.sandboxDir)
 
@@ -1213,6 +1336,7 @@ async function main(): Promise<void> {
         try { await voiceBundle!.sidecar.stop() } catch (e) { log(`[voice] sidecar stop error: ${e}`) }
       })()
     }
+    void wrapApi.stop().catch((e) => log(`[wrap-api] stop error: ${e}`))
     gracefulShutdown({ sandboxDir: config.sandboxDir, db, server })
   })
 
