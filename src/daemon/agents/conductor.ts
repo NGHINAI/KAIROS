@@ -55,7 +55,7 @@ export class Conductor {
     }
 
     try {
-      if (signal?.aborted) return
+      if (signal?.aborted) { emit({ kind: "agent_interrupted" }); return }
 
       // 1. Classify
       const decision = await classifyIntent(utterance, { llm: this.deps.classifyLlm })
@@ -64,6 +64,7 @@ export class Conductor {
 
       // 2. Build context for the chosen tier
       const ctx = await this.deps.contextBuilder.build({ utterance, tier: decision.tier })
+      if (signal?.aborted) { emit({ kind: "agent_interrupted" }); return }
 
       // 3. Route
       if (decision.tier === "fast") {

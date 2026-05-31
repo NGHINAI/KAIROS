@@ -62,3 +62,23 @@ test("Conductor smart-path: emits agent_planning + agent_done", async () => {
   expect(kinds).toContain("agent_planning")
   expect(kinds).toContain("agent_done")
 })
+
+test("Conductor.handle respects abort signal mid-execution", async () => {
+  const events: any[] = []
+  const ctrl = new AbortController()
+  const conductor = new Conductor({
+    classifyLlm: { complete: async () => {
+      await new Promise((r) => setTimeout(r, 50))
+      return { text: JSON.stringify({ tier: "fast", reason: "chat", confidence: 0.9 }) }
+    }} as any,
+    fastLlm: { complete: async () => ({ text: "ok" }) } as any,
+    smartLlm: { complete: async () => ({ text: "" }) } as any,
+    tools: [],
+    contextBuilder: { build: async () => ({ system: "", tools: [] }) } as any,
+    onEvent: (e) => events.push(e),
+  })
+  const p = conductor.handle({ conversationId: "test", utterance: "hi", signal: ctrl.signal })
+  setTimeout(() => ctrl.abort(), 20)
+  await p
+  expect(events.some((e) => e.kind === "agent_interrupted")).toBe(true)
+})
