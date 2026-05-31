@@ -34,6 +34,7 @@ import { TaskRunner } from './taskRunner'
 import { MemoryStore } from './memory'
 import { Voice } from './voice'
 import { bootstrapVoice } from './voice/bootstrap'
+import { StreamingSpeaker } from './voice/streamingSpeaker'
 import { startWrapApi, type WrapApiServer } from './wrapApi/server'
 import { LLMAdapter } from './wrapApi/adapters/llmAdapter'
 import { VoiceAdapter } from './wrapApi/adapters/voiceAdapter'
@@ -1580,6 +1581,16 @@ async function main(): Promise<void> {
       },
     })
 
+    // E.2.4 — Wire a StreamingSpeaker on top of the existing sayBackend so the
+    // Narrator's ack/transition/filler output gets piped through the same
+    // sentence-by-sentence speaking pipeline the streaming LLM uses. Each
+    // Narrator.speak* call awaits feed + end so phrases serialize cleanly.
+    const streamingSpeaker = new StreamingSpeaker({
+      backend: voiceBundle.sayBackend,
+      voice: process.env.KAIROS_VOICE_NAME ?? 'Zoe (Premium)',
+      rate: Number(process.env.KAIROS_VOICE_RATE ?? 180),
+    })
+
     const agentConductor = new Conductor({
       classifyLlm: buildAgentLlmCompleter(agentRouter, 'classify'),
       fastLlm:     buildAgentLlmCompleter(agentRouter, 'narrative'),
@@ -1587,6 +1598,13 @@ async function main(): Promise<void> {
       tools: introspectionTools,
       contextBuilder,
       onEvent: (e: any) => wrapApi.broadcast({ event: e.kind, ...e }),
+      speakBackend: {
+        speak: async (t: string) => {
+          streamingSpeaker.feed(t)
+          await streamingSpeaker.end()
+        },
+      },
+      personaTone: process.env.KAIROS_PERSONA_TONE,
       trajWriter: {
         append: async (entry) => {
           const tw = (globalThis as any).__kairosTrajWriter
