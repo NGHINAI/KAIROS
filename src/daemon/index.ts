@@ -38,6 +38,8 @@ import { StreamingSpeaker } from './voice/streamingSpeaker'
 import { startWrapApi, type WrapApiServer } from './wrapApi/server'
 import { LLMAdapter } from './wrapApi/adapters/llmAdapter'
 import { VoiceAdapter } from './wrapApi/adapters/voiceAdapter'
+import { OpenRouterAdapter } from './wrapApi/adapters/openRouterAdapter'
+import { TIER_MODELS, type Tier } from './agents/types'
 import { sendMacNotification, setSandboxDir as setNotifySandboxDir } from './notify'
 import { postToDiscord, isDiscordConfigured } from './discord'
 import { buildRouter, ModelRouter } from './llm'
@@ -145,35 +147,32 @@ import { buildIntrospectionTools } from './agents/introspectionTools'
 import { skillsAsTools } from './agents/skillToolAdapter'
 import { ComposioToolCache, buildComposioSearchTool } from './agents/composioToolProvider'
 import { SelfHealConnect } from './agents/selfHealConnect'
-import type { CompletionRequest, TaskType, SystemBlock } from './llm/types'
+import type { SystemBlock } from './llm/types'
 
 const VERSION = '0.2.0'
 
-/** Translate the Conductor's {messages, system, max_tokens, temperature} body
- *  into a CompletionRequest for ModelRouter. The Conductor sends messages-shape
- *  bodies (one optional system message + a user message); we collapse them into
- *  system_blocks + prompt, which is what providers expect. */
+/**
+ * Build an LLM completer for the voice agent (Conductor) using OpenRouter
+ * directly per tier. Why not ModelRouter? ModelRouter in 'byo' mode tries
+ * anthropic_cli → ollama → openai-direct, none of which speak OpenRouter.
+ * For the agent path, we want the env-configured KAIROS_*_MODEL on OpenRouter.
+ *
+ * Each tier maps to its own KAIROS_*_MODEL env var (see TIER_MODELS in
+ * agents/types.ts). All share a single OpenRouterAdapter instance under the
+ * hood — model selection is per-call via the `model` body field.
+ */
 function buildAgentLlmCompleter(
-  router: ModelRouter,
-  taskType: TaskType,
+  tier: Tier,
 ): { complete: (body: any) => Promise<{ text: string }> } {
+  const model = TIER_MODELS[tier]()
+  const adapter = new OpenRouterAdapter({ defaultModel: model })
   return {
     async complete(body: any): Promise<{ text: string }> {
-      const messages = Array.isArray(body?.messages) ? body.messages : []
-      const systemMsgs = messages.filter((m: any) => m?.role === 'system').map((m: any) => String(m.content ?? ''))
-      const userMsgs = messages.filter((m: any) => m?.role === 'user').map((m: any) => String(m.content ?? ''))
-      const system_blocks: SystemBlock[] = systemMsgs
-        .filter((t: string) => t.trim().length > 0)
-        .map((text: string) => ({ text, cache_hint: 'long' as const }))
-      const prompt = userMsgs.join('\n\n')
-      const req: CompletionRequest = {
-        task_type: taskType,
-        system_blocks,
-        prompt,
-        max_output_tokens: typeof body?.max_tokens === 'number' ? body.max_tokens : undefined,
-      }
-      const result = await router.complete(req)
-      return { text: result.text }
+      return adapter.complete({
+        messages: Array.isArray(body?.messages) ? body.messages : [],
+        max_tokens: typeof body?.max_tokens === 'number' ? body.max_tokens : undefined,
+        temperature: typeof body?.temperature === 'number' ? body.temperature : undefined,
+      })
     },
   }
 }
@@ -1252,6 +1251,18 @@ async function main(): Promise<void> {
   let voiceBundle: Awaited<ReturnType<typeof bootstrapVoice>> | undefined
   if (config.withVoice) {
     log('[voice] bootstrapping voice subsystem (KAIROS_WITH_VOICE=true)')
+
+    // Pre-flight: the agent layer talks to OpenRouter directly. If the key is
+    // missing, every classify/plan/narrate call will fail. Fail-fast with a
+    // clear message instead of silent classification failures at runtime.
+    if (!process.env.OPENROUTER_API_KEY) {
+      log('✗ [voice] OPENROUTER_API_KEY is not set. Voice agent will not function.')
+      log('  Set it in .env (gitignored). The agent uses OpenRouter for all LLM calls.')
+      log('  Without it: classifier, planner, and narrator all fail silently.')
+      throw new Error('OPENROUTER_API_KEY required when KAIROS_WITH_VOICE=true')
+    }
+    log(`[voice] models — fast=${TIER_MODELS.fast()} smart=${TIER_MODELS.smart()} deep=${TIER_MODELS.deep()}`)
+
     const helperBinary = process.env.KAIROS_VOICE_HELPER
       ?? join(import.meta.dir, '..', '..', 'apps', 'macos', 'KairosVoiceHelper', '.build', 'release', 'KairosVoiceHelper')
     // ModelRouter for voice — independent of the proactive subsystem so it
@@ -1399,12 +1410,10 @@ async function main(): Promise<void> {
     // route → emit agent_* events. Phase E.2.3 / Task 3.4 swapped the stub
     // ContextBuilder for the real layered-context builder + introspection tools.
     //
-    // Note: voiceRouter is the ModelRouter from 10c. Each tier maps to a
-    // distinct task_type so the router can pick an appropriate provider/model.
-    // Conductor sends {messages, max_tokens} bodies — buildAgentLlmCompleter
-    // translates each into a CompletionRequest the router can handle.
-    const voiceRouterForAgent = (voiceBundle as any).__voiceRouter as ModelRouter | undefined
-    const agentRouter = voiceRouterForAgent ?? buildRouter(db, config.proactive.providerConfigPath, config.mode ?? 'byo')
+    // The agent LLM completer talks to OpenRouter directly (per-tier model
+    // from KAIROS_*_MODEL env vars). ModelRouter is not used here because it
+    // doesn't have an OpenRouter provider — its BYO mode tries claude CLI →
+    // ollama → openai-direct, none of which respect our agent model choices.
 
     // SoulDigestLoader: reads ~/.kairos/soul.md (or KAIROS_SOUL_PATH override).
     const soulLoader = new SoulDigestLoader({
@@ -1694,9 +1703,9 @@ async function main(): Promise<void> {
     ;(globalThis as any).__kairosComposioToolCache = composioCache
 
     const agentConductor = new Conductor({
-      classifyLlm: buildAgentLlmCompleter(agentRouter, 'classify'),
-      fastLlm:     buildAgentLlmCompleter(agentRouter, 'narrative'),
-      smartLlm:    buildAgentLlmCompleter(agentRouter, 'action_compose'),
+      classifyLlm: buildAgentLlmCompleter('fast'),
+      fastLlm:     buildAgentLlmCompleter('fast'),
+      smartLlm:    buildAgentLlmCompleter('smart'),
       tools: [...introspectionTools, composioSearchTool, ...composioCache.asTools()],
       contextBuilder,
       onEvent: (e: any) => wrapApi.broadcast({ event: e.kind, ...e }),
@@ -1740,14 +1749,27 @@ async function main(): Promise<void> {
 
     let activeConductorController: AbortController | undefined
 
-    voiceBundle.conductor.setUserUtteranceHandler(async (utterance, conversationId) => {
-      // Cancel any in-flight turn first
+    const handleUtterance = async (utterance: string, conversationId: string): Promise<void> => {
       activeConductorController?.abort()
       activeConductorController = new AbortController()
       try {
         await agentConductor.handle({ utterance, conversationId, signal: activeConductorController.signal })
       } finally {
         activeConductorController = undefined
+      }
+    }
+
+    voiceBundle.conductor.setUserUtteranceHandler(handleUtterance)
+
+    // Allow WS clients (or scripts/agent-ping.ts) to inject a synthetic
+    // utterance — runs the FULL agent loop and emits events the same way as
+    // a real STT result would. This is the primary defense against silent
+    // classifier failures (the issue that hit Phase E.2 v0.7.0): you can
+    // smoke-test the agent without touching the mic.
+    wrapApi.onCommand((cmd: any) => {
+      if (cmd?.cmd === 'test_inject_utterance' && typeof cmd.text === 'string') {
+        const cid = String(cmd.conversationId ?? 'test-' + Date.now())
+        void handleUtterance(cmd.text, cid)
       }
     })
 
