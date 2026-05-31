@@ -143,6 +143,8 @@ import { ContextBuilder } from './agents/contextBuilder'
 import { SoulDigestLoader } from './agents/loaders/soulDigestLoader'
 import { buildIntrospectionTools } from './agents/introspectionTools'
 import { skillsAsTools } from './agents/skillToolAdapter'
+import { ComposioToolCache, buildComposioSearchTool } from './agents/composioToolProvider'
+import { SelfHealConnect } from './agents/selfHealConnect'
 import type { CompletionRequest, TaskType, SystemBlock } from './llm/types'
 
 const VERSION = '0.2.0'
@@ -1591,11 +1593,111 @@ async function main(): Promise<void> {
       rate: Number(process.env.KAIROS_VOICE_RATE ?? 180),
     })
 
+    // E.2.5 — Dynamic Composio + self-healing connect
+    // composioSearchTool is a meta-tool the LLM calls when it needs a toolkit
+    // not already in its tool list. SelfHealConnect handles the OAuth flow
+    // when a tool call fails with NOT_CONNECTED.
+    const composioCache = new ComposioToolCache()
+
+    const composioClient = (globalThis as any).__kairosComposioClient
+    const actionDispatcher = (globalThis as any).__kairosActionDispatcher
+    const connectionFlow = (globalThis as any).__kairosConnectionFlow
+    const connectionStore = (globalThis as any).__kairosConnectionStore
+
+    const composioSearchTool = buildComposioSearchTool({
+      composio: {
+        searchTools: async (q: string, limit: number) => {
+          if (!composioClient) return []
+          try {
+            // ComposioClient exposes the SDK directly; use its native tool search.
+            // Prefer searchTools/listTools on the SDK if present; otherwise enumerate
+            // via getRawComposioTools and filter client-side by description match.
+            const sdk = composioClient.sdk
+            if (sdk?.tools?.search && typeof sdk.tools.search === 'function') {
+              const r = await sdk.tools.search({ query: q, limit })
+              const items: any[] = Array.isArray(r) ? r : (r?.items ?? [])
+              return items.slice(0, limit).map((t: any) => ({
+                slug: t.slug ?? t.name,
+                description: t.description ?? '',
+                parameters: t.inputParameters ?? t.input_parameters ?? t.inputSchema,
+                toolkit: t.toolkit?.slug ?? t.toolkit_slug,
+              }))
+            }
+            if (sdk?.tools?.getRawComposioTools && typeof sdk.tools.getRawComposioTools === 'function') {
+              const r: any = await sdk.tools.getRawComposioTools({ limit: 500 })
+              const items: any[] = Array.isArray(r) ? r : (r?.items ?? [])
+              const ql = q.toLowerCase()
+              return items
+                .filter((t: any) => {
+                  const slug = String(t.slug ?? t.name ?? '').toLowerCase()
+                  const desc = String(t.description ?? '').toLowerCase()
+                  const tk = String(t.toolkit?.slug ?? t.toolkit_slug ?? '').toLowerCase()
+                  return slug.includes(ql) || desc.includes(ql) || tk.includes(ql)
+                })
+                .slice(0, limit)
+                .map((t: any) => ({
+                  slug: t.slug ?? t.name,
+                  description: t.description ?? '',
+                  parameters: t.inputParameters ?? t.input_parameters ?? t.inputSchema,
+                  toolkit: t.toolkit?.slug ?? t.toolkit_slug,
+                }))
+            }
+            return []
+          } catch { return [] }
+        },
+        executeTool: async (slug: string, args: any) => {
+          if (!composioClient) return { error: 'no composio client' }
+          try {
+            // ComposioClient.executeTool takes { toolName, userId, arguments }
+            if (typeof composioClient.executeTool === 'function') {
+              return composioClient.executeTool({ toolName: slug, userId: 'local', arguments: args ?? {} })
+            }
+            if (actionDispatcher && typeof actionDispatcher.dispatch === 'function') {
+              return actionDispatcher.dispatch(slug, args)
+            }
+            return { error: 'no executor' }
+          } catch (e) { return { error: (e as Error).message } }
+        },
+      } as any,
+      cache: composioCache,
+    })
+
+    const selfHeal = new SelfHealConnect({
+      composio: {
+        initiateConnection: async ({ toolkit }) => {
+          if (!connectionFlow) throw new Error('connectionFlow not available')
+          if (typeof connectionFlow.connect === 'function') {
+            const r = await connectionFlow.connect({ userId: 'local', toolkitSlug: toolkit })
+            return {
+              connection_id: (r as any).connection_id ?? (r as any).id,
+              redirect_url: (r as any).redirect_url ?? (r as any).redirectUrl ?? '',
+            }
+          }
+          throw new Error('no connect method on connectionFlow')
+        },
+        getConnection: async (id) => {
+          if (!connectionStore) return { status: 'FAILED' }
+          try {
+            if (typeof connectionStore.get === 'function') return connectionStore.get(id)
+            if (typeof connectionStore.findById === 'function') return connectionStore.findById(id)
+            const all = typeof connectionStore.listByUser === 'function' ? connectionStore.listByUser('local') : []
+            return all.find((c: any) => c.id === id || c.connection_id === id) ?? { status: 'PENDING' }
+          } catch { return { status: 'FAILED' } }
+        },
+      },
+      pollIntervalMs: 2000,
+      maxWaitMs: 120_000,
+    })
+
+    // Stash for future inline-on-error wiring at the action-dispatch layer
+    ;(globalThis as any).__kairosSelfHealConnect = selfHeal
+    ;(globalThis as any).__kairosComposioToolCache = composioCache
+
     const agentConductor = new Conductor({
       classifyLlm: buildAgentLlmCompleter(agentRouter, 'classify'),
       fastLlm:     buildAgentLlmCompleter(agentRouter, 'narrative'),
       smartLlm:    buildAgentLlmCompleter(agentRouter, 'action_compose'),
-      tools: introspectionTools,
+      tools: [...introspectionTools, composioSearchTool, ...composioCache.asTools()],
       contextBuilder,
       onEvent: (e: any) => wrapApi.broadcast({ event: e.kind, ...e }),
       speakBackend: {
