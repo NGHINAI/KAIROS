@@ -1738,9 +1738,31 @@ async function main(): Promise<void> {
       },
     })
 
+    let activeConductorController: AbortController | undefined
+
     voiceBundle.conductor.setUserUtteranceHandler(async (utterance, conversationId) => {
-      await agentConductor.handle({ utterance, conversationId })
+      // Cancel any in-flight turn first
+      activeConductorController?.abort()
+      activeConductorController = new AbortController()
+      try {
+        await agentConductor.handle({ utterance, conversationId, signal: activeConductorController.signal })
+      } finally {
+        activeConductorController = undefined
+      }
     })
+
+    // Listen for barge_in events from sidecar → abort active conductor turn + stop TTS.
+    voiceBundle.sidecar.onEvent((e: any) => {
+      if (e.event === 'barge_in_detected' || e.event === 'barge_in' || e.event === 'vad_speech_during_tts') {
+        if (activeConductorController) {
+          log('[barge-in] aborting active conductor turn')
+          activeConductorController.abort()
+        }
+        try { voiceBundle!.sayBackend.stop() } catch {}
+        wrapApi.broadcast({ event: 'agent_interrupted' })
+      }
+    })
+
     log('[voice] agent conductor wired into VoiceConductor utterance handler')
   }
 
