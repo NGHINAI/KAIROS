@@ -5,7 +5,7 @@
 // are silently skipped (not counted as failures).
 
 import { logError } from '../logger'
-import { defaultCandidates, tierForTask, type Candidate } from './policy'
+import { tierForTask, type Candidate } from './policy'
 import { CostTracker } from './costTracker'
 import type {
   CompletionRequest, CompletionResult, LLMProvider, ProviderId, TaskType, Tier,
@@ -20,17 +20,25 @@ type ModePrefs = Record<Tier, Candidate[]>
 
 const MODE_PREFS: Record<KairosMode, ModePrefs> = {
   byo: {
+    // OpenRouter is FIRST in every tier: when OPENROUTER_API_KEY is set we
+    // route every BYO LLM call through it (perception/Tier1, Tier2, dreamer,
+    // crystallizer). When unset, OpenRouter.isConfigured() returns false and
+    // the router silently falls through to whatever the user has configured
+    // (anthropic_cli / ollama / openai-direct).
     ultra_cheap: [
+      { provider: 'openrouter',    model: process.env.KAIROS_FAST_MODEL  ?? 'openai/gpt-4o-mini' },
       { provider: 'anthropic_cli', model: 'claude-haiku-4-5-20251001' },
       { provider: 'ollama',        model: 'qwen3:8b' },
       { provider: 'openai',        model: 'gpt-4o-mini' },
     ],
     mid: [
+      { provider: 'openrouter',    model: process.env.KAIROS_SMART_MODEL ?? 'moonshotai/kimi-k2' },
       { provider: 'anthropic_cli', model: 'claude-sonnet-4-6' },
       { provider: 'codex_cli',     model: 'gpt-4o' },
       { provider: 'openai',        model: 'gpt-4o-mini' },
     ],
     heavy: [
+      { provider: 'openrouter',    model: process.env.KAIROS_DEEP_MODEL  ?? 'moonshotai/kimi-k2-thinking' },
       { provider: 'anthropic_cli', model: 'claude-opus-4-7' },
       { provider: 'codex_cli',     model: 'o1' },
       { provider: 'anthropic_api', model: 'claude-sonnet-4-6' },
@@ -83,9 +91,14 @@ export class ModelRouter {
     this.providers = opts.providers
     this.tracker = opts.tracker
     this.mode = opts.mode ?? 'byo'
-    // If a custom candidates fn is supplied AND no mode override, use it as-is.
-    // When mode is explicitly set (or candidates not supplied), build from MODE_PREFS.
-    this.candidatesFn = opts.candidates ?? defaultCandidates
+    // Tests inject `candidates` directly; production uses MODE_PREFS for the
+    // active mode. This is the load-bearing fix: previously the production
+    // path fell back to `defaultCandidates` (policy.ts) which did NOT include
+    // openrouter and ignored mode entirely — meaning every BYO call site
+    // tried claude_cli → ollama → openai-direct, none of which speak
+    // OpenRouter. With MODE_PREFS hooked into complete(), the byo table's
+    // openrouter entries are tried first.
+    this.candidatesFn = opts.candidates ?? ((t: TaskType) => MODE_PREFS[this.mode][tierForTask(t)].slice())
   }
 
   /** Synchronously pick the first available (provider, model) for a task.

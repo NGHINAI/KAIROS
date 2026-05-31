@@ -14,6 +14,7 @@ export function defaultProviderConfig(): RouterConfig {
       gemini:        empty({ api_key_env: 'GEMINI_API_KEY' }),
       kimi:          empty({ api_key_env: 'MOONSHOT_API_KEY', base_url: 'https://api.moonshot.ai/v1' }),
       ollama:        empty({ base_url: 'http://localhost:11434/v1' }),
+      openrouter:    empty({ enabled: true, api_key_env: 'OPENROUTER_API_KEY' }),
     },
     default_policy: 'cost_optimized',
     monthly_budget_usd: 50,

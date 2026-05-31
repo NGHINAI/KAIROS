@@ -74,6 +74,20 @@ const DEMOS: Demo[] = [
     const missing = required.filter((sym) => !code.includes(sym))
     return { pass: missing.length === 0, note: missing.length ? `missing imports: ${missing.join(", ")}` : "all wired" }
   }},
+
+  // LLM smoke gate — exercises every ModelRouter call site (Tier1/Tier2/dreamer/
+  // crystallizer) + agent OpenRouterAdapter (fast/smart). Catches "providers
+  // not actually wired" before the gate declares v0.7.0 healthy.
+  { id: 18, name: "All LLM call sites wired (smoke-all-llm)", mode: "AUTO", check: async () => {
+    if (!process.env.OPENROUTER_API_KEY) {
+      return { pass: false, note: "OPENROUTER_API_KEY not set — smoke gate cannot run" }
+    }
+    const proc = spawn({ cmd: ["bun", "scripts/smoke-all-llm.ts"], stdout: "pipe", stderr: "pipe" })
+    const out = await new Response(proc.stdout).text()
+    const code = await proc.exited
+    const summary = out.trim().split("\n").slice(-4).join(" | ")
+    return { pass: code === 0, note: summary }
+  }},
 ]
 
 async function main(): Promise<void> {

@@ -53,6 +53,15 @@ export class CostTracker {
     private monthlyBudgetUsd: number,
   ) {
     db.exec(SCHEMA)
+    // Idempotent migration: pre-cache-tracking DBs were created without
+    // cached_input_tokens / cache_creation_tokens. CREATE TABLE IF NOT EXISTS
+    // does not add columns to an already-existing table, so we add them
+    // explicitly. Errors are swallowed (most likely "duplicate column").
+    for (const col of ['cached_input_tokens', 'cache_creation_tokens']) {
+      try {
+        db.exec(`ALTER TABLE llm_call_log ADD COLUMN ${col} INTEGER NOT NULL DEFAULT 0`)
+      } catch { /* column already exists */ }
+    }
   }
 
   record(r: CostRecord): void {
