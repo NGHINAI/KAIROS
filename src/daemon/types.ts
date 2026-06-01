@@ -76,6 +76,8 @@ export type Config = {
     enabled: boolean
     configPath: string   // ~/.kairos/restraint-config.json
   }
+  withVoice: boolean  // KAIROS_WITH_VOICE — embed voice into the main daemon
+  autonomousEnabled: boolean  // KAIROS_AUTONOMOUS_ENABLED — run the background tick loop (proactive spend)
   mode?: 'byo' | 'hosted' | 'local'
   embedding?: {
     enabled?: boolean

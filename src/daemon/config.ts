@@ -5,13 +5,27 @@ import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import type { Config } from './types'
 
+/** Parse an env var as an integer, falling back to `def` when unset/invalid. */
+function envInt(name: string, def: number): number {
+  const raw = process.env[name]
+  if (raw === undefined || raw === '') return def
+  const n = parseInt(raw, 10)
+  return Number.isFinite(n) ? n : def
+}
+
 const DEFAULTS: Config = {
   sandboxDir: process.cwd(),
   isSandbox: false,
   verbose: false,
-  port: 9876,
+  // Legacy daemon HTTP server port. Was 9876 historically but that's now reserved
+  // for the wrap-API on KAIROS_DAEMON_PORT (Electron WS hardcodes 9876). When
+  // KAIROS_WITH_VOICE=true the wrap-api binds 9876, so the legacy server has to
+  // live elsewhere; 8765 picked as a free, memorable default.
+  port: 8765,
   tick: {
-    defaultIntervalMs: 60_000,
+    // Autonomous scheduler tick — how often the daemon wakes to evaluate whether
+    // to act proactively. Env: KAIROS_TICK_INTERVAL_MS (default 60s).
+    defaultIntervalMs: envInt('KAIROS_TICK_INTERVAL_MS', 60_000),
     minSleepMs: 30_000,
     maxSleepMs: 1_800_000,
   },
@@ -52,12 +66,23 @@ const DEFAULTS: Config = {
     metricsWindowHours: 168,
   },
   proactive: {
-    enabled: true,
+    // The autonomous "co-worker" brain (tick decisions + narrator + observers).
+    // Set KAIROS_PROACTIVE_ENABLED=false to run a pure on-demand agent with NO
+    // background LLM calls (voice still works). Narrator cadence via env.
+    enabled: process.env.KAIROS_PROACTIVE_ENABLED !== 'false',
+    // NOTE: the standalone narrator timer is dormant — the perception pipeline
+    // drives narrator.tick() instead, so narrator cadence == KAIROS_PERCEPTION_POLL_MS.
+    // This default is kept only as the Narrator's fallback if ever run standalone.
     narratorIntervalMs: 5 * 60_000,
     providerConfigPath: join(process.env.HOME ?? '', '.kairos', 'providers.json'),
   },
-  memory: { enabled: true, dreamIntervalMs: 30 * 60_000 },
-  perception: { enabled: true, pipelinePollMs: 30_000 },
+  memory: { enabled: true, dreamIntervalMs: envInt('KAIROS_DREAM_INTERVAL_MS', 30 * 60_000) },
+  perception: {
+    // Observes world-state events (git, files, etc.) and classifies them via LLM.
+    // Disable or slow the poll to cut background calls. Env-driven.
+    enabled: process.env.KAIROS_PERCEPTION_ENABLED !== 'false',
+    pipelinePollMs: envInt('KAIROS_PERCEPTION_POLL_MS', 30_000),
+  },
   orders: { enabled: true, filePath: join(process.env.HOME ?? '', '.kairos', 'STANDING_ORDERS.md') },
   agency: {
     enabled: true,
@@ -73,6 +98,11 @@ const DEFAULTS: Config = {
     enabled: true,
     configPath: join(process.env.HOME ?? '', '.kairos', 'restraint-config.json'),
   },
+  withVoice: false,
+  // Background autonomous tick loop (proactive decisions every KAIROS_TICK_INTERVAL_MS).
+  // The main source of idle LLM spend. Set false for a pure on-demand agent —
+  // voice, memory, and persona all keep working; only the periodic ticking stops.
+  autonomousEnabled: process.env.KAIROS_AUTONOMOUS_ENABLED !== 'false',
   mode: (process.env.KAIROS_MODE as 'byo' | 'hosted' | 'local' | undefined) ?? 'byo',
   embedding: {
     enabled: process.env.KAIROS_EMBED_ENABLED === 'false' ? false : true,
@@ -156,7 +186,11 @@ function deepMerge<T extends Record<string, unknown>>(base: T, overrides: Partia
   return result
 }
 
-export function loadConfig(sandboxDir: string, isSandbox: boolean, verbose: boolean): Config {
+export function loadConfig(
+  sandboxDir: string = process.cwd(),
+  isSandbox: boolean = false,
+  verbose: boolean = false,
+): Config {
   let config: Config = { ...DEFAULTS, sandboxDir, verbose }
 
   if (isSandbox) {
@@ -179,6 +213,10 @@ export function loadConfig(sandboxDir: string, isSandbox: boolean, verbose: bool
   config.sandboxDir = sandboxDir
   config.isSandbox = isSandbox
   config.verbose = verbose || isSandbox
+
+  // Env-flag overrides
+  const withVoice = (process.env.KAIROS_WITH_VOICE ?? 'false').toLowerCase() === 'true'
+  config.withVoice = withVoice
 
   return config
 }

@@ -18,11 +18,13 @@
     "@google/genai": "^2.6.0",
     "@huggingface/transformers": "^3",
     "@modelcontextprotocol/sdk": "^1.0.4",
+    "@openai/agents": "^0.11.6",
     "fastembed": "^2.1.0",
     "googleapis": "^171.4.0",
     "openai": "^6.39.0",
     "pusher-js": "^8.5.0",
-    "yaml": "^2.9.0"
+    "yaml": "^2.9.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/bun": "latest"

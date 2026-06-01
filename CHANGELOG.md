@@ -1,3 +1,260 @@
+## [v0.6.0-alpha] - 2026-05-29
+
+**Phase E.1 voice — Bun side complete, Swift sidecar source written, end-to-end demo audible.**
+
+KAIROS now has a voice. Push-to-talk hotkey, real Claude Haiku 4.5 responses, audible Apple "Ava Enhanced" TTS through Mac speakers — all via the new in-process `/v1/*` wrap-API that swaps to KAIROS Cloud later with one config flip.
+
+### Added — Bun side (fully built, tested, working)
+
+- **`src/daemon/voice/sayBackend.ts`** — Stage-0 TTS via macOS `say` command. Proves the audio pipeline today. Pluggable for the Swift sidecar when built.
+- **`src/daemon/voice/conversationStore.ts`** — SQLite turn history. Persona-aware LLM responses use this for context.
+- **`src/daemon/voice/sidecarSimulator.ts`** — In-process mock of the Swift sidecar. Same JSON protocol. All tests use it.
+- **`src/daemon/voice/voiceConductor.ts`** — Main orchestrator. Subscribes to sidecar events, routes to wrap-API, hands responses to speakBackend, publishes voice events to perception bus for memory consolidation.
+- **`src/daemon/voice/types.ts`** — Single source of truth for `VoiceEvent`, `SidecarCmd`, `SidecarEvent` shapes.
+- **`src/daemon/wrapApi/server.ts`** — In-process Bun HTTP server on 127.0.0.1:9876 hosting `/v1/health`, `/v1/llm/complete`, `/v1/voice/chat`, `/v1/voice/cancel`, `/v1/memory/*`, `/v1/orders/*`, `/v1/composio/*`, `/v1/settings/*`. Migration to api.kairos.ai later = base-URL config flip.
+- **`src/daemon/wrapApi/adapters/llmAdapter.ts`** — Anthropic SDK wrap (Claude Haiku 4.5 default). Only file that knows we're using Claude — everything else calls /v1/llm/complete.
+- **`src/daemon/wrapApi/adapters/voiceAdapter.ts`** — `/v1/voice/chat` orchestration: persona-aware system prompt + recent turn history → LLM → response + speakId.
+- **`scripts/voice-demo.ts`** — End-to-end audible demo. Real LLM call. Real audio.
+- **`scripts/validate-phase-e1.ts`** — 22-assertion validation gate.
+
+### Added — Swift sidecar source (ready to xcodebuild)
+
+- **`apps/macos/KairosVoiceHelper/`** — Complete Swift source for the audio sidecar.
+  - `Package.swift`, `main.swift`
+  - `SidecarProtocol.swift` — UDS + JSON-line protocol matching the SidecarSimulator byte-for-byte
+  - `AudioEngine.swift` — AVAudioEngine + VoiceProcessingIO (FaceTime-grade echo cancellation)
+  - `SpeechRecognizer.swift` — SFSpeechRecognizer (Sequoia 15+) wrapper
+  - `SpeechSynthesizer.swift` — AVSpeechSynthesizer wrapper, voice picker, finish/cancel events
+  - `SileroVAD.swift` — CoreML wrapper (ANE-accelerated) for barge-in detection
+  - `BargeInDetector.swift` — VAD-during-TTS coordination
+  - `HotKeyManager.swift` — CGEventTap on flagsChanged for global push-to-talk
+  - `BUILD.md` — xcodebuild + signing + LaunchAgent installation instructions
+
+### Live-verified end-to-end
+
+`bun scripts/voice-demo.ts` with `ANTHROPIC_API_KEY` set produced:
+
+```
+[bus] voice.hotkey.down + voice.user.utterance
+  → wrap-API /v1/voice/chat (real Claude Haiku 4.5 call, ~1s)
+  → voice.agent.utterance: "Hey there! I'm KAIROS, your AI co-worker
+     who's here to help you think through problems, get stuff done,
+     and make your work day better."
+  → Mac speakers spoke the response with "Ava (Enhanced)"
+```
+
+### Architecture decisions
+
+- **No BYOK** — KAIROS provides everything. Embedded LLM key for pre-Cloud private use.
+- **In-process wrap-API** — Cloud-shaped local contract. Migration is base-URL flip.
+- **Voice-only configuration** — No dashboard. KAIROS modifies itself via /v1/* endpoints.
+- **Stage-0 SayBackend** — Audio works today without xcodebuild + TCC + Apple Developer cert.
+- **SidecarSimulator + Swift sidecar share identical JSON protocol** — Real sidecar drops in with no daemon code change.
+
+### Regression
+
+- Phase E.1 gate: **22/22 PASS**
+- Phase D gate: **20/20 PASS** (no regression)
+- Full suite: **831 pass** + 2 pre-existing `fs.watch` flakes (unchanged from v0.5.4)
+- New tests: 51 across 7 voice + wrap-API files
+
+### Deferred to v0.6.x
+
+- Swift sidecar build pipeline (Xcode + signing + LaunchAgent install)
+- Onboarding voice state machine (TCC prompts + conversational persona builder)
+- 15-min check-in proactive scheduler
+- Conversational settings change endpoints (wired in adapters but not yet voice-discoverable)
+- Memory perception bus → trajectory log integration (publish points are in; consumer side is existing C.3.1)
+
+### Tag
+
+`v0.6.0-alpha` — Phase E.1 audible end-to-end via stage-0 path.
+
+---
+
+## [v0.5.4] - 2026-05-29
+
+**Phase D unconnected-toolkit handling in authoring.**
+
+v0.5.3 grounded `OrdersAuthor` in connected-toolkit schemas — but said nothing about toolkits the user hasn't authed yet. So if you said "post to Slack every morning" and Slack wasn't connected, the LLM would either hallucinate or refuse. Fixed.
+
+### Fixed
+
+- **`OrdersAuthor` prompt now also lists AVAILABLE-but-unconnected toolkits** (toolkit slugs only, no tool details — keeps prompt small). Explicit guidance: *"If the user's request needs an unconnected toolkit, STILL propose the rule. KAIROS will (1) request OAuth, (2) resolve the canonical tool slug, (3) activate the rule."* Anti-refusal nudge.
+- **Post-LLM `composio_tool` action gate** — after the LLM proposes a rule, `OrdersAuthor` scans `do[]` for `composio_tool` actions whose toolkit isn't in `getConnectedToolkits()`. For each unconnected toolkit, it invokes `ConnectGuard.ensureConnected(toolkit, rule.slug)` to kick off OAuth. If any return `pending`, the rule is saved with `state: 'pending_connection'` — the same pattern the trigger path uses at `author.ts:200-210`.
+- **Dedupe across multiple actions** — if a rule's `do[]` references the same toolkit twice (or three Slack actions), `ConnectGuard` is only called once per toolkit. Parallel-safe.
+- **Connected toolkits short-circuit** — if a `composio_tool` action references a toolkit the user has already authed, `ConnectGuard` is NOT invoked. No needless OAuth round-trip.
+
+### Added
+
+- `ComposioToolResolver.listAllToolkits()` — returns all toolkit slugs that have at least one action tool in the catalog. Used by the prompt to enumerate available-but-unconnected toolkits.
+- 4 new author tests:
+  1. Prompt lists AVAILABLE-but-unconnected toolkits + OAuth guidance
+  2. Unconnected-toolkit action → ConnectGuard fired → rule `pending_connection`
+  3. Connected-toolkit action → ConnectGuard skipped → rule normal `dry_run`
+  4. Multi-action rule dedupes ConnectGuard calls per unique toolkit
+
+### Verified-not-hardcoded
+
+Audited production code for hardcoded toolkit-specific logic. Zero hits in the execution stack (`composioClient`, `composioToolResolver`, `actionDispatcher`, `triggerNormalizer`). The only literal toolkit names in production code are:
+- Intent-matcher synonym aliases (Discord bot keyword parsing — user-input layer, not Composio-exec layer)
+- Example text in comments/prompts (illustrative only)
+
+The system is fully generalized: any toolkit Composio adds to its catalog becomes available without code changes.
+
+### Regression
+
+- Triggers subtree: 59/59
+- Resolver subtree: 11/11
+- Author subtree: 19/19 (4 new)
+- Phase D gate: 20/20 PASS
+- Full suite: 781 pass + 1 pre-existing fs.watch flake
+
+### Tag
+
+`v0.5.4` — Phase D authoring handles unconnected toolkits end-to-end.
+
+---
+
+## [v0.5.3] - 2026-05-29
+
+**Phase D round-trip closed end-to-end + three production bugs fixed + authoring path grounded in real schemas.**
+
+Live-verified the full proactive loop: Google Calendar event → Composio Pusher → KAIROS reactive stack → real Gmail send via `composio.executeTool`. Email arrived in the inbox. The verification surfaced three production bugs and one architecture gap.
+
+### Fixed — execution path
+
+- **`composioClient.executeTool` wrong call signature** — was calling `sdk.tools.execute({ toolName, userId, arguments })` (single-object form), but the @composio/core@0.10.0 public signature is positional `execute(slug, body, modifiers)`. The object-form silently passed an object as `slug`, so EVERY composio_tool action would fail at the first call. Unreached before today because no daemon-driven action had been observed live. Now uses the positional signature with `dangerouslySkipVersionCheck: true`.
+- **`TOOL_VERSION_REQUIRED` blocker** — Composio's manual tool execute path requires a toolkit version; `"latest"` is rejected. Without the `dangerouslySkipVersionCheck` flag, every action throws. Wrapper now passes the flag; rationale documented inline (KAIROS rules implicitly target latest by design).
+- **`ComposioToolResolver.refresh()` called non-existent method** — used `sdk.tools.list()` (doesn't exist on @composio/core@0.10.0; correct method is `getRawComposioTools`). Resolver was never live-exercised before today's round-trip. Also fixed: descriptor's canonical identifier is `slug` not `name` (the previous code read the human-readable name and would have produced unusable mappings even after fixing the method name). Defensively handles both bare-array and `{items}` response shapes.
+
+### Fixed — authoring path (the gap you flagged)
+
+The LLM authoring rules via `OrdersAuthor` was previously blind to Composio action tools. It knew about triggers (incoming events) but had to GUESS at action tool names and arg shapes when generating `composio_tool` actions — producing rules that would fail at execute time with "could not resolve composio tool" or unknown-argument errors.
+
+- **`ComposioToolResolver` extended to cache full descriptors** (slug, friendly name, description, input parameter schema, toolkit), not just the alias map. New public methods: `getDescriptor(canonicalSlug)`, `listToolsForToolkit(toolkit)`. Cache file format bumped: `{ aliases, descriptors }`. Old-shape caches (`{ entries }`) force a refresh.
+- **`OrdersAuthor.buildSystemPrompt()` now enumerates action tools per CONNECTED toolkit** with their required arg lists, e.g.:
+  ```
+  Available Composio action tools:
+    gmail:
+      - send_email: required=[recipient_email, subject, body] — Send an email
+      - create_draft: required=[recipient_email, subject] — Draft
+    googlecalendar:
+      - create_event: required=[calendar_id, summary, start_time, end_time]
+  ```
+  Plus anti-hallucination guidance: "Do NOT invent tool names. Do NOT invent argument names."
+- **`OrdersAuthor` accepts `getConnectedToolkits` callback** so the prompt reflects current OAuth state at authoring time (not at daemon-boot time). Daemon wires it to `ConnectionStore`.
+- **Per-toolkit tool cap** (`toolsPerToolkitCap`, default 25) — prevents prompt bloat when a toolkit has 100+ tools.
+
+### Live-verified round-trip
+
+Real Calendar event `1j1r2lac56srpip3ss4rm2kv7c` (added 2026-05-29 18:30 CDT) flowed:
+```
+Pusher V3 envelope (chunked) → TriggerNormalizer V3-decode
+  → perception bus → ReactiveEvaluator (rule matched, organizer condition passed)
+    → ActionDispatcher → composio.executeTool('GMAIL_SEND_EMAIL', ...)
+      → Gmail send → email arrived (id=19e75e50e7215d63, successful=true)
+```
+
+### Added
+
+- `scripts/live-test-phase-d-roundtrip.ts` — full reactive round-trip live test with hard guard rails (`KAIROS_LIVE_APPROVE=yes` required for real send, `MAX_ACTIONS`, `COOLDOWN_SEC`, `DURATION_MIN` caps). Default: dry-run.
+- New tests: `composioClient.executeTool` signature lockdown (positional + dangerouslySkipVersionCheck flag), 3 new resolver tests (descriptor cache shape, `listToolsForToolkit`, old-cache-forces-refresh), 2 new author tests (action-tool prompt assembly, empty-toolkits short-circuit).
+
+### Architecture clarification
+
+KAIROS uses TWO Composio paths intentionally:
+1. **MCP path** (`McpHost`, `HttpMcpClient`) — for the LLM agent. LLM sees tool definitions via MCP protocol, decides which tool to call, MCP server brokers execution. Used in chat/agency mode (Phase C.2.7).
+2. **Direct path** (`composio.executeTool` → `sdk.tools.execute`) — for STANDING_ORDERS rules. The rule already declares exactly which tool with exactly which args; no LLM in the loop at execute time, so no MCP needed. The LLM's involvement is at AUTHORING time only — and `OrdersAuthor` now grounds it in real Composio schemas.
+
+### Regression
+
+- Triggers subtree: 59/59
+- Resolver + author subtree: 27/27 (5 new tests)
+- ComposioClient subtree: 4/4 (1 new test)
+- Phase D gate: 20/20 PASS
+- Full suite: 776 pass + 2 pre-existing `fs.watch` flakes (SkillRegistry, FileEventsObserver) — unchanged from v0.5.2 baseline
+
+### Tag
+
+`v0.5.3` — Phase D end-to-end live-verified.
+
+---
+
+## [v0.5.2] - 2026-05-29
+
+**Phase D accuracy audit — two grounded-against-SDK fixes.**
+
+Audited every protocol-level claim in our Composio integration against `@composio/core@0.10.0` source and Composio's public docs. Verdict: byte-for-byte canonical on every wire-level concern. Found two real bugs the audit-vs-code comparison surfaced.
+
+### Fixed
+
+- **`TriggerInstanceManager.reconcile()` field name** — Composio's `listActive()` returns items with `id` per `TriggerInstanceListActiveResponseItemSchema`, not `triggerId` or `trigger_id`. v0.5.1 read the wrong field, which would classify ALL remote triggers as orphans and attempt to delete them on every reconcile. Silent and data-destructive — only unreached because test scripts always teardown before reconcile runs. Fixed to `r.id ?? r.triggerId ?? r.trigger_id` with the canonical field first. Added a test using the real schema shape to lock it in.
+- **Toolkit derivation latent bug for multi-token toolkits** — V1/V2/V3 envelopes do NOT carry a `toolkit_slug` field (confirmed against `WebhookTriggerPayloadV3Schema`). Composio's own SDK derives toolkit via `slug.split('_')[0]`, which fails for multi-token toolkits like `MICROSOFT_TEAMS`, `GOOGLE_CHAT`, `GOOGLE_MEET`, `GOOGLE_PHOTOS`, `GOOGLE_MAPS`, `GOOGLE_CLASSROOM`, `GOOGLE_CLOUD_VISION`, `GOOGLE_SEARCH_CONSOLE`. Currently unreached (none of these ship triggers as of audit), but a latent footgun. `TriggerNormalizer` now accepts an authoritative `ToolkitLookup` (wired to `TriggerSchemaCache.getType().toolkit` — the canonical-at-API source). Falls back to the split heuristic on cache miss (cold start).
+
+### Audit-confirmed correct (no change needed)
+
+- Pusher channel name: `private-{projectId}_triggers` — matches SDK `pusherChannel` exactly
+- Credentials endpoint: `/api/v3/internal/sdk/realtime/credentials` with `x-api-key` header
+- Auth endpoint: `/api/v3/internal/sdk/realtime/auth`
+- Base URL: `https://backend.composio.dev`
+- Chunked event protocol: `{id, index, chunk, final}` — matches `bindWithChunking`
+- `triggers.create(userId, slug, body)` positional signature
+- V1/V2/V3 envelope detection order
+- No V4 envelope exists or is announced (verified on the upstream `next` branch)
+
+### Regression
+
+- Triggers subtree: 59/59 (4 new tests: 3 toolkit-lookup paths in normalizer, 1 `id`-field shape in instanceManager)
+- Phase D gate: 20/20 PASS
+- Full suite: 771 pass + 2 pre-existing `fs.watch` timing flakes (SkillRegistry hot-reload + FileEventsObserver — both pass in isolation, unchanged from v0.5.1 baseline)
+
+### Tag
+
+`v0.5.2` — Phase D grounded in SDK source.
+
+---
+
+## [v0.5.1] - 2026-05-29
+
+**Phase D fix-up — events now actually flow end-to-end against real Composio.**
+
+Caught and fixed two production-critical bugs that v0.5.0's unit tests + validation gate (which used synthetic fakes) couldn't detect. Verified live against real Google Calendar events.
+
+### Fixed
+
+- **Chunked event reassembly** — Composio splits large payloads across the `chunked-trigger_to_client` Pusher binding (each chunk has `{id, index, chunk, final}`). v0.5.0 only bound to `trigger_to_client`, so realistic events (Calendar with attendees, Gmail with bodies, GitHub PRs with diffs) were silently dropped. `TriggerListener` now binds both channels and reassembles by id.
+- **V1/V2/V3 envelope normalization** — Composio supports three webhook envelope formats. v0.5.0's normalizer read naive top-level `triggerSlug`/`toolkitSlug` fields that don't exist in real V3 payloads. `TriggerNormalizer` rewritten using @composio/core SDK's own schemas as the spec — detects V3 (composio.* + metadata.trigger_slug) > V2 (type + data.trigger_id) > V1 (trigger_name + payload) > legacy permissive. 11 unit tests covering all four shapes.
+- **Live test cleanup** — `sdk is not defined` error during trigger-delete cleanup. Now uses `composio.sdk` in scope correctly.
+
+### Added
+
+- `scripts/discover-trigger-slugs.ts` — paginated `triggers.listTypes()` helper for finding the right trigger slug per toolkit
+- `scripts/live-test-phase-d.ts` (renamed from `-gmail` suffix; toolkit-agnostic via `KAIROS_LIVE_TOOLKIT` + `KAIROS_LIVE_TRIGGER` + `KAIROS_LIVE_CONFIG` env vars)
+- `TriggerNormalizer.detect()` exposes envelope version (`V1` | `V2` | `V3` | `legacy`) for future debugging
+- New TriggerListener tests: chunked reassembly happy path + partial-chunks-buffered-not-published
+
+### Verified live
+
+End-to-end against real Google Calendar:
+- Google Calendar event created → Composio polled → published over Pusher (chunked)
+- TriggerListener reassembled → handed to TriggerNormalizer
+- TriggerNormalizer detected V3 → extracted `trigger_slug=GOOGLECALENDAR_GOOGLE_CALENDAR_EVENT_CREATED_TRIGGER`, `toolkit=googlecalendar`
+- Event published to perception bus with correct slug + toolkit + payload
+- Clean shutdown deleted the trigger instance
+
+### Regression
+
+- Phase D gate: 20/20 PASS
+- Triggers subtree: 55/55
+- Full suite: 690 pass + 1 pre-existing FileEventsObserver flake (unchanged from baseline)
+
+### Tag
+
+`v0.5.1` — Phase D production-correct.
+
+---
+
 ## [v0.5.0] - 2026-05-29
 
 **Phase D complete.** KAIROS now receives real-time events from any connected service via Composio Triggers. STANDING_ORDERS v2 rules fire on incoming emails, Slack DMs, GitHub PRs, calendar invites, and 200+ other event types — automatically, with idempotency, refcounting, reconciliation, and connect-prompts.

@@ -135,10 +135,42 @@ export class TriggerListener {
       setTimeout(() => reject(new Error(`Pusher subscription timeout (15s) on ${channelName}`)), 15000)
     })
 
-    // Composio emits events under this name (verified from their SDK source).
+    // Composio emits events in TWO forms (verified from their SDK source: bindWithChunking):
+    //   1. 'trigger_to_client' — small events arrive whole
+    //   2. 'chunked-trigger_to_client' — large events split across multiple Pusher messages,
+    //      reassembled by id. Calendar/email/PR events with attendees + bodies are
+    //      typically chunked. WITHOUT reassembly, we silently drop these.
     channel.bind('trigger_to_client', (data: any) => {
       void this.handleEvent(data)
     })
+    channel.bind('chunked-trigger_to_client', (data: any) => {
+      this.handleChunk(data)
+    })
+  }
+
+  private chunkBuffer: Record<string, { chunks: string[]; receivedFinal: boolean }> = {}
+
+  private handleChunk(data: any): void {
+    if (!data || typeof data.id !== 'string' || typeof data.index !== 'number') return
+    const id: string = data.id
+    if (!this.chunkBuffer[id]) {
+      this.chunkBuffer[id] = { chunks: [], receivedFinal: false }
+    }
+    const ev = this.chunkBuffer[id]
+    ev.chunks[data.index] = data.chunk
+    if (data.final) ev.receivedFinal = true
+    // Reassemble when we have the final marker AND no holes in the chunk array
+    if (ev.receivedFinal) {
+      const expectedCount = ev.chunks.length
+      const actualCount = Object.keys(ev.chunks).length
+      if (expectedCount === actualCount) {
+        try {
+          const reassembled = JSON.parse(ev.chunks.join(''))
+          void this.handleEvent(reassembled)
+        } catch { /* malformed — drop */ }
+        delete this.chunkBuffer[id]
+      }
+    }
   }
 
   async stop(): Promise<void> {

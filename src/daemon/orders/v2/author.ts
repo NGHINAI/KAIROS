@@ -13,6 +13,7 @@ import type { PendingEditsQueue } from './pendingEdits'
 import type { TriggerSchemaCache } from '../../connectors/triggers/schemaCache'
 import type { TriggerInstanceManager } from '../../connectors/triggers/instanceManager'
 import type { ConnectGuard } from '../../connectors/triggers/connectGuard'
+import type { ComposioToolResolver } from './composioToolResolver'
 
 const SYSTEM_PROMPT = `You are KAIROS's standing-orders compiler. The user just spoke a request like "remind me every Monday at 9 to send the standup". Convert it into a structured rule object.
 
@@ -47,6 +48,13 @@ export type OrdersAuthorDeps = {
   schemaCache?: TriggerSchemaCache
   instanceManager?: TriggerInstanceManager
   connectGuard?: ConnectGuard
+  // NEW (Phase D fixup — for grounding composio_tool action authoring in real schemas)
+  toolResolver?: ComposioToolResolver
+  /** Returns the toolkit slugs the user currently has connected (e.g. ['gmail','googlecalendar']).
+   *  Used to filter the action-tool catalog into the LLM prompt — otherwise we'd dump 1000s. */
+  getConnectedToolkits?: () => string[]
+  /** Max action tools per toolkit to include in the prompt — prevents prompt bloat. */
+  toolsPerToolkitCap?: number
 }
 
 export type AuthorResult = {
@@ -61,9 +69,8 @@ export class OrdersAuthor {
 
   private buildSystemPrompt(): string {
     let prompt = SYSTEM_PROMPT
+    // ── Triggers (incoming events the LLM can match `when.state.incoming_event` against) ──
     if (this.deps.schemaCache) {
-      // Access the internal map via getType iteration — we don't have a public listAll.
-      // For Phase D v1, we iterate using a slug list approach if known, OR access (cache as any).map.
       const cache: any = this.deps.schemaCache as any
       const map: Map<string, any> | undefined = cache.map
       if (map && map.size > 0) {
@@ -74,7 +81,59 @@ export class OrdersAuthor {
         prompt += `\nFor rules like 'notify me when X', use:\n  when:\n    state:\n      incoming_event:\n        trigger: <TRIGGER_SLUG>\n  if:\n    - "payload.<field> == '<value>'"  # client-side filter\n`
       }
     }
+    // ── Action tools (outbound calls — `do: composio_tool`). Grounded in real Composio schemas ──
+    // Two sections: CONNECTED (full tool details) and AVAILABLE (toolkit name only).
+    // For AVAILABLE toolkits, the LLM can still propose a rule; KAIROS detects the
+    // unconnected toolkit post-LLM and triggers OAuth via ConnectGuard, putting the
+    // rule into state=pending_connection until the user authorizes.
+    if (this.deps.toolResolver) {
+      const connected = (this.deps.getConnectedToolkits?.() ?? []).map(t => t.toLowerCase())
+      const connectedSet = new Set(connected)
+      const allToolkits = this.deps.toolResolver.listAllToolkits()
+      const cap = this.deps.toolsPerToolkitCap ?? 25
+
+      if (connected.length > 0) {
+        prompt += `\n\nCONNECTED Composio toolkits (full tool catalog — prefer these):\n`
+        for (const toolkit of connected) {
+          const tools = this.deps.toolResolver.listToolsForToolkit(toolkit).slice(0, cap)
+          if (tools.length === 0) continue
+          prompt += `\n  ${toolkit}:\n`
+          for (const t of tools) {
+            const required = this.summarizeRequiredArgs(t.inputParameters)
+            const desc = t.description ? ` — ${t.description.slice(0, 100)}` : ''
+            prompt += `    - ${t.friendly}: required=[${required}]${desc}\n`
+          }
+        }
+      }
+
+      const available = allToolkits.filter(t => !connectedSet.has(t))
+      if (available.length > 0) {
+        prompt += `\n\nAVAILABLE-but-unconnected Composio toolkits (user has NOT authed these yet — KAIROS will request OAuth before the rule activates):\n  ${available.join(', ')}\n`
+        prompt += `\nIf the user's request needs an unconnected toolkit, STILL propose the rule normally with the right toolkit slug. Use the tool name you'd expect Composio to expose (e.g. 'send_message' for slack, 'create_issue' for linear). KAIROS will (1) prompt OAuth for that toolkit, (2) resolve the canonical tool slug, (3) activate the rule. Do NOT refuse the request just because the toolkit isn't connected.\n`
+      }
+
+      if (connected.length > 0 || available.length > 0) {
+        prompt += `\nWhen generating a composio_tool action, use the friendly tool name (not the canonical slug):\n  - action: composio_tool\n    args:\n      toolkit: <toolkit_slug>\n      tool: <friendly_name>     # e.g. 'send_email' NOT 'GMAIL_SEND_EMAIL'\n      args:\n        <field>: <value>\n`
+        prompt += `\nIMPORTANT for CONNECTED toolkits: pick tools and arg names ONLY from the catalog above; do NOT invent.\n`
+      }
+    }
     return prompt
+  }
+
+  /** Extracts a brief "required arg names" summary from a Composio inputParameters JSON-schema fragment. */
+  private summarizeRequiredArgs(schema: any): string {
+    if (!schema || typeof schema !== 'object') return ''
+    const required: string[] = Array.isArray(schema.required) ? schema.required : []
+    if (required.length === 0) {
+      // Some schemas mark fields required via a per-property `required: true`; sweep for that too.
+      const props = (schema.properties ?? {}) as Record<string, any>
+      const swept: string[] = []
+      for (const [k, v] of Object.entries(props)) {
+        if (v && typeof v === 'object' && (v as any).required === true) swept.push(k)
+      }
+      return swept.slice(0, 8).join(', ')
+    }
+    return required.slice(0, 8).join(', ')
   }
 
   async handleSpeech(text: string): Promise<AuthorResult> {
@@ -161,9 +220,42 @@ Produce the JSON object.`
       }
     }
 
+    // Phase D fixup — gate composio_tool ACTIONS through ConnectGuard for any
+    // toolkit the user hasn't authed yet. Same pattern as the trigger gate above.
+    // Without this, rules referencing unconnected toolkits would silently fail at
+    // execute time with "could not resolve composio tool".
+    if (this.deps.connectGuard) {
+      const actionToolkits = this.collectComposioActionToolkits(rule.do)
+      if (actionToolkits.length > 0) {
+        const connected = new Set((this.deps.getConnectedToolkits?.() ?? []).map(t => t.toLowerCase()))
+        for (const toolkit of actionToolkits) {
+          if (connected.has(toolkit)) continue
+          const status = await this.deps.connectGuard.ensureConnected(toolkit, rule.slug)
+          if (status === 'pending') {
+            rule.state = 'pending_connection'
+            // Don't break — call ensureConnected for all toolkits so OAuth flows
+            // can start in parallel. ConnectGuard handles dedupe.
+          }
+        }
+      }
+    }
+
     this.appendRuleBlock(rule, parsed.proposed_rule.cooldown)
     this.deps.store.upsert(rule)
     return { created_slug: slug }
+  }
+
+  /** Walk a Rule's `do` array and return the unique lowercase toolkit slugs
+   *  referenced by composio_tool actions. */
+  private collectComposioActionToolkits(actions: Action[]): string[] {
+    const set = new Set<string>()
+    for (const a of actions ?? []) {
+      if ((a as any).action === 'composio_tool') {
+        const tk = String((a as any).args?.toolkit ?? '').toLowerCase()
+        if (tk) set.add(tk)
+      }
+    }
+    return [...set]
   }
 
   private uniqueSlug(suggested: string): string {

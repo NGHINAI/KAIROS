@@ -112,7 +112,10 @@ export class TriggerInstanceManager {
       remoteList = items
     } catch { return { orphaned_local: [], orphaned_remote: [], recreated: [] } }
 
-    const remote = new Set(remoteList.map(r => r.triggerId ?? r.trigger_id))
+    // listActive() items use field `id` per @composio/core@0.10.0
+    // (TriggerInstanceListActiveResponseItemSchema). triggerId/trigger_id kept
+    // as defensive fallbacks in case the SDK shape changes.
+    const remote = new Set(remoteList.map(r => r.id ?? r.triggerId ?? r.trigger_id).filter(Boolean))
     const localSet = new Set(local)
 
     const orphaned_local = local.filter(id => !remote.has(id))

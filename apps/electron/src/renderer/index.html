@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      CSP must permit WASM + Web Workers: onnxruntime-web (Silero VAD) compiles
+      wasm ('wasm-unsafe-eval') and both ORT and vad-web spawn Workers/AudioWorklets
+      from blob: URLs (worker-src blob:). Without these the renderer throws on load
+      and the window goes blank. connect-src also allows blob:/data: for worklet fetch.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self' 'unsafe-inline' blob: data:; connect-src 'self' blob: data: ws://localhost:* http://localhost:* ws://127.0.0.1:* http://127.0.0.1:*; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; worker-src 'self' blob:; child-src 'self' blob:"
+    />
+    <title>KAIROS</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./main.tsx"></script>
+  </body>
+</html>

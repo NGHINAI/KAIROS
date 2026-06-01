@@ -35,6 +35,10 @@ function fakePusher() {
       if (!subscribedChannel) throw new Error('test fake: no channel subscribed yet')
       channels[subscribedChannel]?.handlers['trigger_to_client']?.(event)
     },
+    deliverChunk(chunk: { id: string; index: number; chunk: string; final?: boolean }) {
+      if (!subscribedChannel) throw new Error('test fake: no channel subscribed yet')
+      channels[subscribedChannel]?.handlers['chunked-trigger_to_client']?.(chunk)
+    },
     fireConnectionEvent(name: string) {
       connectionHandlers[name]?.()
     },
@@ -150,6 +154,33 @@ describe('TriggerListener', () => {
     expect(fakeCtl.isDisconnected()).toBe(false)
     await listener.stop()
     expect(fakeCtl.isDisconnected()).toBe(true)
+  })
+
+  it('reassembles a chunked event from chunked-trigger_to_client channel', async () => {
+    const { listener, eventLog, bus } = makeListener({ fakePusherCtl: fakeCtl })
+    await listener.start()
+    // Composio splits large events; we simulate a 3-chunk event delivery.
+    // Reassembled payload = a valid trigger event with toolkitSlug and id.
+    const fullPayload = { triggerSlug: 'GMAIL_NEW_GMAIL_MESSAGE', toolkitSlug: 'gmail', id: 'big-1', data: { subject: 'long subject line that makes it chunked' } }
+    const json = JSON.stringify(fullPayload)
+    const third = Math.ceil(json.length / 3)
+    fakeCtl.deliverChunk({ id: 'big-1', index: 0, chunk: json.slice(0, third) })
+    fakeCtl.deliverChunk({ id: 'big-1', index: 1, chunk: json.slice(third, third * 2) })
+    fakeCtl.deliverChunk({ id: 'big-1', index: 2, chunk: json.slice(third * 2), final: true })
+    await new Promise(r => setTimeout(r, 20))
+    expect(bus.calls).toHaveLength(1)
+    expect(eventLog.listAll()[0]!.event_id).toBe('big-1')
+    await listener.stop()
+  })
+
+  it('partial chunks (no final marker) are buffered, not published', async () => {
+    const { listener, bus } = makeListener({ fakePusherCtl: fakeCtl })
+    await listener.start()
+    fakeCtl.deliverChunk({ id: 'partial-1', index: 0, chunk: '{"trigge' })
+    fakeCtl.deliverChunk({ id: 'partial-1', index: 1, chunk: 'rSlug":"X"}' /* no final */ })
+    await new Promise(r => setTimeout(r, 20))
+    expect(bus.calls).toHaveLength(0)
+    await listener.stop()
   })
 
   it('handles burst of 100 events', async () => {

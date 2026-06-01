@@ -14,6 +14,7 @@ export type ProviderId =
   | 'gemini'
   | 'kimi'
   | 'ollama'
+  | 'openrouter'
 
 export type TaskType =
   | 'narrative'          // ultra-cheap: summarize world state

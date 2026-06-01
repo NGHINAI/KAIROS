@@ -88,6 +88,23 @@ describe('TriggerInstanceManager', () => {
     expect(fake.deleted).toContain('ti_remote')
   })
 
+  it('reconcile reads the canonical `id` field from listActive (not triggerId)', async () => {
+    // Per @composio/core@0.10.0 TriggerInstanceListActiveResponseItemSchema,
+    // the trigger instance ID field is `id`, not `triggerId`. Earlier code
+    // only checked triggerId/trigger_id, which silently classified ALL remote
+    // triggers as orphans and tried to delete them.
+    const localId = await mgr.acquireForRule('rule-a', 'X', {}, 'ca_1')
+    fake.composio.triggers.listActive = async () => ({
+      items: [
+        { id: localId, slug: 'X', connectedAccountId: 'ca_1', state: 'active' }, // matches local
+        { id: 'ti_other_remote', slug: 'Y', connectedAccountId: 'ca_1', state: 'active' }, // remote-only
+      ],
+    })
+    const report = await mgr.reconcile()
+    expect(report.orphaned_local).toEqual([]) // local is NOT orphaned — id matched
+    expect(report.orphaned_remote).toEqual(['ti_other_remote'])
+  })
+
   it('listRulesForInstance returns linked rule_slugs', async () => {
     const id = await mgr.acquireForRule('a', 'X', {}, 'ca_1')
     await mgr.acquireForRule('b', 'X', {}, 'ca_1')
