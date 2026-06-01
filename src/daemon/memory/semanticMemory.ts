@@ -106,12 +106,22 @@ const FACTS_FTS_TABLE = 'mem_l3_facts_fts'
 
 export type FactInput = {
   text: string
+  /** Singular subject this fact is about, e.g. "user's name", "favorite language".
+   *  Used by the smart-write layer to detect contradictions on the same subject. */
+  subject?: string
+  /** Category bucket, e.g. "identity", "preferences", "projects", "relationships",
+   *  or the reserved "_pending_confirmation". Powers the file-system view (Unit 5). */
+  category?: string
+  /** 0..1 — how confident we are. Defaults to 1. */
+  confidence?: number
 }
 
 export type SemanticHit = {
   id: string
   text: string
   ts: number
+  subject?: string
+  category?: string
 }
 
 export class SemanticStore {
@@ -152,7 +162,25 @@ export class SemanticStore {
           INSERT INTO ${FACTS_FTS_TABLE}(rowid, text) VALUES (new.rowid, new.text);
         END;
     `)
+    // Additive, backward-safe schema migration: add evolving-memory columns to an
+    // existing mem_l3_facts table. Existing rows get NULLs (treated as live/uncat).
+    this.addColumnIfMissing('subject', 'TEXT')
+    this.addColumnIfMissing('category', 'TEXT')
+    this.addColumnIfMissing('superseded_at', 'INTEGER')   // NULL = live; set = retired
+    this.addColumnIfMissing('confidence', 'REAL')
     this.initialized = true
+  }
+
+  /** ALTER TABLE ADD COLUMN guarded by a pragma check (idempotent across boots). */
+  private addColumnIfMissing(col: string, type: string): void {
+    try {
+      const cols = this.db.query(`PRAGMA table_info(${FACTS_TABLE})`).all() as Array<{ name: string }>
+      if (!cols.some(c => c.name === col)) {
+        this.db.run(`ALTER TABLE ${FACTS_TABLE} ADD COLUMN ${col} ${type}`)
+      }
+    } catch (err) {
+      console.warn(`[SemanticStore] addColumn ${col} failed (non-fatal):`, err)
+    }
   }
 
   async record(input: FactInput): Promise<string> {
@@ -160,8 +188,8 @@ export class SemanticStore {
     const id = crypto.randomUUID()
     const ts = Date.now()
     this.db.run(
-      `INSERT INTO ${FACTS_TABLE}(id, text, ts) VALUES (?, ?, ?)`,
-      [id, input.text, ts],
+      `INSERT INTO ${FACTS_TABLE}(id, text, ts, subject, category, confidence) VALUES (?, ?, ?, ?, ?, ?)`,
+      [id, input.text, ts, input.subject ?? null, input.category ?? null, input.confidence ?? 1],
     )
     // Auto-embed into the VectorIndex when available (graceful degradation on error)
     if (this.vectorIndex) {
@@ -174,19 +202,112 @@ export class SemanticStore {
     return id
   }
 
+  /** Retire a fact: it stops surfacing in recall (superseded_at set) AND its vector
+   *  is removed so it can't return via similarity search. Used by the smart-write
+   *  layer when a newer fact contradicts/updates this one. Idempotent. */
+  async supersede(id: string, _reason?: string): Promise<void> {
+    this.init()
+    try { this.db.run(`UPDATE ${FACTS_TABLE} SET superseded_at = ? WHERE id = ? AND superseded_at IS NULL`, [Date.now(), id]) }
+    catch (err) { console.warn('[SemanticStore] supersede failed (non-fatal):', err) }
+    if (this.vectorIndex) {
+      try { await this.vectorIndex.delete(id) }
+      catch (err) { console.warn('[SemanticStore] vectorIndex.delete failed (non-fatal):', err) }
+    }
+  }
+
+  /** DELETE (soft) facts the user asked to forget. Finds matching live facts —
+   *  by exact `subject` if given, else by relevance recall(query) — and supersedes
+   *  each (superseded_at set + vector removed → never surfaces again, row kept for
+   *  audit/recovery). Returns the retired ids. Excludes pending-confirmation rows.
+   *  Mirrors the contradiction-handling mechanism; this is the real delete pipeline. */
+  async forget(query: string, opts: { subject?: string; limit?: number } = {}): Promise<{ superseded: string[] }> {
+    this.init()
+    let matches: Array<{ id: string }> = []
+    try {
+      if (opts.subject) {
+        matches = this.db.query(
+          `SELECT id FROM ${FACTS_TABLE} WHERE subject = ? AND superseded_at IS NULL
+           AND (category IS NULL OR category != '_pending_confirmation')`,
+        ).all(opts.subject) as Array<{ id: string }>
+      } else {
+        const hits = await this.recall(query, opts.limit ?? 8)
+        matches = hits.filter(h => h.category !== '_pending_confirmation').map(h => ({ id: h.id }))
+      }
+    } catch { matches = [] }
+    const superseded: string[] = []
+    for (const m of matches) { await this.supersede(m.id, 'user asked to forget'); superseded.push(m.id) }
+    return { superseded }
+  }
+
+  /** All live pending-confirmation markers (the deferred asks). Used by the
+   *  PendingResolver to decide what KAIROS is waiting on. */
+  livePending(limit = 10): SemanticHit[] {
+    return this.liveByCategory('_pending_confirmation', limit)
+  }
+
+  /** Retire pending-confirmation markers once resolved (confirmed or denied) so they
+   *  stop re-surfacing. By id (preferred), or all matching a subject, or all. */
+  async clearPending(opts: { id?: string; subject?: string } = {}): Promise<number> {
+    this.init()
+    let ids: string[] = []
+    try {
+      if (opts.id) ids = [opts.id]
+      else {
+        const where = opts.subject ? `AND subject = ?` : ''
+        const params = opts.subject ? [opts.subject] : []
+        ids = (this.db.query(
+          `SELECT id FROM ${FACTS_TABLE} WHERE category = '_pending_confirmation' AND superseded_at IS NULL ${where}`,
+        ).all(...params) as Array<{ id: string }>).map(r => r.id)
+      }
+    } catch { ids = [] }
+    for (const id of ids) await this.supersede(id, 'pending resolved')
+    return ids.length
+  }
+
+  /** List all live (non-superseded) facts in a category — for the file-system view
+   *  (Unit 5) and the smart-write layer's same-subject lookup. */
+  liveByCategory(category: string, limit = 200): SemanticHit[] {
+    this.init()
+    try {
+      return this.db.query(
+        `SELECT id, text, ts, subject, category FROM ${FACTS_TABLE}
+         WHERE category = ? AND superseded_at IS NULL ORDER BY ts DESC LIMIT ?`,
+      ).all(category, limit) as SemanticHit[]
+    } catch { return [] }
+  }
+
   async recall(query: string, limit: number): Promise<SemanticHit[]> {
     this.init()
-    if (!this.vectorIndex) {
-      return this.recallKeywordOnly(query, limit)
-    }
+    const base = this.vectorIndex
+      ? await this.recallHybrid(query, limit)
+      : this.recallKeywordOnly(query, limit)
+    return this.withPending(base, limit)
+  }
+
+  private async recallHybrid(query: string, limit: number): Promise<SemanticHit[]> {
+    // Over-fetch from the hybrid retriever, then drop superseded rows + apply a
+    // light recency tiebreaker. Fetch extra so that after filtering retired facts
+    // we still have enough live ones to return `limit`.
     const retriever = new HybridRetriever(this.db, {
       ftsTableName: FACTS_FTS_TABLE,
-      vectorIndex: this.vectorIndex,
-      topK: limit * 2,
-      finalK: limit,
+      vectorIndex: this.vectorIndex!,
+      topK: limit * 4,
+      finalK: limit * 3,
     })
-    const hits = await retriever.retrieve(query)
-    return this.hydrate(hits.map(h => h.id))
+    const ranked = await retriever.retrieve(query)
+    const live = this.hydrateLive(ranked.map(h => h.id))
+    return this.applyRecencyTiebreak(live).slice(0, limit)
+  }
+
+  /** Always surface live pending-confirmation facts at the TOP, regardless of
+   *  whether they matched the query — KAIROS must raise an unresolved conflict on
+   *  the next turn even if the user changed topic. Deduped against base hits. */
+  private withPending(base: SemanticHit[], limit: number): SemanticHit[] {
+    const pending = this.liveByCategory('_pending_confirmation', 5)
+    if (pending.length === 0) return base.slice(0, limit)
+    const seen = new Set(pending.map(p => p.id))
+    const rest = base.filter(h => !seen.has(h.id))
+    return [...pending, ...rest].slice(0, limit)
   }
 
   private recallKeywordOnly(query: string, limit: number): SemanticHit[] {
@@ -198,27 +319,49 @@ export class SemanticStore {
     if (tokens.length === 0) return []
     const matchExpr = tokens.map(t => `"${t}"`).join(' OR ')
     try {
+      // superseded_at IS NULL → retired facts never surface.
       const rows = this.db.query(`
-        SELECT f.id, f.text, f.ts
+        SELECT f.id, f.text, f.ts, f.subject, f.category
         FROM ${FACTS_FTS_TABLE} fts
         JOIN ${FACTS_TABLE} f ON f.rowid = fts.rowid
-        WHERE ${FACTS_FTS_TABLE} MATCH ?
+        WHERE ${FACTS_FTS_TABLE} MATCH ? AND f.superseded_at IS NULL
         ORDER BY bm25(${FACTS_FTS_TABLE}) ASC
         LIMIT ?
-      `).all(matchExpr, limit) as SemanticHit[]
-      return rows
+      `).all(matchExpr, limit * 3) as SemanticHit[]
+      return this.applyRecencyTiebreak(rows).slice(0, limit)
     } catch {
       return []
     }
   }
 
-  private hydrate(ids: string[]): SemanticHit[] {
+  /** Hydrate ids → live (non-superseded) hits, preserving input order. */
+  private hydrateLive(ids: string[]): SemanticHit[] {
     if (ids.length === 0) return []
     const placeholders = ids.map(() => '?').join(',')
     const rows = this.db.query(
-      `SELECT id, text, ts FROM ${FACTS_TABLE} WHERE id IN (${placeholders})`,
+      `SELECT id, text, ts, subject, category FROM ${FACTS_TABLE}
+       WHERE id IN (${placeholders}) AND superseded_at IS NULL`,
     ).all(...ids) as SemanticHit[]
     const byId = new Map(rows.map(r => [r.id, r]))
     return ids.map(id => byId.get(id)).filter((r): r is SemanticHit => r !== undefined)
+  }
+
+  /** Light recency tiebreaker: among results already ranked by relevance, give
+   *  newer facts a small nudge so a fresh fact edges out an equally-relevant old
+   *  one. NOT a takeover — relevance (input order) dominates; recency only shifts
+   *  near-ties. Pending-confirmation facts are floated to the very top so KAIROS
+   *  raises them first. Decay horizon ~30 days. */
+  private applyRecencyTiebreak(hits: SemanticHit[]): SemanticHit[] {
+    const now = Date.now()
+    const HORIZON = 30 * 24 * 3600_000
+    const TIEBREAK_WEIGHT = 0.15 // small — relevance rank still dominates
+    return hits
+      .map((h, i) => {
+        const relevanceScore = 1 / (i + 1)                 // input order = relevance
+        const ageFrac = Math.max(0, 1 - (now - h.ts) / HORIZON)
+        return { h, score: relevanceScore + TIEBREAK_WEIGHT * ageFrac }
+      })
+      .sort((a, b) => b.score - a.score)
+      .map(x => x.h)
   }
 }

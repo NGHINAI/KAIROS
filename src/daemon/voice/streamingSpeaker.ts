@@ -19,6 +19,15 @@ export class StreamingSpeaker {
 
   constructor(private deps: StreamingSpeakerDeps) {}
 
+  /** Start a fresh utterance — clears the cancelled latch from a prior barge-in.
+   *  MUST be called before feed()/end() for each new reply, otherwise a single
+   *  cancel() would permanently mute all future speech (cancelled stays true). */
+  begin(): void {
+    this.cancelled = false
+    this.queue = []
+    this.buf = ''
+  }
+
   /** Feed an LLM token. Auto-emits phrases at sentence boundaries. */
   feed(token: string): void {
     if (this.cancelled) return

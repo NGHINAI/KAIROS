@@ -36,4 +36,5 @@ export type SidecarEvent =
   | { event: 'speak_finished';       speak_id: string; interrupted: false }
   | { event: 'speak_interrupted';    speak_id: string }
   | { event: 'voices_available';     voices: { id: string; name: string; quality: string; language: string }[] }
+  | { event: 'audio_blob';           wavBase64: string }
   | { event: 'error';                code: string; message?: string }

@@ -5,7 +5,10 @@
 #                   ↑ WebSocket on ws://127.0.0.1:9876/v1/voice/events
 #                 Electron (UI client — renders events, sends commands)
 #
-# Press Option (hold) to talk (daemon CGEventTap), or Option+Space in Electron.
+# In the Electron window: HOLD Option to talk (release to send), click Talk,
+# or press Option+Space to toggle. (Renderer DOM key events — no Accessibility
+# permission needed. The old Swift CGEventTap path required it and failed silently
+# without it.)
 #
 # All config is via env vars (never source ~/.zshrc — the launcher reads .env):
 #   KAIROS_STT       = apple | groq | openrouter        (default: apple)
@@ -41,6 +44,21 @@ bun "$REPO/scripts/voice-live.ts" &
 DAEMON_PID=$!
 echo "  daemon PID: $DAEMON_PID"
 
+# Tear EVERYTHING down whenever this script exits — including Ctrl+C, terminal
+# close (SIGHUP), or kill (SIGTERM), not just a clean Electron exit. Without this
+# trap, closing the terminal orphaned the backgrounded daemon (it kept ticking +
+# spending). pkill by pattern catches the daemon's child processes (Swift helper,
+# any re-spawns) that a bare `kill $DAEMON_PID` would miss.
+cleanup() {
+  echo "▸ Shutting down KAIROS daemon + helpers..."
+  kill "$DAEMON_PID" 2>/dev/null || true
+  pkill -f "scripts/voice-live" 2>/dev/null || true
+  pkill -f "daemon/index.ts" 2>/dev/null || true
+  pkill -f "KairosVoiceHelper" 2>/dev/null || true
+  exit 0
+}
+trap cleanup EXIT INT TERM HUP
+
 # Wait for daemon WS to be ready
 for i in {1..20}; do
   if curl -s --max-time 1 http://127.0.0.1:9876/v1/health >/dev/null 2>&1; then
@@ -55,7 +73,5 @@ cd "$REPO/apps/electron"
 bun run build:main
 NODE_ENV=development bun run dev
 
-# When Electron exits, stop the daemon
-kill $DAEMON_PID 2>/dev/null || true
-pkill -f "KairosVoiceHelper" 2>/dev/null || true
+# Electron exited normally → the EXIT trap (cleanup) fires and stops the daemon.
 echo "stopped"

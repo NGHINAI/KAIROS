@@ -64,6 +64,14 @@ import { VectorIndex } from './memory/vector/vectorIndex'
 import { MemoryInjector } from './memory/memoryInjector'
 import { homedir } from 'os'
 import { Dreamer } from './memory/dreamer'
+import { VoiceConsolidator } from './memory/voiceConsolidator'
+import { RealtimeFactExtractor } from './memory/realtimeFactExtractor'
+import { FactWriter } from './memory/factWriter'
+import { PreferenceNudgeDetector } from './persona/preferenceNudgeDetector'
+import { ForgetDetector } from './memory/forgetDetector'
+import { PendingResolver } from './memory/pendingResolver'
+import { DailyNarrativeWriter } from './persona/dailyNarrative'
+import { MemoryFileView } from './memory/memoryFileView'
 import { IdleDetector } from './memory/idleDetector'
 import { Tier1Classifier } from './perception/tier1Classifier'
 import { Tier2Summarizer } from './perception/tier2Summarizer'
@@ -164,7 +172,27 @@ const VERSION = '0.2.0'
 function buildAgentLlmCompleter(
   tier: Tier,
 ): { complete: (body: any) => Promise<{ text: string }> } {
-  const model = TIER_MODELS[tier]()
+  return buildLlmCompleterForModel(TIER_MODELS[tier]())
+}
+
+/**
+ * Single env knob for ALL memory-side LLM work (fact extraction, contradiction
+ * judging, preference detection, idle consolidation, persona-diff, daily
+ * narrative). Resolution order:
+ *   KAIROS_MEMORY_MODEL  →  KAIROS_FAST_MODEL  →  openai/gpt-4o-mini
+ * Memory tasks are mostly cheap JSON extraction, so they default to the fast
+ * model — set KAIROS_MEMORY_MODEL to upgrade/downgrade memory independently of
+ * the conversation tiers.
+ */
+function memoryModel(): string {
+  return process.env.KAIROS_MEMORY_MODEL ?? process.env.KAIROS_FAST_MODEL ?? 'openai/gpt-4o-mini'
+}
+function buildMemoryLlmCompleter(): { complete: (body: any) => Promise<{ text: string }> } {
+  return buildLlmCompleterForModel(memoryModel())
+}
+
+/** Shared OpenRouter completer for an exact model id ({messages}→{text}). */
+function buildLlmCompleterForModel(model: string): { complete: (body: any) => Promise<{ text: string }> } {
   const adapter = new OpenRouterAdapter({ defaultModel: model })
   return {
     async complete(body: any): Promise<{ text: string }> {
@@ -449,8 +477,16 @@ async function main(): Promise<void> {
   writePidFile(config.sandboxDir)
   writePortFile(config.sandboxDir, port)
 
-  // 10. Start the tick scheduler
-  scheduler.start()
+  // 10. Start the autonomous tick scheduler — the 60s loop that drives proactive
+  // decisions (the main background LLM spender). Gate it on KAIROS_AUTONOMOUS_ENABLED
+  // so you can run a pure on-demand agent (voice + memory + persona all still work)
+  // with NO background spend. On-demand task execution still fires via
+  // triggerImmediateTick regardless. Default: on.
+  if (config.autonomousEnabled) {
+    scheduler.start()
+  } else {
+    log('Autonomous tick scheduler DISABLED (KAIROS_AUTONOMOUS_ENABLED=false) — on-demand only, no background ticks')
+  }
 
   // 10b. Proactive subsystem (ModelRouter + EventBus + observers + Narrator)
   let proactiveStop: (() => Promise<void>) | null = null
@@ -535,13 +571,47 @@ async function main(): Promise<void> {
       log(`C.2.6 memory subsystem active — vector-augmented recall ${localEmbedder ? 'enabled' : 'disabled (keyword-only)'}`)
       const idle = new IdleDetector()
 
-      const dreamTimer = setInterval(async () => {
-        try {
-          if (await idle.shouldDream()) {
-            await dreamer.consolidate({ maxEpisodes: 50 })
-          }
-        } catch (err) { logError('Dreamer tick failed', err) }
-      }, config.memory.dreamIntervalMs)
+      // Memory-side LLM — driven by KAIROS_MEMORY_MODEL (→ KAIROS_FAST_MODEL →
+      // gpt-4o-mini). One knob controls factWriter contradiction-judging +
+      // voice consolidation. (Persona-dream + daily-narrative use their own
+      // dreaming-tier routing below.)
+      const memoryLlm = buildMemoryLlmCompleter()
+
+      // FactWriter: smart-write layer over SemanticStore — dedup / supersede
+      // contradictions / raise confirmations. Shared by VoiceConsolidator (idle)
+      // and RealtimeFactExtractor (per-turn, reached via __kairosFactWriter).
+      const factWriter = new FactWriter({ semanticStore, llm: memoryLlm, log: (m: string) => log(m) })
+      ;(globalThis as any).__kairosFactWriter = factWriter
+
+      // VoiceConsolidator: bridges the FREE-TEXT stores the MemoryInjector reads
+      // (EpisodicStore→SemanticStore), distilling voice observations into durable
+      // L3 facts. The Dreamer above only consolidates the structured stores, which
+      // the injector does NOT read — so without this, voice L2 never reaches L3.
+      const voiceConsolidator = new VoiceConsolidator({ db, factWriter, llm: memoryLlm })
+      ;(globalThis as any).__kairosVoiceConsolidator = voiceConsolidator
+
+      // memU-style file-system VIEW: projects live L3 facts → ~/.kairos/memory/*.md
+      // (read-only, regenerated each cycle) so memory is human-browsable.
+      const memoryFileView = new MemoryFileView({ semanticStore, log: (m: string) => log(m) })
+      ;(globalThis as any).__kairosMemoryFileView = memoryFileView
+
+      // The idle consolidation timer (dreamer + voice→L3 distill + file view) is
+      // background LLM spend, so it only runs in autonomous mode. NOTE: per-turn
+      // memory (realtime fact extraction while you talk) is UNAFFECTED — it's
+      // on-demand and stays fully active even with autonomous off. So recall +
+      // "remember what I just said" keep working; only the periodic deep distill pauses.
+      const dreamTimer = config.autonomousEnabled
+        ? setInterval(async () => {
+            try {
+              if (await idle.shouldDream()) {
+                await dreamer.consolidate({ maxEpisodes: 50 })
+                const n = await voiceConsolidator.consolidate({ maxObservations: 30 })
+                if (n > 0) log(`[voiceConsolidator] distilled ${n} L3 fact(s) from voice`)
+                try { memoryFileView.project() } catch { /* view is best-effort */ }
+              }
+            } catch (err) { logError('Dreamer tick failed', err) }
+          }, config.memory.dreamIntervalMs)
+        : null
 
       // Standing orders subsystem
       let ordersRuntime: OrdersRuntime | null = null
@@ -563,7 +633,14 @@ async function main(): Promise<void> {
           () => ordersRuntime?.text() ?? '',
           { pollMs: config.perception.pipelinePollMs },
         )
-        pipeline.start()
+        // The perception poll classifies world-state events via LLM on a timer —
+        // a background spender. Only start it when autonomous mode is on, so
+        // KAIROS_AUTONOMOUS_ENABLED=false truly silences ALL background LLM calls.
+        if (config.autonomousEnabled) {
+          pipeline.start()
+        } else {
+          log('Perception poll DISABLED (autonomous off) — no background world-state classification')
+        }
         log('Perception pipeline active: Tier1 → Tier2 → Narrator')
       }
 
@@ -770,25 +847,59 @@ async function main(): Promise<void> {
             }),
           })
 
-          // DreamingExtension — 3-phase Hermes dreaming cycles
+          // DreamingExtension — 3-phase Hermes dreaming cycles. Pass the real
+          // ModelRouter so persona diffs are LLM-COMPOSED (learns communication
+          // style / preferences), not just heuristic recent_themes tallies.
           const dreaming = new DreamingExtension({
             trajWriter,
             personaUpdater,
-            router: undefined,  // optional LLM-driven diffs; wired in C.3.3
+            router,
           })
 
           const lightInterval = config.persona?.dreaming?.light_interval_ms ?? 4 * 60 * 60 * 1000
           const remInterval = config.persona?.dreaming?.rem_interval_ms ?? 24 * 60 * 60 * 1000
           const deepInterval = config.persona?.dreaming?.deep_interval_ms ?? 7 * 24 * 60 * 60 * 1000
 
-          personaDreamingTimers = [
+          // Daily narrative writer (memU/OpenClaw-style diary). Generated on the
+          // deep cycle by summarizing the day's voice_turns. Shares the persona
+          // router via a {messages}→CompletionRequest adapter.
+          const narrativeLlm = {
+            complete: async (body: any) => {
+              const sys = body.messages?.find((m: any) => m.role === 'system')?.content ?? ''
+              const usr = body.messages?.filter((m: any) => m.role === 'user').map((m: any) => m.content).join('\n') ?? ''
+              const r = await router.complete({
+                task_type: 'dream',
+                system_blocks: sys ? [{ text: sys, cache_hint: 'long' }] : [],
+                prompt: usr,
+                max_output_tokens: body.max_tokens ?? 250,
+              } as any)
+              return { text: (r as any).text ?? (r as any).output ?? '' }
+            },
+          }
+          const dailyNarrative = new DailyNarrativeWriter({ db, llm: narrativeLlm, log: (m: string) => log(m) })
+          ;(globalThis as any).__kairosDailyNarrative = dailyNarrative
+
+          // Persona-dreaming cycles (LLM persona diffs + daily narrative) are
+          // background spend → only armed in autonomous mode. The nudge tool +
+          // preference detector still update persona on-demand regardless.
+          personaDreamingTimers = config.autonomousEnabled ? [
             setInterval(() => { dreaming.runCycle('light').catch(err => log(`[dreaming] light cycle failed: ${err}`, 'warn')) }, lightInterval),
             setInterval(() => { dreaming.runCycle('rem').catch(err => log(`[dreaming] REM cycle failed: ${err}`, 'warn')) }, remInterval),
-            setInterval(() => { dreaming.runCycle('deep').catch(err => log(`[dreaming] deep cycle failed: ${err}`, 'warn')) }, deepInterval),
-          ]
+            setInterval(() => {
+              dreaming.runCycle('deep').catch(err => log(`[dreaming] deep cycle failed: ${err}`, 'warn'))
+              dailyNarrative.writeForDay().catch(err => log(`[dailyNarrative] failed: ${err}`, 'warn'))
+            }, deepInterval),
+          ] : []
 
           // Expose soulLoader on globalThis — callers can inject buildSystemBlock() into system_blocks
           ;(globalThis as { __kairosSoulLoader?: SoulLoader }).__kairosSoulLoader = soulLoader
+          // Expose persona for the agent ContextBuilder's "## About the user" block.
+          // PersonaUpdater holds the LEARNED profile (communication style, prefs, work
+          // patterns); PersonaAwareness derives live hints. Both were previously only
+          // reachable by the RestraintPipeline — wiring them to the agent makes replies
+          // actually personalized (Tier 1 personalization).
+          ;(globalThis as any).__kairosPersonaUpdater = personaUpdater
+          ;(globalThis as any).__kairosPersonaAwareness = personaAwareness
 
           // Wire TrajWriter into executor (after executor is constructed below, via setter)
           // Wire PersonaAwareness into RestraintPipeline via setter
@@ -1234,7 +1345,7 @@ async function main(): Promise<void> {
       memoryStop = async () => {
         if (mcpStop) await mcpStop()
         if (agencyStop) agencyStop()
-        clearInterval(dreamTimer)
+        if (dreamTimer) clearInterval(dreamTimer)
         if (pipeline) pipeline.stop()
         if (ordersRuntime) ordersRuntime.stop()
       }
@@ -1249,6 +1360,10 @@ async function main(): Promise<void> {
 
   // 10c. Voice subsystem (Phase E.2 — wired under KAIROS_WITH_VOICE flag)
   let voiceBundle: Awaited<ReturnType<typeof bootstrapVoice>> | undefined
+  // Deferred broadcast: wrapApi is created AFTER bootstrapVoice, so canonical
+  // TTS streams through this late-bound ref (filled once wrapApi exists).
+  let deferredBroadcast: ((event: Record<string, unknown>) => void) | undefined
+  const ttsBroadcast = (event: Record<string, unknown>) => deferredBroadcast?.(event)
   if (config.withVoice) {
     log('[voice] bootstrapping voice subsystem (KAIROS_WITH_VOICE=true)')
 
@@ -1273,8 +1388,9 @@ async function main(): Promise<void> {
       db,
       helperBinary,
       llm: { complete: (body) => voiceRouter.complete(body) },
+      broadcast: ttsBroadcast,
     })
-    log('[voice] sidecar connected, conductor running')
+    log(`[voice] sidecar connected, conductor running (tts=${voiceBundle.streamingTts ? 'canonical-stream' : 'apple'})`)
   }
 
   // 10d. Wrap-API server (Phase E.2.0 — Cloud-shaped local /v1/* HTTP surface)
@@ -1394,6 +1510,10 @@ async function main(): Promise<void> {
   })
   log(`[wrap-api] ${wrapApi.baseUrl} — /v1/* surface ready`)
 
+  // Bind the deferred broadcast now that wrapApi exists — canonical TTS audio
+  // (tts_begin/chunk/end/abort frames) flows to WS clients from here on.
+  deferredBroadcast = (event) => wrapApi.broadcast(event as any)
+
   // 10e. Wire voice conductor bus → wrap-API WebSocket broadcast.
   // bootstrapVoice() installs a no-op bus stub; swap it for one that pushes
   // events out to every connected /v1/voice/events WS client (Electron, etc.).
@@ -1512,6 +1632,22 @@ async function main(): Promise<void> {
           } catch { return [] }
         },
       },
+      // Persona profile writer — backs the kairos_remember_preference tool so the
+      // agent can persist user preferences mid-conversation (→ ## About the user).
+      personaUpdater: {
+        recordNudge: (nudge: string) => {
+          const pu = (globalThis as any).__kairosPersonaUpdater
+          if (!pu?.recordNudge) throw new Error('personaUpdater not available')
+          return pu.recordNudge(nudge)
+        },
+      },
+      // Daily diary reader — backs kairos_daily_log.
+      dailyNarrative: {
+        recent: (n: number) => {
+          const dn = (globalThis as any).__kairosDailyNarrative
+          return dn?.recent ? dn.recent(n) : []
+        },
+      },
     })
 
     // Real layered ContextBuilder — session-prefix cache (persona / orders /
@@ -1537,6 +1673,34 @@ async function main(): Promise<void> {
           try {
             const raw = ms.read()
             return raw.length > 3200 ? raw.slice(0, 3200) + '\n...(truncated)' : raw
+          } catch { return '' }
+        },
+        // "## About the user" — the learned persona profile + live preference hints.
+        // This is the Tier-1 personalization fix: persona.md data (communication
+        // style, preferences, work patterns) + derived hints (prefer_terse, etc.)
+        // now reach the agent's system prompt, so replies actually adapt to the user.
+        aboutUser: async () => {
+          try {
+            const pu = (globalThis as any).__kairosPersonaUpdater
+            const pa = (globalThis as any).__kairosPersonaAwareness
+            const p = pu?.get?.() ?? {}
+            const h = pa?.getHints?.() ?? {}
+            const lines: string[] = []
+            if (p.communication_style) lines.push(`- Communication style: ${p.communication_style}`)
+            if (p.preferences)         lines.push(`- Preferences: ${p.preferences}`)
+            if (p.working_patterns)    lines.push(`- Working patterns: ${p.working_patterns}`)
+            if (p.recent_themes)       lines.push(`- Recent themes: ${p.recent_themes}`)
+            if (p.notes)               lines.push(`- Notes: ${p.notes}`)
+            // Behavioral directives derived from hints — phrased as instructions the
+            // agent should FOLLOW, not just facts (closes the "doesn't apply prefs" gap).
+            const directives: string[] = []
+            if (h.prefer_terse) directives.push("Keep replies short and direct — no preamble or filler.")
+            if (h.prefer_voice_over_text) directives.push("Favor a natural spoken cadence.")
+            if (h.in_focus_now) directives.push("The user is focused/in flow right now — be minimal and non-disruptive.")
+            if (directives.length) {
+              lines.push("- How to respond right now: " + directives.join(" "))
+            }
+            return lines.join("\n")
           } catch { return '' }
         },
         kairosSkills: async () => {
@@ -1596,10 +1760,14 @@ async function main(): Promise<void> {
     // Narrator's ack/transition/filler output gets piped through the same
     // sentence-by-sentence speaking pipeline the streaming LLM uses. Each
     // Narrator.speak* call awaits feed + end so phrases serialize cleanly.
+    // When canonical streaming TTS is active, the StreamingTtsBackend owns its
+    // own provider voice config (KAIROS_TTS_VOICE) — do NOT pass the Apple
+    // `say` voice name here or it leaks into the provider as a bogus model id
+    // (e.g. Deepgram rejected 'Zoe (Premium)' as an invalid model value).
     const streamingSpeaker = new StreamingSpeaker({
       backend: voiceBundle.sayBackend,
-      voice: process.env.KAIROS_VOICE_NAME ?? 'Zoe (Premium)',
-      rate: Number(process.env.KAIROS_VOICE_RATE ?? 180),
+      voice: voiceBundle.streamingTts ? undefined : (process.env.KAIROS_VOICE_NAME ?? 'Zoe (Premium)'),
+      rate: voiceBundle.streamingTts ? undefined : Number(process.env.KAIROS_VOICE_RATE ?? 180),
     })
 
     // E.2.5 — Dynamic Composio + self-healing connect
@@ -1702,15 +1870,81 @@ async function main(): Promise<void> {
     ;(globalThis as any).__kairosSelfHealConnect = selfHeal
     ;(globalThis as any).__kairosComposioToolCache = composioCache
 
+    // Captures the agent's final reply text each turn (from agent_done) so
+    // handleUtterance can persist it to the ConversationStore for memory.
+    let lastAgentReply = ''
+
+    // Real-time fact extractor — pulls durable user facts into L3 immediately
+    // (not just on the ~5min idle cycle), so KAIROS remembers things you said
+    // seconds ago within the same conversation. Fire-and-forget per turn.
+    const realtimeFactExtractor = (() => {
+      const fw = (globalThis as any).__kairosFactWriter
+      if (!fw?.write) return undefined
+      return new RealtimeFactExtractor({
+        llm: buildMemoryLlmCompleter(),  // KAIROS_MEMORY_MODEL (→ fast → gpt-4o-mini)
+        factWriter: fw,
+        log: (m: string) => log(m),
+      })
+    })()
+
+    // Preference-nudge detector — reliably captures "from now on…/keep replies
+    // short" into persona.md regardless of tier (the fast tier has no tools, so a
+    // kairos_remember_preference tool call can't fire there). Fire-and-forget.
+    const preferenceNudgeDetector = (() => {
+      const pu = (globalThis as any).__kairosPersonaUpdater
+      if (!pu?.recordNudge) return undefined
+      return new PreferenceNudgeDetector({
+        llm: buildMemoryLlmCompleter(),  // KAIROS_MEMORY_MODEL
+        personaUpdater: pu,
+        log: (m: string) => log(m),
+      })
+    })()
+
+    // ForgetDetector — the DELETE half of the automatic memory lifecycle. Per-turn,
+    // soft-deletes memories the user asks to forget (confirm-first for important/vague).
+    const forgetDetector = (() => {
+      const ss = (globalThis as any).__kairosSemanticStore
+      if (!ss?.forget) return undefined
+      return new ForgetDetector({
+        llm: buildMemoryLlmCompleter(),
+        semanticStore: ss,
+        episodicStore: (globalThis as any).__kairosEpisodicStore,
+        personaUpdater: (globalThis as any).__kairosPersonaUpdater,
+        log: (m: string) => log(m),
+      })
+    })()
+
+    // PendingResolver — closes the confirm loop: when the user answers a pending
+    // "confirm before deleting?" ask, this executes (or cancels) the deferred op.
+    // Runs BEFORE the forget/extract detectors each turn.
+    const pendingResolver = (() => {
+      const ss = (globalThis as any).__kairosSemanticStore
+      if (!ss?.livePending) return undefined
+      return new PendingResolver({
+        llm: buildMemoryLlmCompleter(),
+        semanticStore: ss,
+        episodicStore: (globalThis as any).__kairosEpisodicStore,
+        log: (m: string) => log(m),
+      })
+    })()
+    ;(globalThis as any).__kairosForgetDetector = forgetDetector
+    ;(globalThis as any).__kairosPendingResolver = pendingResolver
+
     const agentConductor = new Conductor({
       classifyLlm: buildAgentLlmCompleter('fast'),
       fastLlm:     buildAgentLlmCompleter('fast'),
       smartLlm:    buildAgentLlmCompleter('smart'),
       tools: [...introspectionTools, composioSearchTool, ...composioCache.asTools()],
       contextBuilder,
-      onEvent: (e: any) => wrapApi.broadcast({ event: e.kind, ...e }),
+      onEvent: (e: any) => {
+        if (e?.kind === 'agent_done' && typeof e.text === 'string') lastAgentReply = e.text
+        wrapApi.broadcast({ event: e.kind, ...e })
+      },
       speakBackend: {
         speak: async (t: string) => {
+          // begin() clears any cancelled latch from a prior barge-in — without it
+          // one interrupt would permanently mute all future replies.
+          streamingSpeaker.begin()
           streamingSpeaker.feed(t)
           await streamingSpeaker.end()
         },
@@ -1750,12 +1984,90 @@ async function main(): Promise<void> {
     let activeConductorController: AbortController | undefined
 
     const handleUtterance = async (utterance: string, conversationId: string): Promise<void> => {
+      log(`[voice] handleUtterance ENTER: "${utterance.slice(0, 120)}" (cid=${conversationId})`)
+      // Supersede any in-flight turn: abort its controller AND stop the shared
+      // speaker so its drain loop exits before the new turn's begin() resets state.
+      // Without the stop(), the old (aborted) turn keeps draining the StreamingSpeaker
+      // and races the new turn over one shared backend → stuck/silent after a barge-in.
       activeConductorController?.abort()
-      activeConductorController = new AbortController()
+      try { streamingSpeaker.cancel() } catch {}
+      const controller = new AbortController()
+      activeConductorController = controller
+
+      // Persist the USER turn first so it's available to recentTurns() on the
+      // NEXT utterance (and the agent reply is appended once we have it). Without
+      // this the agent has no memory of the conversation (recentTurns → []).
       try {
-        await agentConductor.handle({ utterance, conversationId, signal: activeConductorController.signal })
+        await voiceBundle!.conversationStore.appendTurn(conversationId, {
+          role: 'user', text: utterance, at: Date.now(),
+        })
+      } catch (e) { log(`[voice] appendTurn(user) failed: ${(e as Error).message}`) }
+
+      // Fire-and-forget automatic memory lifecycle (does NOT block the reply).
+      // ORDER MATTERS: resolve pending confirmations FIRST (so a "yes" finishes
+      // last turn's "confirm before deleting?" ask), THEN detect a new forget,
+      // THEN write/extract facts + preferences. All best-effort, never throw.
+      void (async () => {
+        let ctx = ''
+        try {
+          const recent = await voiceBundle!.conversationStore.recentTurns(conversationId, 4)
+          ctx = recent.map((t: any) => `${t.role}: ${t.text}`).join('\n')
+        } catch { /* context best-effort */ }
+
+        // 1. Resolve any outstanding confirm-before-delete asks.
+        if (pendingResolver) {
+          try {
+            const r = await pendingResolver.resolve(utterance, conversationId)
+            if (r && r.resolved > 0) { try { contextBuilder.invalidatePrefix() } catch {} }
+          } catch { /* */ }
+        }
+        // 2. Detect a NEW forget request (immediate soft-delete, or raise a pending ask).
+        if (forgetDetector) {
+          try {
+            const f = await forgetDetector.detect(utterance, ctx, conversationId)
+            if (f) { try { contextBuilder.invalidatePrefix() } catch {} }
+          } catch { /* */ }
+        }
+        // 3. Extract durable facts (write/update). Corrections resolve via ctx.
+        if (realtimeFactExtractor) { try { await realtimeFactExtractor.extract(utterance, ctx) } catch { /* */ } }
+      })()
+
+      // Detect + persist standing preferences ("from now on…") to persona.md.
+      if (preferenceNudgeDetector) {
+        void preferenceNudgeDetector.detect(utterance).then((pref) => {
+          if (pref) { try { contextBuilder.invalidatePrefix() } catch {} }
+        })
+      }
+
+      lastAgentReply = ''
+      try {
+        await agentConductor.handle({ utterance, conversationId, signal: controller.signal })
+        log(`[voice] handleUtterance OK`)
+        // Persist the AGENT turn (captured from agent_done via onEvent).
+        if (lastAgentReply.trim()) {
+          try {
+            await voiceBundle!.conversationStore.appendTurn(conversationId, {
+              role: 'agent', text: lastAgentReply, at: Date.now(),
+            })
+          } catch (e) { log(`[voice] appendTurn(agent) failed: ${(e as Error).message}`) }
+        }
+      } catch (e) {
+        log(`[voice] handleUtterance ERROR: ${(e as Error).message}\n${(e as Error).stack ?? ''}`)
       } finally {
-        activeConductorController = undefined
+        // Record into L2 episodic memory EVEN IF the reply failed — what the user
+        // SAID is worth remembering regardless of whether KAIROS could answer (e.g.
+        // an LLM outage shouldn't lose the user's statement). Runs once per turn.
+        try {
+          const epStore = (globalThis as any).__kairosEpisodicStore
+          if (epStore?.record) {
+            const text = lastAgentReply.trim()
+              ? `User said: "${utterance}". KAIROS replied: "${lastAgentReply}".`
+              : `User said: "${utterance}".`
+            await epStore.record({ source: 'voice', text })
+          }
+        } catch (e) { log(`[voice] episodic record failed: ${(e as Error).message}`) }
+        // Only clear if we're still the active turn (a newer turn may have replaced us).
+        if (activeConductorController === controller) activeConductorController = undefined
       }
     }
 
@@ -1767,9 +2079,64 @@ async function main(): Promise<void> {
     // classifier failures (the issue that hit Phase E.2 v0.7.0): you can
     // smoke-test the agent without touching the mic.
     wrapApi.onCommand((cmd: any) => {
+      // Trace EVERY command from the renderer so we can tell "renderer never sent"
+      // from "daemon dropped it". For audio, log size not the base64 blob.
+      try {
+        const kind = cmd?.cmd ?? '(no cmd field)'
+        const extra = cmd?.wavBase64 ? ` wavB64=${String(cmd.wavBase64).length}B` : ''
+        log(`[voice] WS cmd: ${kind}${extra}`)
+      } catch {}
+
       if (cmd?.cmd === 'test_inject_utterance' && typeof cmd.text === 'string') {
         const cid = String(cmd.conversationId ?? 'test-' + Date.now())
         void handleUtterance(cmd.text, cid)
+        return
+      }
+
+      // Renderer-mic mode: Electron captured an utterance (WAV, base64) and ships
+      // it here. Transcribe via the same cloud Whisper used by the sidecar bridge,
+      // then run the full agent loop. Mirrors VoiceConductor's audio_blob path.
+      if (cmd?.cmd === 'utterance_audio' && typeof cmd.wavBase64 === 'string') {
+        const cid = String(cmd.conversationId ?? 'conv_default')
+        const whisper = voiceBundle?.whisper
+        if (!whisper) {
+          log('[voice] utterance_audio received but no whisper transcriber (KAIROS_STT must be groq/openrouter)')
+          wrapApi.broadcast({ event: 'agent_error', message: 'cloud STT not configured' })
+          return
+        }
+        void (async () => {
+          const t0 = Date.now()
+          try {
+            const wavBytes = Uint8Array.from(atob(cmd.wavBase64), (c) => c.charCodeAt(0))
+            const { text } = await whisper.transcribe(wavBytes)
+            const clean = (text ?? '').trim()
+            log(`[voice] STT(renderer) [${Date.now() - t0}ms]: "${clean}"`)
+            if (!clean) { wrapApi.broadcast({ event: 'stt_final', text: '' }); return }
+            wrapApi.broadcast({ event: 'stt_final', text: clean })
+            await handleUtterance(clean, cid)
+          } catch (e) {
+            log(`[voice] STT(renderer) error: ${(e as Error).message}`)
+            wrapApi.broadcast({ event: 'agent_error', message: `STT: ${(e as Error).message}` })
+          }
+        })()
+        return
+      }
+
+      // Voice barge-in from the renderer's Silero VAD: user started speaking while
+      // KAIROS was talking. Abort the in-flight turn + stop TTS. The renderer also
+      // stops its own Web Audio playback locally for instant cutoff.
+      if (cmd?.cmd === 'barge_in') {
+        if (activeConductorController) {
+          log('[barge-in] (renderer VAD) aborting active conductor turn')
+          activeConductorController.abort()
+        }
+        // Stop BOTH layers: the StreamingSpeaker (phrase queue + drain loop) and
+        // the underlying TTS backend (in-flight provider fetch). Stopping only the
+        // backend leaves the speaker draining into a dead sink.
+        try { streamingSpeaker.cancel() } catch {}
+        try { voiceBundle!.sayBackend.stop() } catch {}
+        wrapApi.broadcast({ event: 'agent_interrupted' })
+        return
       }
     })
 
@@ -1780,6 +2147,7 @@ async function main(): Promise<void> {
           log('[barge-in] aborting active conductor turn')
           activeConductorController.abort()
         }
+        try { streamingSpeaker.cancel() } catch {}
         try { voiceBundle!.sayBackend.stop() } catch {}
         wrapApi.broadcast({ event: 'agent_interrupted' })
       }

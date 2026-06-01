@@ -4,10 +4,13 @@
   "private": true,
   "main": "dist/main/main/index.js",
   "scripts": {
+    "copy-vad-assets": "node scripts/copy-vad-assets.mjs",
+    "predev": "bun run copy-vad-assets",
     "dev:vite": "vite",
     "dev:electron": "NODE_ENV=development electron .",
     "dev": "bun run build:main && (bun run dev:vite & sleep 3 && bun run dev:electron; kill %1 2>/dev/null)",
     "build:main": "tsc -p tsconfig.main.json",
+    "prebuild:renderer": "bun run copy-vad-assets",
     "build:renderer": "vite build",
     "build": "bun run build:main && bun run build:renderer",
     "start": "electron .",
@@ -17,7 +20,9 @@
   "build": {
     "appId": "ai.kairos.desktop",
     "productName": "KAIROS",
-    "directories": { "output": "out" },
+    "directories": {
+      "output": "out"
+    },
     "mac": {
       "category": "public.app-category.productivity",
       "target": "dmg",
@@ -29,7 +34,15 @@
     "files": ["dist/**", "package.json"]
   },
   "dependencies": {
-    "electron-updater": "^6.3.9"
+    "@ricky0123/vad-web": "^0.0.30",
+    "electron-updater": "^6.3.9",
+    "onnxruntime-web": "1.17.3"
+  },
+  "overrides": {
+    "onnxruntime-web": "1.17.3"
+  },
+  "resolutions": {
+    "onnxruntime-web": "1.17.3"
   },
   "devDependencies": {
     "@types/node": "^22.10.5",

@@ -9,10 +9,11 @@
 
 import { classifyIntent } from "./intentClassifier"
 import { Narrator } from "./narrator"
+import { fastMax } from "./tokenBudget"
 import type { AgentEventHandler, ConductorOpts, Tier, ToolDef } from "./types"
 
 interface ContextBuilder {
-  build(input: { utterance: string; tier: Tier }): Promise<{ system: string; tools: ToolDef[] }>
+  build(input: { utterance: string; tier: Tier; conversationId?: string }): Promise<{ system: string; tools: ToolDef[] }>
 }
 
 /** Runs the Planner agent and returns a flattened summary of the run.
@@ -41,7 +42,7 @@ export class Conductor {
   constructor(private deps: ConductorDeps) {}
 
   async handle(opts: ConductorOpts): Promise<void> {
-    const { utterance, signal } = opts
+    const { utterance, signal, conversationId } = opts
     const t0 = Date.now()
     let agentOutput = ""
     let intent: { tier: string; reason: string } | undefined
@@ -55,28 +56,59 @@ export class Conductor {
     }
 
     try {
-      if (signal?.aborted) { emit({ kind: "agent_interrupted" }); return }
+      console.log(`[conductor] handle ENTER: utterance="${utterance.slice(0, 80)}"`)
+      if (signal?.aborted) { console.log('[conductor] aborted before classify'); emit({ kind: "agent_interrupted" }); return }
 
       // 1. Classify
       const decision = await classifyIntent(utterance, { llm: this.deps.classifyLlm })
+      console.log(`[conductor] classified: tier=${decision.tier} reason="${decision.reason}" confidence=${decision.confidence}`)
       emit({ kind: "agent_intent", tier: decision.tier, reason: decision.reason })
-      if (signal?.aborted) { emit({ kind: "agent_interrupted" }); return }
+      if (signal?.aborted) { console.log('[conductor] aborted after classify'); emit({ kind: "agent_interrupted" }); return }
 
-      // 2. Build context for the chosen tier
-      const ctx = await this.deps.contextBuilder.build({ utterance, tier: decision.tier })
-      if (signal?.aborted) { emit({ kind: "agent_interrupted" }); return }
+      // 2. Build context for the chosen tier. Pass conversationId so the builder
+      // injects recent turns + relevant memory (without it, build() returns only
+      // the static prefix → the agent has no short-term memory of the conversation).
+      const ctx = await this.deps.contextBuilder.build({ utterance, tier: decision.tier, conversationId })
+      console.log(`[conductor] context built: system.length=${ctx.system.length} tools=${ctx.tools.length}`)
+      if (signal?.aborted) { console.log('[conductor] aborted after context'); emit({ kind: "agent_interrupted" }); return }
 
       // 3. Route
       if (decision.tier === "fast") {
+        console.log('[conductor] -> handleFast')
         await this.handleFast(utterance, ctx, emit)
       } else if (decision.tier === "smart") {
+        console.log('[conductor] -> handleSmart')
         await this.handleSmart(opts, ctx, emit)
       } else if (decision.tier === "vision") {
-        // Phase H implementation; for now fall back to fast.
+        console.log('[conductor] -> vision (fallback to fast)')
         await this.handleFast(utterance, ctx, emit)
       } else if (decision.tier === "deep") {
-        await this.handleFast(utterance, ctx, emit)  // deep LLM swap lands later
+        console.log('[conductor] -> deep (fallback to fast)')
+        await this.handleFast(utterance, ctx, emit)
+      } else {
+        console.log(`[conductor] !!! unknown tier "${decision.tier}" — no handler fired`)
       }
+
+      // Speak the final reply through TTS. handleFast emits agent_done but
+      // doesn't speak; handleSmart narrates tool progress but doesn't speak
+      // the final answer. We do that here once, in a single place, so both
+      // tiers behave consistently.
+      if (agentOutput && !signal?.aborted && this.deps.speakBackend) {
+        console.log(`[conductor] speaking final reply (${agentOutput.length} chars): "${agentOutput.slice(0, 80)}"`)
+        try {
+          await this.deps.speakBackend.speak(agentOutput)
+          console.log(`[conductor] speak complete`)
+        } catch (err) {
+          console.log(`[conductor] speak error: ${(err as Error).message}`)
+        }
+      } else if (!agentOutput) {
+        console.log(`[conductor] no agentOutput — nothing to speak`)
+      }
+
+      console.log('[conductor] handle EXIT (normal)')
+    } catch (e) {
+      console.log(`[conductor] handle THREW: ${(e as Error).message}\n${(e as Error).stack ?? ''}`)
+      throw e
     } finally {
       if (this.deps.trajWriter) {
         try {
@@ -106,7 +138,7 @@ export class Conductor {
         { role: "system", content: ctx.system },
         { role: "user", content: utterance },
       ],
-      max_tokens: 200,
+      max_tokens: fastMax(200),  // floor via KAIROS_FAST_MAX_TOKENS for reasoning models
     })
     emit({ kind: "agent_done", text: String(resp.text ?? "").trim() })
   }

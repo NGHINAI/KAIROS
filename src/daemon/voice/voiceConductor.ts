@@ -28,6 +28,11 @@ export type VoiceConductorDeps = {
   /** If true, skip the wrap-API call after publishing voice.user.utterance.
    *  Caller takes responsibility for handling the LLM + TTS. Used for streaming. */
   externalLLMHandling?: boolean
+  /** Cloud-STT bridge. When sidecar runs in KAIROS_STT_MODE=cloud, it emits
+   *  audio_blob events instead of stt_final. If a whisper transcriber is
+   *  provided, we transcribe the blob and feed the text into the same
+   *  handleUserSpeech pipeline as the on-device Apple-STT path. */
+  whisper?: { transcribe: (bytes: Uint8Array) => Promise<{ text: string }> }
 }
 
 export class VoiceConductor {
@@ -99,6 +104,39 @@ export class VoiceConductor {
       case 'stt_final':
         await this.handleUserSpeech(e.text)
         break
+      case 'audio_blob': {
+        // Cloud-STT bridge: sidecar shipped a WAV; transcribe via Whisper,
+        // then fall through to the same user-speech handler. We only act if
+        // a transcriber is wired — otherwise the daemon-side cloud STT is
+        // misconfigured and we drop the blob (logged for visibility).
+        if (!this.deps.whisper) {
+          console.log('[voice] audio_blob received but no whisper transcriber wired — dropping')
+          this.deps.bus.publish('voice.error', { error: 'cloud STT not configured' })
+          break
+        }
+        const wavBase64 = String((e as any).wavBase64 ?? '')
+        if (!wavBase64) {
+          console.log('[voice] audio_blob with empty wavBase64')
+          break
+        }
+        const t0 = Date.now()
+        try {
+          const wavBytes = Uint8Array.from(atob(wavBase64), (c) => c.charCodeAt(0))
+          const result = await this.deps.whisper.transcribe(wavBytes)
+          const text = (result.text ?? '').trim()
+          console.log(`[voice] STT [${Date.now() - t0}ms]: "${text}"`)
+          if (!text) {
+            this.deps.bus.publish('voice.stt.empty', { at: Date.now() })
+            break
+          }
+          await this.handleUserSpeech(text)
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          console.log(`[voice] STT error: ${msg}`)
+          this.deps.bus.publish('voice.error', { error: `STT: ${msg}` })
+        }
+        break
+      }
       case 'barge_in_detected':
         await this.handleBargeIn()
         break

@@ -12,6 +12,10 @@ export interface IntrospectionDeps {
   memoryStore:     { read: () => Promise<string> }
   dreamLog:        { last: () => Promise<any | null>; search: (q: string, n: number) => Promise<any[]> }
   connectionStore: { list: () => Promise<Array<{ toolkit: string; status: string }>> }
+  /** Optional — persona profile writer for the "remember my preference" tool. */
+  personaUpdater?: { recordNudge: (nudge: string) => any }
+  /** Optional — daily narrative diary reader for kairos_daily_log. */
+  dailyNarrative?: { recent: (n: number) => Array<{ day: string; text: string }> }
 }
 
 export function buildIntrospectionTools(deps: IntrospectionDeps): ToolDef[] {
@@ -21,6 +25,36 @@ export function buildIntrospectionTools(deps: IntrospectionDeps): ToolDef[] {
       description: "Read KAIROS's persona / soul file (~/.kairos/soul.md).",
       parameters: { type: "object", properties: {}, required: [] },
       execute: async () => ({ content: await deps.soulLoader.load() }),
+    },
+    {
+      name: "kairos_remember_preference",
+      description: "Record a lasting USER preference or instruction about how KAIROS should behave (e.g. 'keep replies short', 'don't interrupt during meetings', 'I prefer voice'). Use when the user says 'remember to…', 'from now on…', or states a standing preference. This updates the user profile that shapes future replies. NOT for one-off facts — use kairos_remember for those.",
+      parameters: {
+        type: "object",
+        properties: { preference: { type: "string", description: "The preference/instruction to remember, phrased concisely." } },
+        required: ["preference"],
+      },
+      execute: async (args: { preference: string }) => {
+        if (!deps.personaUpdater) return { error: "persona profile not available" }
+        const pref = String(args?.preference ?? "").trim()
+        if (!pref) return { error: "empty preference" }
+        try { deps.personaUpdater.recordNudge(pref); return { saved: true, preference: pref } }
+        catch (e) { return { error: (e as Error).message } }
+      },
+    },
+    {
+      name: "kairos_daily_log",
+      description: "Read KAIROS's recent daily diary entries — a human-readable narrative of what happened and what was learned about the user on prior days. Use to recall 'what did we do yesterday / this week'.",
+      parameters: {
+        type: "object",
+        properties: { days: { type: "number", description: "How many recent days to read (default 3)." } },
+        required: [],
+      },
+      execute: async (args: { days?: number }) => {
+        if (!deps.dailyNarrative) return { entries: [], note: "daily narrative not available" }
+        const entries = deps.dailyNarrative.recent(Math.max(1, Math.min(14, args?.days ?? 3)))
+        return { entries, count: entries.length }
+      },
     },
     {
       name: "kairos_skills_list",

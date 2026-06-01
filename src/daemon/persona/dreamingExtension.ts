@@ -51,7 +51,10 @@ export class DreamingExtension {
     if (trajectories.length > 0) {
       const scored = this.scoreTrajectories(trajectories, phase)
       const promotable = this.selectPromotable(scored, phase)
-      diff = this.buildDiffFromScored(promotable)
+      // LLM-driven diff when a router is available — learns communication_style /
+      // preferences / working_patterns from how the user actually interacts. Falls
+      // back to the heuristic (recent_themes only) when no router or on LLM failure.
+      diff = (await this.composeDiffViaLlm(promotable, phase)) ?? this.buildDiffFromScored(promotable)
       promoted = Object.keys(diff).length
 
       if (promoted > 0) {
@@ -130,7 +133,40 @@ export class DreamingExtension {
     return scored.filter(s => s.score >= threshold).slice(0, phase === 'deep' ? 10 : 5)
   }
 
-  /** Build a PersonaDiff from promotable trajectories. Heuristic for v1; LLM-driven in C.3.3. */
+  /** LLM-driven persona diff. Reads promotable trajectories (what the user did +
+   *  how they interacted) and proposes updates to communication_style / preferences
+   *  / working_patterns / recent_themes. Returns null when no router or on failure
+   *  → caller falls back to the heuristic. This is what makes persona.md actually
+   *  LEARN the user's style, not just tally activity counts. */
+  private async composeDiffViaLlm(
+    promotable: Array<{ entry: TrajEntry; score: number }>,
+    phase: DreamCyclePhase,
+  ): Promise<PersonaDiff | null> {
+    if (!this.deps.router || promotable.length === 0) return null
+    try {
+      const current = this.deps.personaUpdater.get()
+      const trajLines = promotable.slice(0, 12).map(({ entry }) =>
+        `- [${entry.intent_id}] goal="${entry.task_goal}" outcome=${entry.outcome}` +
+        (entry.user_override_reason ? ` (user override: ${entry.user_override_reason})` : ''),
+      ).join('\n')
+      const system = `You maintain a CONCISE profile of a user for their AI assistant. Given the user's CURRENT profile and recent interaction trajectories, propose updates. Only include a field if you have real evidence to add/refine it; omit unchanged fields. Keep each field to 1-2 short sentences.
+Return ONLY JSON: { "communication_style"?: string, "preferences"?: string, "working_patterns"?: string, "recent_themes"?: string }`
+      const prompt = `CURRENT PROFILE:\ncommunication_style: ${current.communication_style ?? '(none)'}\npreferences: ${current.preferences ?? '(none)'}\nworking_patterns: ${current.working_patterns ?? '(none)'}\n\nRECENT TRAJECTORIES (${phase} cycle):\n${trajLines}\n\nPropose profile updates as JSON.`
+      const r = await this.deps.router.complete({
+        task_type: 'dream',
+        system_blocks: [{ text: system, cache_hint: 'long' }],
+        prompt,
+        max_output_tokens: 512,  // headroom for reasoning models (persona diff)
+      } as any)
+      const text = (r as any).text ?? (r as any).output ?? ''
+      const diff = parsePersonaDiff(text)
+      return diff && Object.keys(diff).length > 0 ? diff : null
+    } catch {
+      return null
+    }
+  }
+
+  /** Build a PersonaDiff from promotable trajectories. Heuristic fallback (recent_themes only). */
   private buildDiffFromScored(promotable: Array<{ entry: TrajEntry; score: number }>): PersonaDiff {
     if (promotable.length === 0) return {}
     const themesParts: string[] = []
@@ -166,4 +202,20 @@ export class DreamingExtension {
     const block = '---\n' + stringifyYaml(entry).trimEnd() + '\n---\n'
     appendFileSync(DREAMS_PATH, block)
   }
+}
+
+/** Tolerant parse of an LLM persona-diff (JSON object, possibly fenced/prose). */
+function parsePersonaDiff(text: string): PersonaDiff | null {
+  if (!text) return null
+  const start = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  if (start === -1 || end === -1 || end < start) return null
+  try {
+    const o = JSON.parse(text.slice(start, end + 1))
+    const diff: PersonaDiff = {}
+    for (const k of ['communication_style', 'preferences', 'working_patterns', 'recent_themes'] as const) {
+      if (typeof o[k] === 'string' && o[k].trim()) (diff as any)[k] = o[k].trim()
+    }
+    return diff
+  } catch { return null }
 }

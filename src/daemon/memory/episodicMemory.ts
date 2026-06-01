@@ -132,7 +132,21 @@ export class EpisodicStore {
           INSERT INTO ${OBS_FTS_TABLE}(rowid, text) VALUES (new.rowid, new.text);
         END;
     `)
+    // Additive, backward-safe: soft-delete column (NULL = live; set = retired).
+    // Same pattern as SemanticStore. Lets "forget X" soft-retire L2 observations.
+    this.addColumnIfMissing('superseded_at', 'INTEGER')
     this.initialized = true
+  }
+
+  private addColumnIfMissing(col: string, type: string): void {
+    try {
+      const cols = this.db.query(`PRAGMA table_info(${OBS_TABLE})`).all() as Array<{ name: string }>
+      if (!cols.some(c => c.name === col)) {
+        this.db.run(`ALTER TABLE ${OBS_TABLE} ADD COLUMN ${col} ${type}`)
+      }
+    } catch (err) {
+      console.warn(`[EpisodicStore] addColumn ${col} failed (non-fatal):`, err)
+    }
   }
 
   async record(input: ObservationInput): Promise<string> {
@@ -182,7 +196,7 @@ export class EpisodicStore {
         SELECT o.id, o.text, o.ts
         FROM ${OBS_FTS_TABLE} f
         JOIN ${OBS_TABLE} o ON o.rowid = f.rowid
-        WHERE ${OBS_FTS_TABLE} MATCH ?
+        WHERE ${OBS_FTS_TABLE} MATCH ? AND o.superseded_at IS NULL
         ORDER BY bm25(${OBS_FTS_TABLE}) ASC
         LIMIT ?
       `).all(matchExpr, limit) as EpisodicHit[]
@@ -192,13 +206,38 @@ export class EpisodicStore {
     }
   }
 
+  // hydrate returns LIVE rows only — superseded (forgotten) observations never resurface.
   private hydrate(ids: string[]): EpisodicHit[] {
     if (ids.length === 0) return []
     const placeholders = ids.map(() => '?').join(',')
     const rows = this.db.query(
-      `SELECT id, text, ts FROM ${OBS_TABLE} WHERE id IN (${placeholders})`,
+      `SELECT id, text, ts FROM ${OBS_TABLE} WHERE id IN (${placeholders}) AND superseded_at IS NULL`,
     ).all(...ids) as EpisodicHit[]
     const byId = new Map(rows.map(r => [r.id, r]))
     return ids.map(id => byId.get(id)).filter((r): r is EpisodicHit => r !== undefined)
+  }
+
+  /** Soft-delete observations whose text matches `textLike` (LIKE %textLike%),
+   *  optionally scoped by source. Sets superseded_at + removes vectors → they stop
+   *  surfacing in recall, but rows are kept (auditable/recoverable). Returns count.
+   *  Used by the forget pipeline so "forget X" also clears the raw L2 observations. */
+  async forgetWhere(textLike: string, source?: string): Promise<number> {
+    this.init()
+    const term = `%${textLike}%`
+    let ids: string[] = []
+    try {
+      const where = source ? `AND source = ?` : ''
+      const params: any[] = source ? [term, source] : [term]
+      ids = (this.db.query(
+        `SELECT id FROM ${OBS_TABLE} WHERE text LIKE ? COLLATE NOCASE AND superseded_at IS NULL ${where}`,
+      ).all(...params) as Array<{ id: string }>).map(r => r.id)
+    } catch { ids = [] }
+    if (ids.length === 0) return 0
+    const now = Date.now()
+    for (const id of ids) {
+      try { this.db.run(`UPDATE ${OBS_TABLE} SET superseded_at = ? WHERE id = ?`, [now, id]) } catch { /* skip */ }
+      if (this.vectorIndex) { try { await this.vectorIndex.delete(id) } catch { /* non-fatal */ } }
+    }
+    return ids.length
   }
 }

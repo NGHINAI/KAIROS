@@ -2,18 +2,23 @@
 // Tier 1 classifier — one LLM call returns { tier, reason, confidence }.
 
 import type { IntentDecision, Tier } from "./types"
+import { fastMax } from "./tokenBudget"
 
-const CLASSIFIER_SYSTEM = `You are KAIROS's intent classifier. For each user utterance, decide which agent tier should handle it.
+const CLASSIFIER_SYSTEM = `You are KAIROS's intent router. KAIROS is a voice-first AI coworker. Read ONE user utterance and pick the cheapest tier that can fully handle it. This runs on every turn, so latency matters — be decisive.
 
-Return STRICT JSON only: {"tier": "fast"|"smart"|"deep"|"vision", "reason": "<short>", "confidence": 0..1}
+Return STRICT JSON only, nothing else: {"tier":"fast"|"smart"|"deep"|"vision","reason":"<=8 words","confidence":0..1}
 
-Tiers:
-- "fast": chitchat, simple questions, single-step tool call (e.g. "what time is it", "summarize my emails today"), or introspection ("what skills do you have")
-- "smart": multi-step plans requiring chained tools (e.g. "pull my emails, extract todos, add to calendar"), parameter filling from ambiguous input
-- "deep": explicit "think hard about this", multi-day planning, complex debugging
-- "vision": screen-related ("show me where to click", "what's on my screen", "look at my screen")
+Tiers, cheapest first — escalate ONLY when the cheaper tier would genuinely fail:
+- "fast": chitchat, greetings, acknowledgements, a factual question, ONE tool call, or introspection about KAIROS itself. Examples: "what time is it", "thanks", "summarize today's emails", "what skills do you have", "cancel that", "remind me at 5".
+- "smart": the request needs SEVERAL tool calls chained, OR results from one step feed the next, OR required parameters must be inferred/disambiguated before acting. Examples: "pull my unread emails, extract action items, and add them to my calendar", "find the contract from Acme and reply asking for the signed copy".
+- "deep": the user explicitly asks to think hard / reason carefully, OR it's genuinely open-ended planning, OR multi-step debugging of KAIROS. Phrases like "think this through", "figure out why X keeps failing".
+- "vision": the request is about the screen or pointing at the UI. Examples: "what's on my screen", "show me where to click", "read this for me".
 
-When unsure, prefer "fast" (it's the cheapest). Reserve "smart" for genuinely multi-step work.`
+Rules:
+- Default to "fast". A single action — even a write or a send — is still "fast". Multi-step is what makes it "smart".
+- Do NOT escalate for politeness, emphasis ("really need this"), or long wording. Count the STEPS, not the urgency.
+- "vision" and "deep" each need a clear trigger; when in doubt between fast and smart, pick the lower one.
+- confidence reflects how clear the utterance is, not how hard the task is.`
 
 export interface ClassifyOpts {
   llm: { complete: (body: any) => Promise<{ text: string }> }
@@ -26,7 +31,7 @@ export async function classifyIntent(utterance: string, opts: ClassifyOpts): Pro
         { role: "system", content: CLASSIFIER_SYSTEM },
         { role: "user", content: utterance },
       ],
-      max_tokens: 50,
+      max_tokens: fastMax(50),  // floor via KAIROS_FAST_MAX_TOKENS for reasoning models
       temperature: 0,
     })
     const parsed = JSON.parse(resp.text)
