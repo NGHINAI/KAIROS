@@ -41,6 +41,7 @@ import { VoiceAdapter } from './wrapApi/adapters/voiceAdapter'
 import { OpenRouterAdapter } from './wrapApi/adapters/openRouterAdapter'
 import { TIER_MODELS, type Tier } from './agents/types'
 import { buildBackgroundSubsystem } from './agents/loop/backgroundSubsystem'
+import { setToolNature } from './agents/loop/verifier'
 import { buildBackgroundTools } from './agents/loop/backgroundTools'
 import { buildPriorRunsHint, parsePriorRuns } from './agents/loop/priorRuns'
 import type { TickEvent } from './types'
@@ -1242,6 +1243,12 @@ async function main(): Promise<void> {
                   try { return cs ? [...new Set(cs.listActive('local').map((c: any) => String(c.toolkit_slug)).filter(Boolean))] as string[] : [] }
                   catch { return [] }
                 },
+                // Agentic read/write classification: the model labels each tool from its
+                // description ONCE (cached), then the map drives latency tiering + approval
+                // gating via setToolNature — no hardcoded verb list, works for any toolkit.
+                classifyLlm: buildMemoryLlmCompleter(),
+                onNature: (m) => { try { setToolNature(m) } catch { /* */ } },
+                log: (m) => log(m),
               })
               composioResolver.initialize().catch((err: unknown) => log(`[orders-v2] resolver init failed: ${err}`, 'warn'))
             }
@@ -2504,6 +2511,13 @@ async function main(): Promise<void> {
       // Read-only w.r.t. user data; only writes to ~/.kairos/skills. See the
       // kairos-skill-genesis skill.
       if (cmd?.cmd === 'test_run_awm') {
+        // Test/dev hook only — it can force the induction pipeline with arbitrary
+        // thresholds. Disabled in production so a stray localhost client can't drive
+        // skill crystallization. (NODE_ENV unset = dev/test → enabled.)
+        if (process.env.NODE_ENV === 'production') {
+          wrapApi.broadcast({ event: 'awm_report', error: 'test_run_awm is disabled in production' })
+          return
+        }
         const worker = (globalThis as any).__kairosAwmWorker
         if (!worker) {
           wrapApi.broadcast({ event: 'awm_report', error: 'AwmWorker not available (skills subsystem disabled or persona TrajWriter/router missing)' })

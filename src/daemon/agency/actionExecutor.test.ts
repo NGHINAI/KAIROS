@@ -152,4 +152,16 @@ describe('ActionExecutor', () => {
     expect(trajRows.length).toBeGreaterThanOrEqual(1)
     rmSync(tmp, { recursive: true })
   })
+
+  it('R2: records the ACTUAL delivery mode (surface), not a hardcoded interrupt', async () => {
+    let recordedMode: string | null = null
+    const fakePipeline = {
+      evaluate: async () => ({ mode: 'surface' as const, score: { total: 0.8 } as any, reason: 'surface route' }),
+      recordDelivered: (_t: string, mode: string) => { recordedMode = mode },
+    }
+    const exec = new ActionExecutor(db, registry, traj, inbox, ctx, fakePipeline as any)
+    const result = await exec.dispatch(req('test-green', { msg: 'hi' }))
+    expect(result.status).toBe('completed')      // surface falls through to execution
+    expect(recordedMode).toBe('surface')          // was hardcoded 'interrupt' → ate the interrupt budget
+  })
 })

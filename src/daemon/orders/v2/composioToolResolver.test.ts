@@ -41,6 +41,32 @@ describe('ComposioToolResolver', () => {
     r.stop()
   })
 
+  it('AGENTIC nature: the model labels each tool read/write, it caches + emits, and never re-classifies', async () => {
+    const c = fakeComposio([
+      { toolkit: { slug: 'gmail' }, slug: 'GMAIL_SEND_EMAIL', name: 'Send Email', description: 'Send an email' },
+      { toolkit: { slug: 'gmail' }, slug: 'GMAIL_FETCH_EMAILS', name: 'Fetch Emails', description: 'List recent emails' },
+    ])
+    let classifyCalls = 0
+    const classifyLlm = { complete: async () => { classifyCalls++; return { text: JSON.stringify({ GMAIL_SEND_EMAIL: 'write', GMAIL_FETCH_EMAILS: 'read' }) } } }
+    let emitted: Map<string, 'read' | 'write'> | null = null
+    const cachePath = join(tmp, 'cache.json')
+    const r = new ComposioToolResolver({ composio: c, userId: 'local', cachePath, classifyLlm, onNature: (m) => { emitted = m } })
+    await r.initialize()
+    expect(r.natureMap().get('GMAIL_SEND_EMAIL')).toBe('write')
+    expect(r.natureMap().get('GMAIL_FETCH_EMAILS')).toBe('read')
+    expect(emitted!.get('GMAIL_SEND_EMAIL')).toBe('write') // wired out for setToolNature
+    expect(JSON.parse(readFileSync(cachePath, 'utf8')).descriptors.GMAIL_SEND_EMAIL.nature).toBe('write') // persisted
+    r.stop()
+
+    // Re-init from the fresh cache → natures carried over, NO re-classification.
+    classifyCalls = 0
+    const r2 = new ComposioToolResolver({ composio: c, userId: 'local', cachePath, classifyLlm, onNature: () => {} })
+    await r2.initialize()
+    expect(classifyCalls).toBe(0)
+    expect(r2.natureMap().get('GMAIL_FETCH_EMAILS')).toBe('read')
+    r2.stop()
+  })
+
   it('indexes friendly aliases — stripped toolkit prefix + suffix truncation', async () => {
     const c = fakeComposio([
       { toolkit: { slug: 'slack' }, slug: 'SLACK_SEND_MESSAGE', name: 'Send Slack message' },

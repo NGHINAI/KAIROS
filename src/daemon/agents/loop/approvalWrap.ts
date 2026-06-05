@@ -1,11 +1,13 @@
 // src/daemon/agents/loop/approvalWrap.ts
 // Wraps a background sub-agent's tools so that any DESTRUCTIVE/irreversible call
-// (send/delete/connect/pay) AND any system-mutating call (run_shell, write_file)
-// first goes through the ApprovalGate — pause, ask the user (voice + inbox), and
-// only run on approval. Read-only calls pass straight through. The destructive
-// heuristic (isDestructiveCall) only inspects tool NAMES, so the system tools —
-// whose names carry no destructive keyword — are force-gated by name here, and
-// the user hears the ACTUAL command/path/recipient they're approving.
+// (send/delete/connect/pay) and any NON-read shell command (run_shell) first goes
+// through the ApprovalGate — pause, ask the user (voice + inbox), run only on
+// approval. The CONFINED file tools (read_file/list_dir/write_file/edit_file/grep/
+// glob, see CONFINED_FILE_TOOLS) are SANDBOXED to the agent's private workdir, so
+// they run FREE (autonomy) — they can't touch the user's real files. run_shell is
+// the exception: a command can escape the workdir via absolute paths, so it gates
+// unless isReadOnlyShell proves the WHOLE command read-only. The user hears the
+// ACTUAL command/path/recipient they're approving.
 //
 // The run's AbortSignal is threaded in so that (a) a parked approval resolves to a
 // denial the instant the task is cancelled (instead of hanging forever), and (b)
@@ -41,7 +43,9 @@ const CONFINED_FILE_TOOLS = new Set(["read_file", "list_dir", "write_file", "edi
 function callNeedsApproval(toolName: string, args: any): boolean {
   if (CONFINED_FILE_TOOLS.has(toolName)) return false // sandboxed to the scratch workdir
   if (toolName === "run_shell") return !isReadOnlyShell(String(args?.command ?? ""))
-  return isDestructiveCall({ name: toolName, args })
+  // Safety gate: an UNMAPPED/unknown external tool defaults to needing approval
+  // (the safe side) — an unclassified destructive action must never run unattended.
+  return isDestructiveCall({ name: toolName, args }, { unmappedDefault: "write" })
 }
 
 export function wrapToolsWithApproval(tools: ToolDef[], gate: ApprovalLike, signal?: AbortSignal): ToolDef[] {

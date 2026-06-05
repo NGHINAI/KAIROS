@@ -1,6 +1,15 @@
 // src/daemon/agents/loop/verifier.test.ts
 import { test, expect } from "bun:test"
-import { buildDestructiveVerifier, isDestructiveCall } from "./verifier"
+import { buildDestructiveVerifier, isDestructiveCall, setToolNature } from "./verifier"
+
+// The agentic per-tool nature map the resolver would install at boot (the model's
+// own read/write labels). Tests classify against THIS, not a hardcoded verb list.
+const NATURE = new Map<string, "read" | "write">([
+  ["GMAIL_SEND_EMAIL", "write"], ["GMAIL_DELETE_MESSAGE", "write"], ["LINEAR_DELETE_ISSUE", "write"],
+  ["GOOGLECALENDAR_QUICK_ADD", "write"], ["CALCOM_BOOK", "write"], ["GMAIL_SEND_AND_GET_RECEIPT", "write"],
+  ["GMAIL_FETCH_EMAILS", "read"], ["LINEAR_LIST_ISSUES", "read"],
+])
+setToolNature(NATURE)
 
 test("isDestructiveCall: read-only tools are NOT destructive", () => {
   expect(isDestructiveCall({ name: "search_tools", args: {} })).toBe(false)
@@ -126,4 +135,45 @@ test("verifier LLM failure does NOT block (defaults ok) — never strand a real 
   const v = buildDestructiveVerifier({ llm: llm as any })
   const r = await v.verify({ utterance: "email Sam", finalText: "Sent.", toolCalls: [{ name: "execute_tool", args: { tool_name: "GMAIL_SEND_EMAIL" }, result: {} }] })
   expect(r.ok).toBe(true)
+})
+
+test("nature map drives read/write (model's per-tool labels, no verb list); unmapped defaults differ per consumer", () => {
+  const d = (tool_name: string) => isDestructiveCall({ name: "execute_tool", args: { tool_name } })
+  // mapped writes — incl. verb-less QUICK_ADD/BOOK and compound SEND_AND_GET
+  expect(d("GOOGLECALENDAR_QUICK_ADD")).toBe(true)
+  expect(d("CALCOM_BOOK")).toBe(true)
+  expect(d("GMAIL_SEND_AND_GET_RECEIPT")).toBe(true)
+  // mapped reads
+  expect(d("GMAIL_FETCH_EMAILS")).toBe(false)
+  expect(d("LINEAR_LIST_ISSUES")).toBe(false)
+  // UNMAPPED external tool → verifier/controller default = read (stream; the grounding LLM still verifies)
+  expect(d("WEIRD_TOOLKIT_FROBNICATE")).toBe(false)
+  // ...but the approval gate passes unmappedDefault:'write' → gate the unknown (safe side)
+  expect(isDestructiveCall({ name: "execute_tool", args: { tool_name: "WEIRD_TOOLKIT_FROBNICATE" } }, { unmappedDefault: "write" })).toBe(true)
+})
+
+test("V4: an errored QUICK_ADD claimed as success is caught deterministically (no LLM)", async () => {
+  let called = 0
+  const v = buildDestructiveVerifier({ llm: { complete: async () => { called++; return { text: JSON.stringify({ ok: true }) } } } as any })
+  const r = await v.verify({
+    utterance: "add a 3pm meeting",
+    finalText: "Booked! You're all set for 3pm.",
+    toolCalls: [{ name: "execute_tool", args: { tool_name: "GOOGLECALENDAR_QUICK_ADD" }, error: "RATE_LIMITED" }],
+  })
+  expect(r.ok).toBe(false)
+  expect(r.severity).toBe("write")
+  expect(called).toBe(0) // caught for free, before the (biased-ok) LLM
+})
+
+test("errored write that was RETRIED successfully is NOT flagged (recovered)", async () => {
+  const v = buildDestructiveVerifier({ llm: { complete: async () => ({ text: JSON.stringify({ ok: true }) }) } as any })
+  const r = await v.verify({
+    utterance: "send it",
+    finalText: "Sent.",
+    toolCalls: [
+      { name: "execute_tool", args: { tool_name: "GMAIL_SEND_EMAIL" }, error: "TIMEOUT" }, // first attempt failed
+      { name: "execute_tool", args: { tool_name: "GMAIL_SEND_EMAIL" }, result: { id: "m1" } }, // retry succeeded
+    ],
+  })
+  expect(r.ok).toBe(true) // recovered → not a phantom
 })

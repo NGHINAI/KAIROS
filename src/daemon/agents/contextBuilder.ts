@@ -115,6 +115,7 @@ export class ContextBuilder {
       "- Never feed a tool a GUESSED value — a phone number, email, name, date, or amount the user didn't give you. If a required detail is missing, ask for that one thing first; don't make one up.",
       "- For a genuinely multi-step task, plan briefly with the update_plan tool and tick steps off as you go. Skip the plan for simple one-step requests — don't make single-step plans.",
       "- OFFLOAD HEAVY WORK: if a task will take a while or run many steps and would otherwise make the user wait in silence (organize my inbox, research a topic, draft a long document, process many items), use spawn_background_task to run it as a background sub-agent and keep talking. The sub-agent has the same tools, skills, and memory you do, and reports back when it's done. Also use it whenever the user explicitly says \"in the background\" or \"keep talking while you do it.\" Right after you start it, say one short sentence confirming it's running in the background.",
+      "- FILES / SHELL / CODE → ALWAYS the background sub-agent: the background sub-agent ALSO has filesystem and terminal tools you do NOT have here — reading/writing/editing files, listing directories, grep/searching files, and running shell commands. So for ANY request that involves a file, a folder, the terminal, running a command, grepping/searching files, or writing/editing code, you MUST use spawn_background_task (it can do it). NEVER tell the user you 'can't create files', 'don't have filesystem/shell access', or 'can only use connected services' — that's wrong; hand the work to the sub-agent and confirm it's running.",
       "- CHECK-INS: when the user asks how a task is going (\"how's that going?\", \"is it done?\", \"what's it doing?\"), call background_tasks and tell them in plain, human language what the sub-agent is doing or what it found — don't read raw status back.",
       "- Be persistent: if a tool call fails or comes back empty, try ONE different tool, query, or source before giving up — then say what you actually checked (\"I looked in X and Y\"), not a vague \"I couldn't find it.\"",
       "- Do what the user asked and NOTHING more — don't take extra actions or cause side effects they didn't ask for, and never surprise them with an action taken on their behalf.",
@@ -194,12 +195,43 @@ export class ContextBuilder {
       this.deps.loaders.liveContext?.() ?? Promise.resolve(""),
     ])
     const deltaText = renderDelta(delta)
-    if (!deltaText && !live) return { system: base, tools: prefix.tools }
+    // Current date/time, injected FRESH every turn (never cached — it changes, and a
+    // stale/absent date makes "tomorrow"/"next week" resolve to a guessed date. That's
+    // exactly how a "what's on my calendar tomorrow" query ended up asking Google for
+    // Jan 2025). The model computes any ISO timestamps a tool needs from this.
+    const nowBlock = currentDateTimeLine() + (live ? "\n" + live : "")
     return {
-      system: base + (live ? "\n\n## Right now\n" + live : "") + (deltaText ? "\n\n## Current context\n" + deltaText : ""),
+      system: base + "\n\n## Right now\n" + nowBlock + (deltaText ? "\n\n## Current context\n" + deltaText : ""),
       tools: prefix.tools,
     }
   }
+}
+
+/** A spoken-and-tool-safe statement of the current local date & time. Recomputed
+ *  per turn. Gives the model an absolute anchor for resolving relative dates/times
+ *  and for computing ISO timestamps in tool args (calendar ranges, reminders). */
+function currentDateTimeLine(): string {
+  const now = new Date()
+  // KAIROS_TZ pins the user's timezone (REQUIRED on a cloud/UTC daemon, where the
+  // host TZ ≠ the user's and "tomorrow" would otherwise be off by a day). Unset =
+  // host TZ, which is correct for a local machine. Bad TZ / small-ICU → ISO fallback.
+  const tz = process.env.KAIROS_TZ?.trim()
+  let stamp: string
+  try {
+    stamp = now.toLocaleString("en-US", {
+      weekday: "long", year: "numeric", month: "long", day: "numeric",
+      hour: "numeric", minute: "2-digit", second: "2-digit", timeZoneName: "short",
+      ...(tz ? { timeZone: tz } : {}),
+    })
+  } catch {
+    stamp = now.toISOString() // still a real, current anchor — never a guessed/empty date
+  }
+  return (
+    `Today is ${stamp}. Resolve every relative date and time the user mentions ` +
+    `("today", "tonight", "tomorrow", "this weekend", "next Tuesday", "in 2 hours") ` +
+    `against THIS exact moment, and compute any ISO timestamps a tool needs (e.g. a ` +
+    `calendar time range) from it — never guess, hardcode, or reuse an old date.`
+  )
 }
 
 function renderDelta(d: TurnDelta): string {

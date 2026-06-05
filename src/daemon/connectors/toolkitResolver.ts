@@ -25,6 +25,7 @@ import { homedir } from 'os'
 
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000
 const ONMISS_REFRESH_INTERVAL_MS = 60 * 60 * 1000
+const ONMISS_FAIL_BACKOFF_MS = 2 * 60 * 1000 // shorter retry window after an empty/failed refresh
 const CATALOG_FETCH_LIMIT = 1000
 
 /** A single toolkit in the catalog, normalized to the camelCase/meta.* raw shape. */
@@ -77,6 +78,7 @@ export class ToolkitResolver {
   private now: () => number
   private dailyTimer: ReturnType<typeof setInterval> | null = null
   private lastOnMissRefreshAt = -ONMISS_REFRESH_INTERVAL_MS
+  private lastOnMissOk = false // was the most recent on-miss refresh successful (non-empty)?
   private loaded = false
 
   constructor(private deps: ToolkitResolverDeps) {
@@ -240,22 +242,28 @@ export class ToolkitResolver {
     this.loaded = true
   }
 
-  private async refreshCatalog(): Promise<void> {
+  private async refreshCatalog(): Promise<boolean> {
     try {
       const entries = await this.fetchCatalog()
       if (entries.length > 0) {
         this.setCatalog(entries)
         this.saveCache()
+        return true
       }
-    } catch { /* keep whatever we have; resolve() still works off live search */ }
+      return false
+    } catch { return false /* keep whatever we have; resolve() still works off live search */ }
   }
 
-  /** On-miss throttled refresh — mirrors ComposioToolResolver.resolveOrRefresh. */
+  /** On-miss throttled refresh. A SUCCESSFUL (non-empty) refresh throttles for the
+   *  full hour; a transient empty/down result only backs off ~2min so a flaky/late
+   *  catalog isn't locked out of retries for an hour (the old code set the 1h stamp
+   *  BEFORE awaiting, so one transient empty froze all retries). */
   private async maybeRefreshOnMiss(): Promise<void> {
     const now = this.now()
-    if (now - this.lastOnMissRefreshAt >= ONMISS_REFRESH_INTERVAL_MS) {
+    const interval = this.lastOnMissOk ? ONMISS_REFRESH_INTERVAL_MS : ONMISS_FAIL_BACKOFF_MS
+    if (now - this.lastOnMissRefreshAt >= interval) {
       this.lastOnMissRefreshAt = now
-      await this.refreshCatalog()
+      this.lastOnMissOk = await this.refreshCatalog()
     }
   }
 

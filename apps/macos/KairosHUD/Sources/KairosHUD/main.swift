@@ -34,6 +34,24 @@ if let i = arguments.firstIndex(of: "--snapshot"), i + 1 < arguments.count {
     exit(0)
 }
 
+// Daemon port: --port N, else $KAIROS_DAEMON_PORT, else 9876.
+func kairosDaemonPort() -> Int {
+    let a = CommandLine.arguments
+    if let i = a.firstIndex(of: "--port"), i + 1 < a.count, let p = Int(a[i + 1]) { return p }
+    if let e = ProcessInfo.processInfo.environment["KAIROS_DAEMON_PORT"], let p = Int(e) { return p }
+    return 9876
+}
+
+// Probe: connect, log events for ~6s, exit — verifies the live wire without launching the GUI.
+if arguments.contains("--probe") {
+    let probeModel = OrbModel()
+    let client = DaemonClient(model: probeModel, port: kairosDaemonPort(), verbose: true)
+    client.connect()
+    FileHandle.standardError.write("probing ws://127.0.0.1:\(kairosDaemonPort())/v1/voice/events for 6s…\n".data(using: .utf8)!)
+    RunLoop.main.run(until: Date().addingTimeInterval(6))
+    exit(0)
+}
+
 let delegate = AppDelegate()
 app.delegate = delegate
 app.run()

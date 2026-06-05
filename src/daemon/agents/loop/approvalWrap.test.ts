@@ -1,7 +1,14 @@
 // src/daemon/agents/loop/approvalWrap.test.ts
 import { test, expect } from "bun:test"
 import { wrapToolsWithApproval } from "./approvalWrap"
+import { setToolNature } from "./verifier"
 import type { ToolDef } from "../types"
+
+// The agentic nature map the resolver installs at boot. The gate consults it; an
+// UNMAPPED tool defaults to gated (safe). search_tools is a confined read.
+setToolNature(new Map<string, "read" | "write">([
+  ["LINEAR_LIST_ISSUES", "read"], ["GMAIL_SEND_EMAIL", "write"], ["GMAIL_DELETE_MESSAGE", "write"],
+]))
 
 const tools: ToolDef[] = [
   { name: "search_tools", description: "", parameters: {}, concurrencySafe: true, execute: async () => ({ tools: [] }) },

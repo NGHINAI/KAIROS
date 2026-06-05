@@ -17,20 +17,33 @@ export interface VerifyToolCall {
   error?: string
 }
 
-// ── Structural read-vs-write classification (tool NAME only) ──────────────────
-// This is NOT a regex on the user's request and never decides the verdict — it
-// only TIERS latency: a turn that ran a write tool is "irreversible" and the
-// caller holds the spoken claim until verified (block); a read-only turn already
-// streamed live, so it's verified in overlap. The LLM judges groundedness on
-// EVERY tool turn regardless, so a mis-tier only changes timing, never safety.
-const DESTRUCTIVE_RE =
-  /(SEND|DELETE|REMOVE|ARCHIVE|CREATE|UPDATE|EDIT|POST|PUT|PATCH|PAY|CHARGE|CANCEL|ASSIGN|INVITE|MERGE|CLOSE|MOVE|TRASH|UNSUBSCRIBE)/i
+// ── AGENTIC read-vs-write classification (no hardcoded verb lists) ────────────
+// Read vs write decides ONLY latency tiering (hold a write's spoken claim until
+// verified vs let a read stream live) + the errored-write fast path. The grounding
+// LLM judges hallucinations on EVERY tool turn regardless, so this never decides
+// correctness. The nature of each EXTERNAL tool is the MODEL's own one-time
+// classification of that tool's description (computed + cached by ComposioToolResolver
+// — see classifyNatures there), set here at boot/refresh. Works for ANY toolkit; no
+// word list to maintain. Our own confined/internal tools are known a priori.
+let toolNature: Map<string, "read" | "write"> | null = null
+/** Install the per-tool nature map (slug → 'read'|'write'). Called at boot and on
+ *  each catalog refresh. Reaches the verifier, the stream controller, AND the
+ *  background approval-gate automatically — they all call isDestructiveCall. */
+export function setToolNature(m: Map<string, "read" | "write"> | null): void { toolNature = m }
+
 const DESTRUCTIVE_NAMES = new Set(["connect_service", "disconnect_service", "setup_for"])
 
-// Local/scratch tools touch only the agent's private workdir or in-memory plan —
-// never an external/irreversible system, and never a user-facing factual claim
-// worth a grounding LLM call. A run of ONLY these short-circuits to ok.
-const LOCAL_TOOLS = new Set(["read_file", "list_dir", "write_file", "edit_file", "grep", "glob", "update_plan", "run_shell"])
+// Our OWN confined scratch/plan tools + INTERNAL orchestration tools — none touch
+// external irreversible state, so they're never a "write" (which would gate them for
+// approval and hang the sub-agent) and never need grounding. This is a list of OUR
+// tools, not a guess about third-party toolkits.
+const LOCAL_TOOLS = new Set([
+  "read_file", "list_dir", "write_file", "edit_file", "grep", "glob", "update_plan", "run_shell",
+  "run_subtask", "spawn_background_task", "background_tasks",
+  // KAIROS's own read-only discovery tools (not third-party toolkits) — harmless, must
+  // never be approval-gated (the sub-agent searches constantly).
+  "search_tools", "find_integration",
+])
 
 /** The real action name — unwrapping execute_tool's wrapped tool_name. */
 function effectiveName(call: VerifyToolCall): string {
@@ -38,15 +51,18 @@ function effectiveName(call: VerifyToolCall): string {
   return call.name
 }
 
-/** Did this call touch external, irreversible state? Structural — tool name only.
- *  Used to tier block-vs-overlap latency, NEVER as the groundedness verdict. */
-export function isDestructiveCall(call: VerifyToolCall): boolean {
-  if (LOCAL_TOOLS.has(call.name)) return false // confined scratch/plan tools — never external
+/** Does this call mutate external/irreversible state? From the agentic per-tool
+ *  nature map (the model's own read/write classification of the tool), with our
+ *  internal tools known a priori. For an UNMAPPED external tool, `unmappedDefault`
+ *  decides: 'read' (verifier/controller — stream live; the grounding LLM still
+ *  verifies) or 'write' (approval-gate — gate the unknown, the safe side). */
+export function isDestructiveCall(call: VerifyToolCall, opts?: { unmappedDefault?: "read" | "write" }): boolean {
+  if (LOCAL_TOOLS.has(call.name)) return false // our confined/internal tools — never external
   const name = effectiveName(call)
   if (DESTRUCTIVE_NAMES.has(call.name) || DESTRUCTIVE_NAMES.has(name)) return true
-  // LIST/GET/SEARCH/FETCH/READ are reads even if the toolkit name is long.
-  if (/(_LIST|_GET|_SEARCH|_FETCH|_READ|LIST_|GET_|SEARCH_|FIND_)/i.test(name)) return false
-  return DESTRUCTIVE_RE.test(name)
+  const nat = toolNature?.get(name) ?? toolNature?.get(call.name)
+  if (nat) return nat === "write"
+  return (opts?.unmappedDefault ?? "read") === "write"
 }
 
 /** Did the tool call fail? Looks at the error field AND common Composio/REST
@@ -92,7 +108,7 @@ export function buildDestructiveVerifier(deps: VerifierDeps) {
   return {
     async verify(opts: { utterance: string; finalText: string; toolCalls: VerifyToolCall[] }): Promise<VerifyResult> {
       const calls = opts.toolCalls ?? []
-      const severity: "read" | "write" = calls.some(isDestructive) ? "write" : "read"
+      const severity: "read" | "write" = calls.some((c) => isDestructive(c)) ? "write" : "read"
       const finalText = String(opts.finalText ?? "")
 
       // A run that touched only confined scratch/plan tools (or no tools) makes no
@@ -100,10 +116,16 @@ export function buildDestructiveVerifier(deps: VerifierDeps) {
       const external = calls.filter((c) => !LOCAL_TOOLS.has(c.name))
       if (external.length === 0) return { ok: true, severity }
 
-      // FREE deterministic pre-check (no LLM, ~0ms): a write tool ERRORED or
-      // returned failure. The agent must not claim success over a failed write.
-      // Highest-value, most dangerous catch — zero latency.
-      const erroredWrite = external.find((c) => isDestructive(c) && callErrored(c))
+      // FREE deterministic pre-check (no LLM, ~0ms): a WRITE tool ERRORED and was
+      // NOT retried successfully later — the agent must not claim success over it.
+      // isDestructive now classifies by first-verb, so QUICK_ADD/BOOK count too.
+      // Reads that error (an honest "couldn't find it") are excluded by isDestructive.
+      const erroredWrite = external.find((c, i) => {
+        if (!isDestructive(c) || !callErrored(c)) return false
+        const nm = effectiveName(c)
+        // a later successful call of the same tool = recovered → don't flag.
+        return !external.slice(i + 1).some((d) => effectiveName(d) === nm && !callErrored(d))
+      })
       if (erroredWrite) {
         return {
           ok: false,
@@ -118,7 +140,7 @@ export function buildDestructiveVerifier(deps: VerifierDeps) {
         .map(
           (c) =>
             `tool=${effectiveName(c)}${isDestructive(c) ? " [write]" : " [read]"} ${
-              c.error ? `ERROR=${c.error}` : `result=${JSON.stringify(c.result ?? null).slice(0, 2000)}`
+              c.error ? `ERROR=${c.error}` : `result=${JSON.stringify(c.result ?? null).slice(0, 3000)}`
             }`,
         )
         .join("\n")

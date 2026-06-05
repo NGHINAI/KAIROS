@@ -75,6 +75,32 @@ describe('connect_service slug resolution (replaces normalizeToolkitSlug)', () =
     expect(connectCalled).toBe(false)
   })
 
+  it('T1: a TIE at HIGH score (both 0.8) → needs_disambiguation, not silently the first', async () => {
+    let connectCalled = false
+    const intent = createConnectServiceIntent({
+      connectionFlow: { connect: async () => { connectCalled = true; return { status: 'success', toolkit_slug: 'jira', duration_ms: 1 } } },
+      sessionManager: { addToolkit: async () => {} },
+      toolkitResolver: fakeResolver({
+        'issue tracking': { best: 'jira', matches: [
+          { slug: 'jira', name: 'Jira', score: 0.8 },
+          { slug: 'linear', name: 'Linear', score: 0.8 },
+        ] },
+      }),
+    } as any)
+    const result: any = await intent.handler({ toolkit_slug: 'issue tracking' as any })
+    expect(result.status).toBe('needs_disambiguation') // was silently connecting jira (first) at 0.8
+    expect(connectCalled).toBe(false)
+  })
+
+  it('whitespace-only toolkit_slug is rejected (no empty-slug connect)', async () => {
+    const intent = createConnectServiceIntent({
+      connectionFlow: { connect: async () => { throw new Error('should not connect') } },
+      sessionManager: { addToolkit: async () => {} },
+      toolkitResolver: fakeResolver(),
+    } as any)
+    await expect(intent.handler({ toolkit_slug: '   ' as any })).rejects.toThrow(/required|non-empty/i)
+  })
+
   it('falls back to a slugified phrase when the resolver finds nothing', async () => {
     let connectedWith = ''
     const intent = createConnectServiceIntent({

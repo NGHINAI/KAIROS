@@ -50,6 +50,11 @@ export interface BackgroundAgentManagerDeps {
   onReport?: (id: string, goal: string, summary: string) => void
   maxConcurrent?: number
   maxDepth?: number
+  /** SA1 runaway backstop: max concurrent run_subtask children a SINGLE parent may
+   *  have in flight. spawnAndWait bypasses maxConcurrent to avoid deadlock, so without
+   *  this a sub-agent could fan out unboundedly. Per-parent (not global) so it can't
+   *  deadlock a parent waiting on its own child. Default 12. */
+  maxNestedConcurrent?: number
   newId?: () => string
 }
 
@@ -215,8 +220,16 @@ export class BackgroundAgentManager {
     const depth = opts.depth ?? 0
     const maxDepth = this.deps.maxDepth ?? 2
     if (depth >= maxDepth) return { finalText: "Couldn't run the sub-task: nesting depth limit reached.", ok: false }
+    // SA1: bound fan-out WIDTH per parent so a sub-agent can't spawn run_subtask
+    // workers unboundedly (depth alone doesn't cap width).
+    const parentId = opts.parentRunId ?? null
+    const maxFanout = this.deps.maxNestedConcurrent ?? 12
+    if (parentId) {
+      const siblings = [...this.tasks.values()].filter((e) => e.task.status === "running" && e.task.parentRunId === parentId).length
+      if (siblings >= maxFanout) return { finalText: `Couldn't run the sub-task: this agent already has ${siblings} sub-tasks running (limit ${maxFanout}). Wait for some to finish.`, ok: false }
+    }
     const conversationId = opts.conversationId ?? this.activeConversationId
-    return this.launch(goal, depth, conversationId, false, opts.parentRunId ?? null).promise
+    return this.launch(goal, depth, conversationId, false, parentId).promise
   }
 
   get(id: string): BgTask | undefined { return this.tasks.get(id)?.task }
@@ -230,6 +243,12 @@ export class BackgroundAgentManager {
     entry.task.endedAt = Date.now()
     try { entry.controller?.abort() } catch { /* */ }
     this.emit({ kind: "task_cancelled", id })
+    // SA2: cancel in-flight NESTED children too. A cancelled orchestrator must not
+    // orphan its run_subtask workers — they would keep burning tokens and could still
+    // fire an already-approved destructive action. Collect children BEFORE recursing
+    // (cancel() mutates the map via retire). Recursion reaches grandchildren.
+    const children = [...this.tasks.values()].filter((c) => c.task.status === "running" && c.task.parentRunId === id).map((c) => c.task.id)
+    for (const childId of children) this.cancel(childId)
     this.retire(id)
     return true
   }

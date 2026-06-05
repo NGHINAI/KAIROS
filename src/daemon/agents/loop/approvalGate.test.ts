@@ -79,3 +79,30 @@ test("an already-aborted signal denies immediately without asking", async () => 
   expect(asked.length).toBe(0)
   expect(await p).toEqual({ approved: false })
 })
+
+test("SERIALIZES asks: a 2nd concurrent approval queues to inbox; bare 'yes' resolves the ACTIVE one; next is promoted", async () => {
+  const { asked, inboxed, gate } = fakes()
+  const p1 = gate.requestApproval(req("a1"))
+  const p2 = gate.requestApproval(req("a2"))
+  expect(asked.map((r) => r.id)).toEqual(["a1"])    // only a1 is spoken
+  expect(inboxed.map((r) => r.id)).toEqual(["a2"])  // a2 queued straight to inbox
+  expect(gate.listPending().map((r) => r.id)).toEqual(["a1", "a2"])
+  expect(gate.resolveLatest(true)).toBe(true)        // bare "yes" → the ACTIVE ask (a1), unambiguous
+  expect(await p1).toEqual({ approved: true })
+  expect(asked.map((r) => r.id)).toEqual(["a1", "a2"]) // a2 now promoted + spoken
+  expect(gate.resolve("a2", false)).toBe(true)
+  expect(await p2).toEqual({ approved: false })
+})
+
+test("max-park auto-DENIES a never-answered, never-cancelled approval (no forever-hang)", async () => {
+  const timers: Array<() => void> = []
+  const gate = new ApprovalGate({
+    ask: () => {}, inbox: () => {}, voiceWindowMs: 1000, maxParkMs: 5000,
+    setTimer: (fn) => { timers.push(fn); return timers.length },
+    clearTimer: () => {},
+  })
+  const p = gate.requestApproval(req("a1"))
+  timers[0]!() // timers[0] = the max-park timer (armed in requestApproval, before the voice timer)
+  expect(await p).toEqual({ approved: false })
+  expect(gate.listPending().length).toBe(0)
+})

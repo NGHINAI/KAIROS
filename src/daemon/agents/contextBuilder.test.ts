@@ -44,6 +44,20 @@ test("fast-tier prompt is slimmer — keeps talk/persona but omits the acting+to
   expect(fast.system).toContain("## How you talk")        // but keeps the voice/persona rules
 })
 
+test("both tiers carry the CURRENT date/time so relative dates ('tomorrow') resolve correctly", async () => {
+  const cb = new ContextBuilder({
+    loaders: { soulDigest: async () => "You are KAIROS.", standingOrdersSummary: async () => "", memoryOverview: async () => "", kairosSkills: async () => [], introspectionTools: async () => [] },
+  } as any)
+  const year = String(new Date().getFullYear())
+  const smart = await cb.build({ utterance: "what's on my calendar tomorrow", tier: "smart" })
+  const fast = await cb.build({ utterance: "what time is it", tier: "fast" })
+  expect(smart.system).toContain("## Right now")
+  expect(smart.system).toContain("Today is")
+  expect(smart.system).toContain(year)              // the ACTUAL current year, not a guess
+  expect(smart.system).toMatch(/never guess.*date/i)
+  expect(fast.system).toContain(year)               // fast tier needs it too ("what time is it")
+})
+
 test("Phase 5: both tiers carry the baseline character (warm/witty/concise) + anti-robotic style", async () => {
   const cb = new ContextBuilder({
     loaders: { soulDigest: async () => "You are KAIROS.", standingOrdersSummary: async () => "", memoryOverview: async () => "", kairosSkills: async () => [], introspectionTools: async () => [] },

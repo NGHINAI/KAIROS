@@ -49,6 +49,17 @@ describe('ConnectionFlow', () => {
     expect(deps.connectionStore.getByToolkit('local', 'slack')?.status).toBe('active')
   })
 
+  it('already-connected toolkit short-circuits — no second OAuth/browser flow', async () => {
+    const opens: string[] = []
+    const deps = makeDeps({ browserOpener: { open: async (url: string) => { opens.push(url) } } })
+    const flow = new ConnectionFlow(deps as any)
+    await flow.connect({ userId: 'local', toolkitSlug: 'slack' }) // first connect → active
+    expect(opens.length).toBe(1)
+    const again = await flow.connect({ userId: 'local', toolkitSlug: 'slack' }) // second → should short-circuit
+    expect(again.status).toBe('success')
+    expect(opens.length).toBe(1) // browser NOT reopened
+  })
+
   it('opens the browser to the redirect_url returned by composio.linkConnection', async () => {
     const opens: string[] = []
     const deps = makeDeps({

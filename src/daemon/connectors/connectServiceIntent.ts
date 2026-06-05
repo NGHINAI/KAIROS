@@ -12,11 +12,9 @@ import type { ToolkitResolver } from './toolkitResolver'
 import type { IntentRegistry } from '../agency/intentRegistry'
 import type { ActionContext } from '../agency/actionExecutor'
 
-/** A high-confidence single match (score >= this) connects directly. Below it,
- *  a unique top candidate still connects but logs the alternatives; ties above
- *  the ambiguity gap surface as needs_disambiguation. */
-const HIGH_CONFIDENCE = 0.8
-/** If the 2nd-best score is within this of the best, the result is ambiguous. */
+/** If the 2nd-best score is within this of a non-exact best, the result is a tie →
+ *  ask the user which to connect (instead of silently picking the first). A clear
+ *  winner (gap larger than this) connects directly and logs the alternatives. */
 const AMBIGUITY_GAP = 0.15
 
 export type ConnectServiceIntentDeps = {
@@ -60,7 +58,7 @@ export function createConnectServiceIntent(
   const logFn = deps.log ?? (() => {})
 
   async function handler(args: { toolkit_slug: ToolkitSlug }): Promise<ConnectFlowResult> {
-    if (!args.toolkit_slug || typeof args.toolkit_slug !== 'string') {
+    if (!args.toolkit_slug || typeof args.toolkit_slug !== 'string' || !args.toolkit_slug.trim()) {
       throw new Error(
         'connect_service: toolkit_slug is required and must be a non-empty string',
       )
@@ -127,10 +125,13 @@ async function resolveSlug(
   const top = matches[0]!
   const runnerUp = matches[1]
 
+  // A runner-up within AMBIGUITY_GAP of a non-exact top = a genuine tie → ask which,
+  // REGARDLESS of absolute score. (The old `&& top.score < HIGH_CONFIDENCE` let two
+  // toolkits tied at 0.8 through, silently connecting the alphabetically-first.)
   const ambiguous =
     !!runnerUp && top.score < 1 && (top.score - runnerUp.score) <= AMBIGUITY_GAP
 
-  if (ambiguous && top.score < HIGH_CONFIDENCE) {
+  if (ambiguous) {
     return {
       status: 'needs_disambiguation',
       toolkit_slug: top.slug,

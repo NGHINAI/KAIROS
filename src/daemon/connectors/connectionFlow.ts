@@ -33,6 +33,12 @@ export class ConnectionFlow {
 
   async connect(opts: { userId: string; toolkitSlug: ToolkitSlug }): Promise<ConnectFlowResult> {
     const startedAt = Date.now()
+    // Already connected → short-circuit. Re-running the full OAuth/browser flow for a
+    // service that's already active is wasteful and pops a needless browser window.
+    const existing = this.deps.connectionStore.getByToolkit(opts.userId, opts.toolkitSlug)
+    if (existing && existing.status === 'active') {
+      return { status: 'success', toolkit_slug: opts.toolkitSlug, connection_id: existing.connection_id, duration_ms: Date.now() - startedAt }
+    }
     let authConfigId = ''
     try {
       // 1. Resolve auth config (idempotent — looks up existing managed config or creates one)

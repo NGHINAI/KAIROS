@@ -86,11 +86,12 @@ export function registerFindIntegrationIntent(
       }
     }
     const summary = result.matches
-      .map((m) => `${m.slug}${m.name && m.name !== m.slug ? ` (${m.name})` : ''} [score ${m.score.toFixed(2)}]`)
+      .map((m) => `${m.slug}${m.name && m.name !== m.slug ? ` (${m.name})` : ''} [score ${(typeof m.score === 'number' ? m.score : 0).toFixed(2)}]`)
       .join(', ')
+    const best = result.best ?? result.matches[0]?.slug ?? 'unknown' // never surface literal "undefined" to the planner
     return {
       status: 'success' as const,
-      details: `Best match: ${result.best}. Candidates: ${summary}`,
+      details: `Best match: ${best}. Candidates: ${summary}`,
     }
   })
 }

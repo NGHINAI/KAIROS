@@ -20,6 +20,10 @@ export interface ApprovalGateDeps {
   inbox: (req: ApprovalRequest) => void
   /** Wait this long for an immediate voice answer before inboxing. Default 20s. */
   voiceWindowMs?: number
+  /** Hard cap on how long an approval may stay parked before auto-DENYING — so a
+   *  never-answered, never-cancelled approval can't hang a sub-agent (and its
+   *  concurrency slot) forever. Default 10 min. */
+  maxParkMs?: number
   setTimer?: (fn: () => void, ms: number) => any
   clearTimer?: (h: any) => void
 }
@@ -27,63 +31,93 @@ export interface ApprovalGateDeps {
 interface Pending {
   req: ApprovalRequest
   resolve: (approved: boolean) => void
-  timer: any
+  voiceTimer: any | null   // inbox-after-window timer (only armed while this is the ACTIVE ask)
+  maxTimer: any            // hard auto-deny timer
   order: number
 }
 
 export class ApprovalGate {
   private pending = new Map<string, Pending>()
   private seq = 0
+  // Only ONE approval is spoken/asked at a time. Others queue (straight to inbox)
+  // so a bare voice "yes"/"no" is never ambiguous — it resolves THIS asked one.
+  private activeId: string | null = null
 
   constructor(private deps: ApprovalGateDeps) {}
+
+  private clearT(h: any): void { try { (this.deps.clearTimer ?? clearTimeout)(h) } catch { /* */ } }
+
+  /** Speak/surface a pending as the active ask + arm its voice-window inbox timer. */
+  private activate(id: string): void {
+    const p = this.pending.get(id)
+    if (!p) return
+    this.activeId = id
+    try { this.deps.ask(p.req) } catch { /* */ }
+    const setT = this.deps.setTimer ?? ((fn: () => void, ms: number) => setTimeout(fn, ms))
+    p.voiceTimer = setT(() => { try { this.deps.inbox(p.req) } catch { /* */ } }, this.deps.voiceWindowMs ?? 20_000)
+  }
+
+  /** Remove a pending, resolve its promise, and promote the next queued ask. */
+  private finalize(id: string, approved: boolean): boolean {
+    const p = this.pending.get(id)
+    if (!p) return false
+    this.pending.delete(id)
+    this.clearT(p.voiceTimer)
+    this.clearT(p.maxTimer)
+    p.resolve(approved)
+    if (this.activeId === id) {
+      this.activeId = null
+      let next: Pending | undefined
+      for (const q of this.pending.values()) if (!next || q.order < next.order) next = q // oldest queued
+      if (next) this.activate(next.req.id)
+    }
+    return true
+  }
 
   /** Agent awaits this. Parked (no tokens) until resolved by voice or inbox.
    *  If the run's signal aborts while parked, the approval resolves to a DENIAL
    *  and the pending entry is purged — so a cancelled sub-agent can't hang here,
-   *  and a later stray "yes" can't resurrect it. */
+   *  and a later stray "yes" can't resurrect it. Concurrent requests queue behind
+   *  the one being asked (serialized), and a hard maxParkMs cap auto-denies. */
   requestApproval(req: ApprovalRequest, signal?: AbortSignal): Promise<{ approved: boolean }> {
     const setT = this.deps.setTimer ?? ((fn: () => void, ms: number) => setTimeout(fn, ms))
-    const windowMs = this.deps.voiceWindowMs ?? 20_000
     return new Promise<{ approved: boolean }>((resolvePromise) => {
-      // Already cancelled before we even park → deny immediately.
       if (signal?.aborted) { resolvePromise({ approved: false }); return }
-      this.deps.ask(req)
-      // If unanswered within the window, park into the inbox (still awaiting).
-      const timer = setT(() => { try { this.deps.inbox(req) } catch { /* */ } }, windowMs)
-      const onAbort = () => {
-        const p = this.pending.get(req.id)
-        if (p) { this.pending.delete(req.id); try { (this.deps.clearTimer ?? clearTimeout)(p.timer) } catch { /* */ } }
-        resolvePromise({ approved: false })
-      }
+      const onAbort = () => { this.finalize(req.id, false) }
       try { signal?.addEventListener?.("abort", onAbort, { once: true }) } catch { /* */ }
+      const maxTimer = setT(() => { this.finalize(req.id, false) }, this.deps.maxParkMs ?? 10 * 60_000)
       this.pending.set(req.id, {
         req,
-        timer,
         order: ++this.seq,
+        voiceTimer: null,
+        maxTimer,
         resolve: (approved: boolean) => {
           try { signal?.removeEventListener?.("abort", onAbort) } catch { /* */ }
           resolvePromise({ approved })
         },
       })
+      // First in line → ask it aloud now; otherwise queue straight to the inbox.
+      if (this.activeId === null) this.activate(req.id)
+      else { try { this.deps.inbox(req) } catch { /* */ } }
     })
   }
 
   /** Resolve a specific pending approval (from the inbox, or a voice answer tied to it). */
   resolve(id: string, approved: boolean): boolean {
-    const p = this.pending.get(id)
-    if (!p) return false
-    this.pending.delete(id)
-    try { (this.deps.clearTimer ?? clearTimeout)(p.timer) } catch { /* */ }
-    p.resolve(approved)
-    return true
+    return this.finalize(id, approved)
   }
 
-  /** Resolve the MOST RECENT pending — for a bare voice "yes"/"no" not tied to an id. */
+  /** Resolve the approval currently being ASKED — for a bare voice "yes"/"no" not
+   *  tied to an id. Unambiguous because only one is asked at a time; falls back to
+   *  the most recent pending if nothing is actively asking. */
   resolveLatest(approved: boolean): boolean {
-    let latest: Pending | undefined
-    for (const p of this.pending.values()) if (!latest || p.order > latest.order) latest = p
-    if (!latest) return false
-    return this.resolve(latest.req.id, approved)
+    let id = this.activeId
+    if (!id) {
+      let latest: Pending | undefined
+      for (const p of this.pending.values()) if (!latest || p.order > latest.order) latest = p
+      id = latest?.req.id ?? null
+    }
+    return id ? this.finalize(id, approved) : false
   }
 
   /** Parked approvals awaiting a decision — for the UI/inbox. */

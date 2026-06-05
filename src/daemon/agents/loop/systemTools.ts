@@ -68,7 +68,11 @@ export function isReadOnlyShell(command: string): boolean {
   // 2>&1 and 2>/dev/null are stripped first so normal reads aren't penalised.)
   const stripped = cmd.replace(/2>&1/g, " ").replace(/2>\s*\/dev\/null/g, " ")
   if (/>|\btee\b|\$\(|`|<\(/.test(stripped)) return false
-  for (const seg of cmd.split(/\||&&|\|\||;/).map((s) => s.trim()).filter(Boolean)) {
+  // Split on EVERY command separator — pipes, &&, ||, ;, a single & (background),
+  // AND newlines. Missing & / newline let "ls\nrm -rf /" or "ls & rm -rf /" be
+  // judged by their harmless FIRST token while the destructive part rode along
+  // un-checked → auto-approved. Split the stripped form so a benign 2>&1 survives.
+  for (const seg of stripped.split(/\r?\n|&&|\|\||;|\||&/).map((s) => s.trim()).filter(Boolean)) {
     const toks = seg.split(/\s+/)
     const bin = (toks[0] ?? "").replace(/^.*\//, "") // strip any path prefix
     if (bin === "git") { if (!GIT_READ.has(toks[1] ?? "")) return false; continue }
@@ -313,6 +317,7 @@ export function buildSystemTools(deps: SystemToolsDeps): ToolDef[] {
           if (globRe && !globRe.test(rel)) continue
           let text: string
           try { text = await deps.fs.readFile(f) } catch { continue }
+          if (text.includes("\x00")) continue // binary content (NUL byte) — skip, regardless of extension
           const lines = text.split("\n")
           for (let i = 0; i < lines.length && hits.length < limit; i++) {
             if (re.test(lines[i]!)) hits.push(`${rel}:${i + 1}: ${lines[i]!.trim().slice(0, 200)}`)

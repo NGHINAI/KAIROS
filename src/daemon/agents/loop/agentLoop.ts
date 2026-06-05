@@ -67,12 +67,6 @@ export async function runAgentLoop(initial: LoopMsg[], deps: AgentLoopDeps): Pro
   let lastPlan: Array<{ step: string; status: string }> | undefined
   let prevSignature = ""
   let identicalRounds = 1
-  const maxCorrections = deps.maxCorrections ?? 1
-  let corrections = 0
-  // The best real answer produced so far. A self-correct round that comes back
-  // empty must NEVER downgrade a genuine answer to the fallback line (the user may
-  // already have heard it stream) — we fall back to this instead.
-  let lastGoodDraft = ""
 
   for (let turn = 1; turn <= maxTurns; turn++) {
     if (deps.signal?.aborted) return { finalText: "", toolCalls, turns: turn, stopped: "aborted" }
@@ -216,32 +210,27 @@ export async function runAgentLoop(initial: LoopMsg[], deps: AgentLoopDeps): Pro
 
     // Final answer (or forced answer on the last turn).
     const draft = text.trim()
-    if (draft) lastGoodDraft = draft   // remember the best genuine answer we've produced
-    const finalText = draft || lastGoodDraft || deps.emptyFallback || EMPTY_FALLBACK
+    const finalText = draft || deps.emptyFallback || EMPTY_FALLBACK
 
-    // ── Grounded verify → self-correct gate ──────────────────────────────────
-    // Before this claim stands, check it is supported by the tool ledger. On a
-    // flag we DON'T hedge — inject the concern and run ONE more round so the model
-    // actually performs the action it claimed (or restates from the results).
-    // Only when the model produced a real claim (text), tools ran, a round is
-    // still available, and we haven't spent our corrections. Reads pay nothing
-    // perceptible: the answer already streamed live this turn — verify only
-    // delays the RETURN, not the speech.
-    if (deps.verify && draft && toolCalls.length > 0 && corrections < maxCorrections && turn < maxTurns) {
+    // ── Grounded verify gate (text-only correction; NEVER re-executes) ─────────
+    // Before this claim stands, check it is supported by the tool ledger. If it is
+    // NOT, we do NOT run another tool round: re-running risked DOUBLE-EXECUTING a
+    // write that already succeeded (double-send/charge) and an empty round that
+    // erased the real answer. Instead we REPLACE the spoken text with the verifier's
+    // grounded restatement (or an honest hedge). Runs on EVERY tool turn, including
+    // the final/forced one. The streamed (optimistic) text, if any, is superseded by
+    // this return value (the conductor speaks the corrected text; on a write turn the
+    // claim was held back, on a read turn a short follow-up corrects it).
+    if (deps.verify && draft && toolCalls.length > 0) {
       let v: { ok: boolean; concern?: string; correction?: string } | null = null
       try { v = await deps.verify({ finalText, toolCalls }) } catch { v = null }
       if (v && v.ok === false) {
-        corrections++
         emit({ kind: "self_correct", concern: v.concern ?? "the reply was not supported by the tool results" })
-        msgs.push({ role: "assistant", content: finalText })
-        msgs.push({
-          role: "system",
-          content:
-            `STOP — do not end the turn yet. A grounding check found your draft reply is NOT supported by the tool results: ${v.concern ?? "unsupported claim"}. ` +
-            (v.correction ? `The accurate statement given ONLY the results is: "${v.correction}". ` : "") +
-            `If you claimed an action that did not actually happen, CALL the tool to do it now. Otherwise restate your answer using ONLY what the tool results show — never claim anything they don't support.`,
-        })
-        continue
+        const corrected = v.correction && v.correction.trim()
+          ? v.correction.trim()
+          : `Actually — I'm not fully certain about that${v.concern ? ` (${v.concern})` : ""}, so I won't assume it. Want me to double-check?`
+        emit({ kind: "final", text: corrected })
+        return { finalText: corrected, toolCalls, turns: turn, stopped: "final", plan: lastPlan, corrected: true }
       }
     }
 
@@ -252,11 +241,11 @@ export async function runAgentLoop(initial: LoopMsg[], deps: AgentLoopDeps): Pro
       turns: turn,
       stopped: calls.length > 0 && lastTurn ? "max_turns" : "final",
       plan: lastPlan,
-      corrected: corrections > 0,
+      corrected: false,
     }
   }
 
-  const finalText = lastGoodDraft || deps.emptyFallback || EMPTY_FALLBACK
+  const finalText = deps.emptyFallback || EMPTY_FALLBACK
   emit({ kind: "final", text: finalText })
-  return { finalText, toolCalls, turns: maxTurns, stopped: "max_turns", plan: lastPlan }
+  return { finalText, toolCalls, turns: maxTurns, stopped: "max_turns", plan: lastPlan, corrected: false }
 }

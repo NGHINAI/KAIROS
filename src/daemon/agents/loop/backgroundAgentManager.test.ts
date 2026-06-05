@@ -59,6 +59,34 @@ test("depth cap rejects sub-agents spawning too deep (runaway guard)", () => {
   expect(m.spawn("deep", { depth: 1 }).accepted).toBe(false)
 })
 
+test("SA1: per-parent run_subtask fan-out is capped at maxNestedConcurrent (width bound)", async () => {
+  let n = 0
+  const never = () => new Promise<{ finalText: string; ok: boolean }>(() => {})
+  const m = new BackgroundAgentManager({ runAgent: never, maxDepth: 5, maxNestedConcurrent: 3, newId: () => `t${++n}` })
+  const promises = [0, 1, 2, 3, 4].map(() => m.spawnAndWait("worker", { depth: 1, parentRunId: "P" }))
+  await tick()
+  expect(m.listRunning().filter((t) => t.parentRunId === "P").length).toBe(3) // only 3 of 5 accepted
+  const overflow = await promises[4]! // the 5th resolved immediately as not-ok
+  expect(overflow.ok).toBe(false)
+  expect(overflow.finalText).toMatch(/sub-tasks|limit/i)
+})
+
+test("SA2: cancelling a parent cancels its in-flight nested run_subtask children (no orphans)", async () => {
+  let n = 0
+  const never = () => new Promise<{ finalText: string; ok: boolean }>(() => {})
+  const m = new BackgroundAgentManager({ runAgent: never, maxConcurrent: 2, maxDepth: 5, newId: () => `t${++n}` })
+  const parent = m.spawn("orchestrate") // t1, depth 0
+  void m.spawnAndWait("subtask", { depth: 1, parentRunId: parent.id }) // t2, nested child
+  await tick()
+  const child = m.listRunning().find((t) => t.parentRunId === parent.id)!
+  expect(child).toBeDefined()
+  expect(m.get(child.id)!.status).toBe("running")
+  m.cancel(parent.id) // cancelling the parent must cascade
+  expect(m.get(parent.id)!.status).toBe("cancelled")
+  expect(m.get(child.id)!.status).toBe("cancelled") // child no longer orphaned
+  expect(m.listRunning().length).toBe(0)
+})
+
 test("maps loop tool events to task_tool events for the UI", async () => {
   const events: any[] = []
   let captured: ((e: any) => void) | null = null

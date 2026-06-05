@@ -195,35 +195,74 @@ test("emits tool_call_start before tool_call_done, and a final event", async () 
   expect(kinds).toContain("final")
 })
 
-test("verify gate: an unsupported claim → self-corrects in ONE more round", async () => {
-  // turn 1: tool round; turn 2: a false 'Deleted' claim → verify flags; turn 3: corrected.
+test("verify gate: an unsupported claim is REPLACED with the grounded correction (no extra tool round)", async () => {
   const llm = fakeLlm([
     [toolUse("c1", "echo", "{}"), done()],
     [delta("Done. Deleted."), done()],
-    [delta("Actually, I haven't deleted it yet."), done()],
   ])
   const events: LoopEvent[] = []
-  let verifyCalls = 0
   const res = await runAgentLoop([{ role: "user", content: "delete it" }], {
     llm: llm as any,
     tools,
     onEvent: (e) => events.push(e),
-    verify: async ({ finalText }) => {
-      verifyCalls++
-      return finalText.includes("Deleted")
-        ? { ok: false, concern: "no delete tool ran", correction: "I haven't deleted it yet." }
-        : { ok: true }
-    },
+    verify: async ({ finalText }) =>
+      finalText.includes("Deleted") ? { ok: false, concern: "no delete ran", correction: "I haven't deleted it yet." } : { ok: true },
   })
-  expect(res.finalText).toBe("Actually, I haven't deleted it yet.")
+  expect(res.finalText).toBe("I haven't deleted it yet.") // grounded correction, not the phantom
   expect(res.corrected).toBe(true)
-  expect(verifyCalls).toBe(1) // maxCorrections=1 → verify once, then accept the corrected answer
+  expect(res.turns).toBe(2) // NO third round — text replacement, not re-execution
   expect(events.some((e) => e.kind === "self_correct")).toBe(true)
-  // the correction was injected as a system message before the final round
-  expect(llm.seen[2]!.some((m: any) => m.role === "system" && /grounding check/i.test(m.content ?? ""))).toBe(true)
 })
 
-test("verify gate: a grounded claim passes through untouched (no extra round)", async () => {
+test("verify gate: a FALSE-POSITIVE verify of a SUCCEEDED write does NOT re-execute it (no double-send)", async () => {
+  // V1 regression: the old design told the model to 'CALL the tool to do it now',
+  // which re-sent an email/charge that had already succeeded. Must never re-execute.
+  let sendCount = 0
+  const sendTool: ToolDef = { name: "send_email", description: "send", parameters: {}, execute: async () => { sendCount++; return { id: "m" + sendCount } } }
+  const llm = fakeLlm([
+    [toolUse("c1", "send_email", "{}"), done()],   // sends (succeeds)
+    [delta("Sent your email!"), done()],            // claims success
+    [toolUse("c2", "send_email", "{}"), done()],    // MUST NEVER be reached
+  ])
+  const res = await runAgentLoop([{ role: "user", content: "email Sam" }], {
+    llm: llm as any,
+    tools: [sendTool],
+    verify: async () => ({ ok: false, concern: "couldn't confirm", correction: "I've sent your email." }),
+  })
+  expect(sendCount).toBe(1) // sent exactly once — no double-send
+  expect(res.finalText).toBe("I've sent your email.")
+  expect(res.corrected).toBe(true)
+})
+
+test("verify gate: runs on the FINAL forced-answer turn (turn == maxTurns), the riskiest one", async () => {
+  // V3 regression: verify used to be skipped when turn == maxTurns.
+  let verified = false
+  const llm = fakeLlm([
+    [toolUse("c1", "echo", "{}"), done()],          // turn 1 tool round
+    [delta("Done. Deleted everything."), done()],   // turn 2 == maxTurns: forced answer
+  ])
+  const res = await runAgentLoop([{ role: "user", content: "delete" }], {
+    llm: llm as any,
+    tools,
+    maxTurns: 2,
+    verify: async () => { verified = true; return { ok: false, concern: "no delete ran", correction: "I haven't deleted anything." } },
+  })
+  expect(verified).toBe(true) // verify WAS consulted on the last turn
+  expect(res.finalText).toBe("I haven't deleted anything.") // and the phantom claim was replaced
+})
+
+test("verify gate: a flag with NO correction string → honest hedge, never the rejected claim", async () => {
+  const llm = fakeLlm([[toolUse("c1", "echo", "{}"), done()], [delta("Done. Deleted."), done()]])
+  const res = await runAgentLoop([{ role: "user", content: "delete it" }], {
+    llm: llm as any,
+    tools,
+    verify: async () => ({ ok: false, concern: "no delete ran" }), // flagged, but no correction provided
+  })
+  expect(res.finalText).not.toContain("Deleted") // never re-speaks the rejected claim
+  expect(res.finalText).toMatch(/double-check|not.*certain/i)
+})
+
+test("verify gate: a grounded claim passes through untouched", async () => {
   const llm = fakeLlm([[toolUse("c1", "echo", "{}"), done()], [delta("All set."), done()]])
   let verifyCalls = 0
   const res = await runAgentLoop([{ role: "user", content: "do it" }], {
@@ -247,23 +286,4 @@ test("verify gate: NOT consulted on a pure-chat turn (no tools ran)", async () =
   })
   expect(res.finalText).toBe("hey there")
   expect(verifyCalls).toBe(0) // nothing was done → nothing to ground
-})
-
-test("verify gate: a self-correct round that comes back EMPTY must NOT downgrade a real answer to the fallback", async () => {
-  // The live regression: a successful tool turn produced a real answer, the verifier
-  // (falsely) flagged it, and the correction round returned empty content (reasoning
-  // burn / confusion) → the loop surfaced EMPTY_FALLBACK, overwriting the answer the
-  // user had already heard. The real drafted answer must be preserved instead.
-  const llm = fakeLlm([
-    [toolUse("c1", "echo", "{}"), done()],
-    [delta("You have a holiday tomorrow."), done()],
-    [done()], // correction round returns EMPTY
-  ])
-  const res = await runAgentLoop([{ role: "user", content: "what's on my calendar" }], {
-    llm: llm as any,
-    tools,
-    verify: async ({ finalText }) => (finalText.includes("holiday") ? { ok: false, concern: "x" } : { ok: true }),
-  })
-  expect(res.finalText).toBe("You have a holiday tomorrow.") // NOT "Sorry, I didn't catch that…"
-  expect(res.finalText).not.toMatch(/didn't catch/i)
 })
