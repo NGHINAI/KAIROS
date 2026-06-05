@@ -21,6 +21,29 @@ export interface ToolDef {
   description: string
   parameters: Record<string, any>  // JSON Schema
   execute: (args: any) => Promise<any>
+  /** Read-only / side-effect-free tool that's safe to run concurrently with
+   *  other safe tools in the same turn (search/list/get/fetch). Writes leave
+   *  this false (default) and run serially. */
+  concurrencySafe?: boolean
+}
+
+/** The unified activity envelope (UI live-tree contract). Emitted ALONGSIDE the flat
+ *  agent and task events so one UI tree can render Lane A turns, Lane B background
+ *  sub-agents, and nested sub-agents (R5) identically — lineage via parentRunId. */
+export interface AgentActivity {
+  runId: string
+  parentRunId: string | null
+  depth: number
+  lane: "A" | "B"
+  conversationId?: string
+  tier?: Tier
+  /** planning | agent_delta | tool_call | tool_done | tool_failed | plan_update |
+   *  compaction | self_correct | subagent_start | status | final */
+  kind: string
+  status?: "running" | "done" | "failed" | "cancelled"
+  tool?: string
+  summary?: string
+  ts: number
 }
 
 export type AgentEvent =
@@ -31,6 +54,9 @@ export type AgentEvent =
   | { kind: "agent_tool_done";    name: string; id: string; result_summary: string }
   | { kind: "agent_tool_failed";  name: string; id: string; error: string }
   | { kind: "agent_status";       text: string }
+  | { kind: "agent_delta";        text: string }
+  | { kind: "agent_plan";         steps: Array<{ step: string; status: string }> }
+  | { kind: "agent_activity";     activity: AgentActivity }
   | { kind: "agent_done";         text: string }
   | { kind: "agent_error";        message: string }
   | { kind: "agent_interrupted" }
@@ -39,6 +65,9 @@ export interface ConductorOpts {
   conversationId: string
   utterance: string
   signal?: AbortSignal
+  /** Stable id for THIS foreground turn — root of the activity tree. Background
+   *  sub-agents spawned during the turn link to it via parentRunId. */
+  runId?: string
 }
 
 export type AgentEventHandler = (e: AgentEvent) => void

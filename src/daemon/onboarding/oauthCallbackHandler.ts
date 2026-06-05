@@ -17,7 +17,7 @@ export type ListenResult = {
 
 export class OAuthCallbackHandler {
   async listen(opts: ListenOptions): Promise<ListenResult> {
-    let server: ReturnType<typeof Bun.serve>
+    let server!: ReturnType<typeof Bun.serve>
     const capturePromise: Promise<OAuthCapture> = new Promise((resolve, reject) => {
       const timeoutMs = (opts.timeout_sec ?? 300) * 1000
       const timer = setTimeout(() => {

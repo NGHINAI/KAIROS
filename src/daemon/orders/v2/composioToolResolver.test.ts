@@ -151,6 +151,36 @@ describe('ComposioToolResolver', () => {
     r.stop()
   })
 
+  it('passes a toolkits FILTER per connected toolkit (SDK rejects an unfiltered fetch)', async () => {
+    const calls: any[] = []
+    const c = {
+      sdk: { tools: { getRawComposioTools: async (opts: any) => {
+        calls.push(opts)
+        return [{ toolkit: { slug: opts.toolkits[0] }, slug: `${String(opts.toolkits[0]).toUpperCase()}_DO`, name: 'do' }]
+      } } },
+    } as any
+    const r = new ComposioToolResolver({
+      composio: c, userId: 'local', cachePath: join(tmp, 'cache.json'),
+      toolkits: () => ['gmail', 'slack'],
+    })
+    await r.initialize()
+    // one call per connected toolkit, each WITH a toolkits filter (never unfiltered)
+    expect(calls.length).toBe(2)
+    expect(calls.every((o) => Array.isArray(o.toolkits) && o.toolkits.length === 1)).toBe(true)
+    expect(r.resolve('gmail', 'do')).toBe('GMAIL_DO')
+    expect(r.resolve('slack', 'do')).toBe('SLACK_DO')
+    r.stop()
+  })
+
+  it('with NO connected toolkits, refresh fetches nothing (no unfiltered call, no crash)', async () => {
+    const calls: any[] = []
+    const c = { sdk: { tools: { getRawComposioTools: async (o: any) => { calls.push(o); return [] } } } } as any
+    const r = new ComposioToolResolver({ composio: c, userId: 'local', cachePath: join(tmp, 'cache.json'), toolkits: () => [] })
+    await r.initialize()
+    expect(calls.length).toBe(0) // never called the SDK without a filter
+    r.stop()
+  })
+
   it('on-miss refresh is rate-limited (≤ 1 / hour)', async () => {
     const c = fakeComposio([{ toolkit: { slug: 'slack' }, slug: 'SLACK_SEND_MESSAGE', name: 'Send Slack message' }])
     const r = new ComposioToolResolver({ composio: c, userId: 'local', cachePath: join(tmp, 'cache.json'), now: () => 100_000 })

@@ -90,6 +90,22 @@ describe('RestraintPipeline', () => {
     expect(decision2.reason).toMatch(/cooldown/i)
   })
 
+  it('USER-INITIATED request bypasses cooldown — the user asked, so do it', async () => {
+    // A foreground voice action ("connect Linear") carries source:'user'. Even
+    // immediately after a fire on the same key, restraint must NOT debounce it.
+    const r1 = makeReq('connect_service', 'connect_service')
+    const d1 = await pipeline.evaluate(r1, { urgency: 1.0, rule_match_strength: 1.0, personal_relevance: 1.0, novelty: 1.0, urgent: false })
+    pipeline.recordDelivered('connect_service', d1.mode)
+    // Proactive retry on the same key → cooldown-suppressed (correct for autonomous fires)
+    const proactive = await pipeline.evaluate(makeReq('connect_service', 'connect_service'), { urgency: 1.0, rule_match_strength: 1.0, personal_relevance: 1.0, novelty: 1.0, urgent: false })
+    expect(proactive.mode).toBe('suppressed')
+    // But the USER asking again breaks straight through
+    const userReq: ActionRequest = { ...makeReq('connect_service', 'connect_service'), source: 'user' }
+    const decision = await pipeline.evaluate(userReq, { urgency: 0.5, rule_match_strength: 1.0, personal_relevance: 0.5, novelty: 1.0, urgent: false })
+    expect(decision.mode).toBe('interrupt')
+    expect(decision.reason).toMatch(/user-initiated/i)
+  })
+
   it('karma suspension drops to suppressed', async () => {
     const karma = (pipeline as any).deps.karma as KarmaStore
     karma.recordDismissal('trig-bad')

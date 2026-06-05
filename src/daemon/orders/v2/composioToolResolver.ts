@@ -24,6 +24,10 @@ export type ComposioToolResolverDeps = {
   userId: string
   cachePath?: string
   now?: () => number
+  /** Connected toolkit slugs to catalog. REQUIRED at runtime: @composio/core@0.10.0
+   *  rejects getRawComposioTools without a filter ({tools|toolkits|search|authConfigIds}),
+   *  so we fetch per connected toolkit. Without this the catalog is empty (no crash). */
+  toolkits?: () => string[] | Promise<string[]>
 }
 
 /** A Composio action tool, in the shape OrdersAuthor needs to brief the LLM. */
@@ -114,10 +118,22 @@ export class ComposioToolResolver {
   // ── Refresh + cache ────────────────────────────────────────────────────
 
   async refresh(): Promise<void> {
-    const result: any = await this.deps.composio.sdk.tools.getRawComposioTools({ limit: 500 })
-    // getRawComposioTools can return either { items: [...] } or a bare array depending
-    // on SDK version. Handle both shapes; this is canonical-defensive.
-    const items: any[] = Array.isArray(result) ? result : (result?.items ?? [])
+    const items: any[] = []
+    if (this.deps.toolkits) {
+      // @composio/core@0.10.0 REQUIRES a filter (one of tools|toolkits|search|authConfigIds)
+      // — calling with just {limit} throws a ValidationError. Fetch per connected toolkit.
+      const slugs = [...new Set((await this.deps.toolkits()).filter(Boolean))]
+      for (const slug of slugs) {
+        try {
+          const r: any = await this.deps.composio.sdk.tools.getRawComposioTools({ toolkits: [slug], limit: 200 })
+          items.push(...(Array.isArray(r) ? r : (r?.items ?? [])))
+        } catch { /* one bad toolkit shouldn't sink the whole catalog */ }
+      }
+    } else {
+      // No toolkits provider (tests / legacy callers) — unfiltered fetch.
+      const result: any = await this.deps.composio.sdk.tools.getRawComposioTools({ limit: 500 })
+      items.push(...(Array.isArray(result) ? result : (result?.items ?? [])))
+    }
     const aliases = new Map<string, string>()
     const descriptors = new Map<string, ToolDescriptor>()
     for (const t of items) {

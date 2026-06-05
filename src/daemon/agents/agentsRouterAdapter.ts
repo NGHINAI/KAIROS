@@ -9,6 +9,24 @@ const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 let cachedClient: OpenAI | undefined
 
+/** Wraps fetch to inject OpenRouter `provider.require_parameters` into every
+ *  chat-completions request body. Without this, Kimi K2 gets routed to providers
+ *  that don't parse its tool-call tokens into structured tool_calls, so the call
+ *  leaks into the reply as raw text (<tool_call_begin>functions.execute_tool…)
+ *  and never executes. require_parameters filters to tool-capable providers. */
+const toolAwareFetch = (async (input: any, init?: any) => {
+  try {
+    if (init?.body && typeof init.body === "string" && String(input).includes("/chat/completions")) {
+      const body = JSON.parse(init.body)
+      if (body && typeof body === "object" && body.provider == null) {
+        body.provider = { require_parameters: true }
+        init = { ...init, body: JSON.stringify(body) }
+      }
+    }
+  } catch { /* on any parse issue, send the request unchanged */ }
+  return fetch(input, init)
+}) as typeof fetch
+
 function getOpenAIClient(): OpenAI {
   if (cachedClient) return cachedClient
   const apiKey = process.env.OPENROUTER_API_KEY
@@ -22,6 +40,7 @@ function getOpenAIClient(): OpenAI {
       "HTTP-Referer": "https://kairos.local",
       "X-Title": "KAIROS",
     },
+    fetch: toolAwareFetch,
   })
   return cachedClient
 }

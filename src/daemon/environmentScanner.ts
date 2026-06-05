@@ -145,8 +145,9 @@ export class EnvironmentScanner {
             })
             suggestionsCreated = true
 
-            // macOS notification — method depends on severity
-            if (obs.severity !== 'info') {
+            // macOS notification — method depends on severity (always true here:
+            // guarded by the outer `severity !== 'info'`; cast keeps tsc happy).
+            if ((obs.severity as string) !== 'info') {
               sendObservationNotification({
                 severity: obs.severity,
                 message: obs.description,

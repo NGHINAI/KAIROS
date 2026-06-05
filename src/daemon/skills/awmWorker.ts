@@ -48,11 +48,21 @@ export class AwmWorker {
     this.cfg = { ...DEFAULTS, ...config }
   }
 
-  async runOnce(): Promise<AwmRunReport> {
+  /** Run the induction pipeline once. `overrides` temporarily relaxes/tightens the
+   *  thresholds for THIS run only (restored after) — used by the test-genesis hook
+   *  so a couple of real runs can crystallize on demand instead of waiting for the
+   *  production defaults (3 occurrences × >5 tool calls × >30s) to accrue. */
+  async runOnce(overrides?: Partial<AwmWorkerConfig>): Promise<AwmRunReport> {
     if (this.running) {
       return { candidates_found: 0, promoted: 0, queued: 0, deduplicated: 0, errors: 0 }
     }
     this.running = true
+    const savedCfg = this.cfg
+    if (overrides) {
+      const clean: Partial<AwmWorkerConfig> = {}
+      for (const [k, v] of Object.entries(overrides)) if (v !== undefined) (clean as any)[k] = v
+      this.cfg = { ...this.cfg, ...clean }
+    }
     try {
       const entries = this.loadEntries()
       const filtered = entries.filter(e => this.passesThreshold(e))
@@ -84,6 +94,7 @@ export class AwmWorker {
       }
       return report
     } finally {
+      this.cfg = savedCfg
       this.running = false
     }
   }

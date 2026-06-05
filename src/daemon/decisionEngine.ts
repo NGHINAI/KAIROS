@@ -21,6 +21,10 @@ export class DecisionEngine {
   constructor(
     private db: Database,
     private config: Config,
+    // The tick "brain". Inject the OpenRouter completer (same one the conductor
+    // uses) so autonomous decisions run on KAIROS's configured models — NOT the
+    // unauthenticated `claude -p` CLI subprocess (which 401'd every tick).
+    private llm?: { complete: (body: any) => Promise<{ text: string }> },
   ) {
     this.budgets = new BudgetTracker(db, config.budget)
     this.loadPrompts()
@@ -93,49 +97,32 @@ export class DecisionEngine {
       ? this.tickTemplate.replace('{{CONTEXT}}', context)
       : `${context}\n\nDecide what to do. Output:\nDECISION: <verb> <args>\nREASONING: <one sentence>`
 
-    // Spawn claude -p for tick decision.
-    // Write prompt to temp file and pipe via Bun.file() — Blob stdin doesn't
-    // reliably pipe to claude -p subprocess.
+    // Run the tick decision through the injected OpenRouter completer (the tick
+    // model — KAIROS_TICK_MODEL → KAIROS_FAST_MODEL). Replaces the old `claude -p`
+    // subprocess, which 401'd on every tick because the Claude CLI wasn't
+    // authenticated (and Anthropic is removed from the cloud path by design).
+    if (!this.llm) {
+      logError('Decision engine has no LLM completer wired — sleeping')
+      return this.fallbackDecision('No tick LLM configured')
+    }
     try {
-      const promptFile = join(this.config.sandboxDir, 'runtime', 'tick-prompt.txt')
-      const { writeFileSync } = await import('fs')
-      writeFileSync(promptFile, `${fullSystemPrompt}\n\n---\n\n${taskPrompt}`)
-
-      const proc = Bun.spawn([
-        'claude', '-p',
-        '--output-format', 'json',
-      ], {
-        stdin: Bun.file(promptFile),
-        stdout: 'pipe',
-        stderr: 'pipe',
-        env: {
-          ...process.env,
-          KAIROS_SUBPROCESS: '1',  // Prevent recursive MCP loading
-        },
+      const resp = await this.llm.complete({
+        messages: [
+          { role: 'system', content: fullSystemPrompt },
+          { role: 'user', content: taskPrompt },
+        ],
+        // 512, not 200: reasoning models (gpt-oss/nemotron) spend tokens in their
+        // reasoning channel and return empty content if the budget is too small.
+        max_tokens: Math.max(512, Number(process.env.KAIROS_FAST_MAX_TOKENS) || 0),
+        temperature: 0,
       })
-
-      const stdout = await new Response(proc.stdout).text()
-      const exitCode = await proc.exited
-
-      if (exitCode !== 0) {
-        const stderr = await new Response(proc.stderr).text()
-        logError(`Tick subprocess exited ${exitCode}: ${stderr.slice(0, 200)}`)
-        return this.fallbackDecision('Subprocess failed')
-      }
-
-      // Parse claude JSON output
-      // claude -p --output-format json returns:
-      //   { "type": "result", "result": "...", "total_cost_usd": 0.001, ... }
-      const parsed = JSON.parse(stdout)
-      const text = (parsed.result ?? '') as string
-      const costUsd = (parsed.total_cost_usd ?? parsed.cost_usd ?? 0) as number
-
+      const text = (resp.text ?? '').trim()
       if (!text) {
-        logError(`Tick subprocess returned empty result. Raw output: ${stdout.slice(0, 200)}`)
-        return this.fallbackDecision('Empty result from Claude')
+        logError('Tick LLM returned empty result')
+        return this.fallbackDecision('Empty result from tick LLM')
       }
-
-      return this.parseDecision(text, Math.round(costUsd * 100))
+      // Cost is tracked centrally by the ModelRouter/CostTracker; pass 0 here.
+      return this.parseDecision(text, 0)
     } catch (err) {
       logError('Decision engine error', err)
       return this.fallbackDecision('Exception in decision engine')

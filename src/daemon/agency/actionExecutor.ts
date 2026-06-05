@@ -170,8 +170,11 @@ export class ActionExecutor {
 
     const result = await this.executeAndLog(request, trajectoryId)
 
-    // Notify the restraint pipeline that an interrupt/surface was actually delivered
-    if (this.restraintPipeline && result.status === 'completed') {
+    // Notify the restraint pipeline that an interrupt/surface was actually delivered.
+    // Skip for user-initiated actions: a foreground request carries no source_trigger_id,
+    // so recording a fire here would write the cooldown on the BARE intent_id and poison
+    // the *proactive* debounce for that same intent (the root cause of the repeat-block).
+    if (this.restraintPipeline && result.status === 'completed' && request.source !== 'user') {
       const triggerId = request.source_trigger_id ?? request.intent_id
       // We only reach here when restraint returned 'interrupt' or 'surface'
       // (or when no restraint was applied). The pipeline handles the mode internally.

@@ -40,6 +40,10 @@ import { LLMAdapter } from './wrapApi/adapters/llmAdapter'
 import { VoiceAdapter } from './wrapApi/adapters/voiceAdapter'
 import { OpenRouterAdapter } from './wrapApi/adapters/openRouterAdapter'
 import { TIER_MODELS, type Tier } from './agents/types'
+import { buildBackgroundSubsystem } from './agents/loop/backgroundSubsystem'
+import { buildBackgroundTools } from './agents/loop/backgroundTools'
+import { buildPriorRunsHint, parsePriorRuns } from './agents/loop/priorRuns'
+import type { TickEvent } from './types'
 import { sendMacNotification, setSandboxDir as setNotifySandboxDir } from './notify'
 import { postToDiscord, isDiscordConfigured } from './discord'
 import { buildRouter, ModelRouter } from './llm'
@@ -108,12 +112,16 @@ import { ComposioSessionManager } from './connectors/composioSessionManager'
 import { TokenExpiryPoller } from './connectors/tokenExpiryPoller'
 import { registerConnectServiceIntent } from './connectors/connectServiceIntent'
 import { registerDisconnectServiceIntent } from './connectors/disconnectServiceIntent'
+import { ToolkitResolver } from './connectors/toolkitResolver'
+import { registerFindIntegrationIntent } from './connectors/findIntegrationIntent'
 import { SoulLoader } from './persona/soulLoader'
 import { TrajWriter } from './persona/trajWriter'
 import { PersonaUpdater } from './persona/personaUpdater'
 import { DreamingExtension } from './persona/dreamingExtension'
 import { PersonaAwareness } from './persona/personaAwareness'
-import { readFileSync } from 'fs'
+import { readFileSync, appendFileSync, writeFileSync, existsSync, mkdirSync, realpathSync } from 'fs'
+import { readFile as fsReadFile, writeFile as fsWriteFile, readdir as fsReaddir, stat as fsStat } from 'node:fs/promises'
+import { exec as nodeExec } from 'node:child_process'
 import { SkillStore } from './skills/skillStore'
 import { SkillRegistry } from './skills/skillRegistry'
 import { UsageTracker } from './skills/usageTracker'
@@ -153,6 +161,11 @@ import { ContextBuilder } from './agents/contextBuilder'
 import { SoulDigestLoader } from './agents/loaders/soulDigestLoader'
 import { buildIntrospectionTools } from './agents/introspectionTools'
 import { skillsAsTools } from './agents/skillToolAdapter'
+import { intentsAsTools } from './agents/intentToolBridge'
+import { ToolRetriever, type ToolDoc } from './agents/toolRetriever'
+import { buildToolDispatchTools } from './agents/toolDispatch'
+import { ToolUsageTracker } from './agents/toolUsageTracker'
+import { TurnLogger } from './agents/turnLogger'
 import { ComposioToolCache, buildComposioSearchTool } from './agents/composioToolProvider'
 import { SelfHealConnect } from './agents/selfHealConnect'
 import type { SystemBlock } from './llm/types'
@@ -305,7 +318,10 @@ async function main(): Promise<void> {
   if (resumedCount > 0) log(`Re-queued ${resumedCount} watching task(s) for auto-resume`)
 
   // 6. Init components
-  const decisionEngine = new DecisionEngine(db, config)
+  // Tick brain runs on OpenRouter (KAIROS_TICK_MODEL → KAIROS_FAST_MODEL → gpt-4o-mini),
+  // NOT the unauthenticated `claude -p` CLI that 401'd on every tick.
+  const tickModel = process.env.KAIROS_TICK_MODEL ?? process.env.KAIROS_FAST_MODEL ?? 'openai/gpt-4o-mini'
+  const decisionEngine = new DecisionEngine(db, config, buildLlmCompleterForModel(tickModel))
   const taskRunner = new TaskRunner(db, config)
   const memoryStore = new MemoryStore(db, config)
   ;(globalThis as { __kairosMemoryStore?: MemoryStore }).__kairosMemoryStore = memoryStore
@@ -315,11 +331,15 @@ async function main(): Promise<void> {
   const { ScheduleManager } = await import('./scheduleManager')
   const { EnvironmentScanner } = await import('./environmentScanner')
   const { FeedbackCollector } = await import('./feedbackCollector')
-  const { SkillRegistry } = await import('./skillRegistry')
+  // Legacy manifest-based registry (skills/active/*). Aliased so it does NOT shadow
+  // the module-level AWM `SkillRegistry` (./skills/skillRegistry) used later — the
+  // two same-named classes have different constructors and shadowing caused the
+  // "{skillStore} not assignable to string" / "initialize does not exist" type errors.
+  const { SkillRegistry: ManifestSkillRegistry } = await import('./skillRegistry')
   const scheduleManager = new ScheduleManager(db, config)
   const environmentScanner = new EnvironmentScanner(db, config)
   const feedbackCollector = new FeedbackCollector(db, config)
-  const skillRegistry = new SkillRegistry(config.sandboxDir)
+  const skillRegistry = new ManifestSkillRegistry(config.sandboxDir)
 
   // 6c. Recompute schedule next-fire times after restart
   scheduleManager.recomputeOnStartup()
@@ -447,7 +467,7 @@ async function main(): Promise<void> {
   )
 
   // 7b. Wire the triggerTick into the scanner so notification replies can create tasks
-  environmentScanner.setTriggerTick((event) => scheduler.triggerImmediateTick(event))
+  environmentScanner.setTriggerTick((event) => scheduler.triggerImmediateTick(event as TickEvent))
 
   // 7c. Start Discord bot polling (bidirectional Discord chat)
   const { DiscordBot, loadBotConfig } = await import('./discordBot')
@@ -457,7 +477,7 @@ async function main(): Promise<void> {
     discordBot = new DiscordBot(
       botConfig,
       db,
-      (event) => scheduler.triggerImmediateTick(event),
+      (event) => scheduler.triggerImmediateTick(event as TickEvent),
     )
     void discordBot.start()
   } else {
@@ -470,7 +490,7 @@ async function main(): Promise<void> {
     port,
     db,
     config,
-    triggerTick: (event) => scheduler.triggerImmediateTick(event),
+    triggerTick: (event) => scheduler.triggerImmediateTick(event as TickEvent),
   })
 
   // 9. Write lifecycle files
@@ -748,7 +768,16 @@ async function main(): Promise<void> {
                   announcer: { announce: async (text: string, _opts: any) => log(`[composio:announce] ${text}`) },
                 })
 
-                registerConnectServiceIntent(intentRegistry, { connectionFlow, sessionManager, userId: composioUserId })
+                // GENERAL toolkit discovery — resolves ANY fuzzy phrase ("calendar",
+                // "the thing I use for tickets") to the exact live Composio slug.
+                // Replaces the old hardcoded SLUG_ALIASES map. `composioClient.sdk` IS
+                // the Composio instance (tools.getRawComposioTools + client.toolkits.list).
+                const toolkitResolver = new ToolkitResolver({ composio: composioClient.sdk })
+                toolkitResolver.initialize().catch((err: unknown) => log(`[composio] toolkit resolver init failed: ${err}`, 'warn'))
+                ;(globalThis as any).__kairosToolkitResolver = toolkitResolver
+
+                registerConnectServiceIntent(intentRegistry, { connectionFlow, sessionManager, toolkitResolver, userId: composioUserId, log: (m) => log(m) })
+                registerFindIntegrationIntent(intentRegistry, { toolkitResolver })
                 registerDisconnectServiceIntent(intentRegistry, { composio: composioClient, connectionStore, sessionManager, userId: composioUserId })
 
                 const expiryPoller = new TokenExpiryPoller({
@@ -756,6 +785,10 @@ async function main(): Promise<void> {
                   connectionStore,
                   onConnectionExpired: (c) => {
                     log(`[composio] connection expired: ${c.toolkit_slug} — needs reconnect`, 'warn')
+                    // Re-index so the expired toolkit's tools drop out of search_tools —
+                    // otherwise the planner keeps surfacing tools that now fail with auth errors.
+                    ;(globalThis as any).__kairosInvalidatePrefix?.()
+                    void (globalThis as any).__kairosReindexTools?.()
                   },
                   userId: composioUserId,
                   intervalMs: config.composio?.poll_interval_ms ?? 5 * 60 * 1000,
@@ -766,6 +799,51 @@ async function main(): Promise<void> {
                 ;(globalThis as any).__kairosComposioClient = composioClient
                 ;(globalThis as any).__kairosConnectionStore = connectionStore
                 ;(globalThis as any).__kairosConnectionFlow = connectionFlow
+
+                // ── Dynamic tool retrieval (Phase 1) ──────────────────────────
+                // Index connected toolkits' tools so the planner retrieves only the
+                // few relevant ones per turn (search_tools) instead of being handed
+                // hundreds. Scales to any number of connected toolkits.
+                if (localEmbedder) {
+                  const toolRetriever = new ToolRetriever({ embedder: localEmbedder })
+                  const reindexTools = async () => {
+                    try {
+                      const slugs = [...new Set(connectionStore.listActive(composioUserId).map((c: any) => String(c.toolkit_slug)).filter(Boolean))]
+                      const docs: ToolDoc[] = []
+                      for (const slug of slugs) {
+                        const r: any = await composioClient.sdk?.tools?.getRawComposioTools?.({ toolkits: [slug], limit: 100 })
+                        for (const t of (Array.isArray(r) ? r : (r?.items ?? []))) {
+                          const name = t.slug ?? t.name
+                          if (!name) continue
+                          const p = t.inputParameters ?? t.input_parameters ?? t.inputSchema
+                          docs.push({
+                            name, toolkit: slug,
+                            description: t.description ?? '',
+                            parameters: (p && typeof p === 'object' && p.type) ? p : undefined,
+                            hints: [String(name).toLowerCase().replace(/_/g, ' ')],
+                          })
+                        }
+                      }
+                      await toolRetriever.index(docs)
+                      log(`[tools] retrieval index: ${docs.length} tool(s) across ${slugs.length} connected toolkit(s)`)
+                    } catch (e) { log(`[tools] reindex failed: ${String(e)}`, 'warn') }
+                  }
+                  void reindexTools()
+                  ;(globalThis as any).__kairosToolRetriever = toolRetriever
+                  ;(globalThis as any).__kairosReindexTools = reindexTools
+                  // Tool-usage tracker → powers the "hot set" (most-used tools loaded
+                  // directly into the planner, skipping the search hop on common actions).
+                  const usagePath = join(config.sandboxDir, 'state', 'tool-usage.json')
+                  const toolUsage = new ToolUsageTracker({
+                    load: () => { try { return existsSync(usagePath) ? JSON.parse(readFileSync(usagePath, 'utf8')) : {} } catch { return {} } },
+                    save: (c) => { try { writeFileSync(usagePath, JSON.stringify(c)) } catch {} },
+                  })
+                  ;(globalThis as any).__kairosToolUsage = toolUsage
+                  ;(globalThis as any).__kairosComposioExecute = (name: string, args: any) => {
+                    toolUsage.record(name)   // count real executions → ranks the hot set
+                    return composioClient.executeTool({ toolName: name, userId: composioUserId, arguments: args ?? {} })
+                  }
+                }
 
                 log('[composio] subsystem ready')
               } catch (err) {
@@ -778,6 +856,9 @@ async function main(): Promise<void> {
         const trajectory = new TrajectoryLog(db)
         const notifier = new NativeNotifier()
         const inbox = new InboxSurface(db, config.agency.inboxPath)
+        // Stashed so the background-agent approval gate (constructed later, outside
+        // this nested scope) can park unanswered destructive approvals here.
+        ;(globalThis as any).__kairosInbox = inbox
 
         const actionCtx = {
           db,
@@ -979,6 +1060,9 @@ async function main(): Promise<void> {
                   min_occurrences: config.skills?.awm?.min_occurrences,
                 },
               )
+              // Expose the worker so the test-genesis WS hook can force a run on
+              // demand (with threshold overrides) instead of waiting for the 4h timer.
+              ;(globalThis as any).__kairosAwmWorker = awmWorker
               if (config.skills?.awm?.enabled !== false) {
                 awmWorker.start(config.skills?.awm?.interval_ms ?? 4 * 60 * 60 * 1000)
               }
@@ -1077,12 +1161,19 @@ async function main(): Promise<void> {
                 },
                 inbox: inbox as any,
                 nativeNotifier: notifier as any,
-                onConnectionComplete: (toolkit: string) => log(`[triggers] connection complete: ${toolkit}`),
+                onConnectionComplete: (toolkit: string) => {
+                  log(`[triggers] connection complete: ${toolkit}`)
+                  // Refresh the planner's toolset + retrieval index so the
+                  // just-connected toolkit's tools become available next turn.
+                  ;(globalThis as any).__kairosInvalidatePrefix?.()
+                  void (globalThis as any).__kairosReindexTools?.()
+                },
                 userId: 'local',
               })
 
               triggerListener = new TriggerListener({
-                apiKey: composioApiKey,
+                // Non-null: this block only runs when Composio is configured (key present).
+                apiKey: (process.env.COMPOSIO_API_KEY ?? config.composio?.api_key) as string,
                 eventLog: triggerEventLog,
                 normalizer: triggerNormalizer,
                 perceptionBus: bus as any,
@@ -1145,6 +1236,12 @@ async function main(): Promise<void> {
               composioResolver = new ComposioToolResolver({
                 composio: composioClient,
                 userId: 'local',
+                // Catalog only CONNECTED toolkits — the SDK rejects an unfiltered fetch.
+                toolkits: () => {
+                  const cs = (globalThis as any).__kairosConnectionStore
+                  try { return cs ? [...new Set(cs.listActive('local').map((c: any) => String(c.toolkit_slug)).filter(Boolean))] as string[] : [] }
+                  catch { return [] }
+                },
               })
               composioResolver.initialize().catch((err: unknown) => log(`[orders-v2] resolver init failed: ${err}`, 'warn'))
             }
@@ -1287,6 +1384,33 @@ async function main(): Promise<void> {
         // ──────────────────────────────────────────────────────────────────────────
 
         const executor = new ActionExecutor(db, intentRegistry, trajectory, inbox, actionCtx, restraintPipeline)
+
+        // Bridge the agency intent plane into the voice conductor. Without this
+        // the conductor's LLM has tools to TALK but none to ACT — "connect me to
+        // Linear" / "remind me at 5" reached a tool-less path and did nothing.
+        // The dispatch goes THROUGH the executor so the restraint/approval
+        // pipeline (tier gating, confirm-before-destructive) still applies.
+        ;(globalThis as any).__kairosIntentRegistry = intentRegistry
+        ;(globalThis as any).__kairosIntentDispatch = async (id: string, args: any) => {
+          const res = await executor.dispatch({
+            request_id: crypto.randomUUID(),
+            intent_id: id,
+            args: (args ?? {}) as Record<string, unknown>,
+            reasoning: 'voice conductor tool call',
+            requested_at: Date.now(),
+            source: 'user',   // foreground — the user asked. Bypass restraint debounce (not tier/approval).
+          })
+          // Connecting/disconnecting a service changes the available toolset —
+          // refresh the planner's cached prefix so the new toolkit's tools (or
+          // their removal) take effect on the next turn.
+          if (id === 'connect_service' || id === 'disconnect_service' || id === 'setup_for') {
+            ;(globalThis as any).__kairosInvalidatePrefix?.()
+            // Re-index the retrieval corpus so the newly-connected toolkit's tools
+            // are retrievable on the next turn (and removed ones disappear).
+            void (globalThis as any).__kairosReindexTools?.()
+          }
+          return { status: res.status, details: res.details ?? '' }
+        }
 
         // Wire TrajWriter into executor if persona subsystem is active
         const _trajWriter = (globalThis as { __kairosTrajWriter?: TrajWriter }).__kairosTrajWriter
@@ -1668,12 +1792,23 @@ async function main(): Promise<void> {
           } catch { return '' }
         },
         memoryOverview: async () => {
+          const parts: string[] = []
+          // The human-distilled MEMORY.md overview, if present.
           const ms = (globalThis as any).__kairosMemoryStore
-          if (!ms || typeof ms.read !== 'function') return ''
-          try {
-            const raw = ms.read()
-            return raw.length > 3200 ? raw.slice(0, 3200) + '\n...(truncated)' : raw
-          } catch { return '' }
+          if (ms && typeof ms.read === 'function') {
+            try { const raw = ms.read(); parts.push(raw.length > 3000 ? raw.slice(0, 3000) + '\n...(truncated)' : raw) } catch {}
+          }
+          // LIVE top facts from the semantic store — the always-on "what I know
+          // about you" set, so KAIROS has the user's key facts EVERY turn (not just
+          // utterance-relevant ones). Makes replies feel personalized, not gated.
+          const ss = (globalThis as any).__kairosSemanticStore
+          if (ss && typeof ss.topFacts === 'function') {
+            try {
+              const facts = ss.topFacts(8)
+              if (facts.length) parts.push('What I know about the user:\n' + facts.map((f: any) => `- ${f.text}`).join('\n'))
+            } catch {}
+          }
+          return parts.filter(Boolean).join('\n\n')
         },
         // "## About the user" — the learned persona profile + live preference hints.
         // This is the Tier-1 personalization fix: persona.md data (communication
@@ -1691,16 +1826,25 @@ async function main(): Promise<void> {
             if (p.working_patterns)    lines.push(`- Working patterns: ${p.working_patterns}`)
             if (p.recent_themes)       lines.push(`- Recent themes: ${p.recent_themes}`)
             if (p.notes)               lines.push(`- Notes: ${p.notes}`)
-            // Behavioral directives derived from hints — phrased as instructions the
-            // agent should FOLLOW, not just facts (closes the "doesn't apply prefs" gap).
+            // NOTE: volatile hint-derived directives moved to the per-turn
+            // `liveContext` loader below so they refresh every turn (this block is
+            // cached in the session prefix and would otherwise go stale).
+            void h
+            return lines.join("\n")
+          } catch { return '' }
+        },
+        // VOLATILE per-turn behavioral directives from live persona hints — fetched
+        // FRESH every turn (not cached), so KAIROS adapts within a session (e.g. the
+        // user enters focus mid-conversation → it gets quieter on the very next turn).
+        liveContext: async () => {
+          try {
+            const pa = (globalThis as any).__kairosPersonaAwareness
+            const h = pa?.getHints?.() ?? {}
             const directives: string[] = []
             if (h.prefer_terse) directives.push("Keep replies short and direct — no preamble or filler.")
             if (h.prefer_voice_over_text) directives.push("Favor a natural spoken cadence.")
             if (h.in_focus_now) directives.push("The user is focused/in flow right now — be minimal and non-disruptive.")
-            if (directives.length) {
-              lines.push("- How to respond right now: " + directives.join(" "))
-            }
-            return lines.join("\n")
+            return directives.length ? "- How to respond right now: " + directives.join(" ") : ""
           } catch { return '' }
         },
         kairosSkills: async () => {
@@ -1740,6 +1884,64 @@ async function main(): Promise<void> {
           } catch { return [] }
         },
         introspectionTools: async () => introspectionTools,
+        // The planner's ACTION toolset — kept SMALL and static (the dispatcher
+        // pattern: Composio Tool Router / Anthropic Tool Search):
+        //  1. Agency intents (connect_service, disconnect_service, setup_for,
+        //     remind_in, MCP tools). Hidden: add_to_memory (automatic), log/
+        //     suspend/notify (internal).
+        //  2. search_tools + execute_tool — the planner finds the right connected
+        //     tool per turn via hybrid retrieval (ToolRetriever), then runs it.
+        //     This replaces pre-loading all toolkit tools, so it scales to 50+
+        //     connected toolkits without context bloat.
+        actionTools: async () => {
+          const out: any[] = []
+          const reg = (globalThis as any).__kairosIntentRegistry
+          const dispatch = (globalThis as any).__kairosIntentDispatch
+          if (reg && dispatch) {
+            const HIDDEN = new Set(['add_to_memory', 'log', 'suspend', 'notify'])
+            try { out.push(...intentsAsTools({ registry: reg, dispatch, filter: (e: any) => !HIDDEN.has(e.id) })) }
+            catch (e) { log('[actionTools] intent bridge failed: ' + String(e), 'warn') }
+          }
+          const retriever = (globalThis as any).__kairosToolRetriever
+          const execFn = (globalThis as any).__kairosComposioExecute
+          if (retriever && execFn) {
+            try {
+              const { searchTool, executeTool } = buildToolDispatchTools({ retriever, execute: execFn })
+              out.push(searchTool, executeTool)
+              // HOT SET: the user's most-used tools, loaded DIRECTLY so common
+              // actions ("send email", "create event") skip the search→execute hop
+              // (faster + fewer multi-step fumbles). Read-only ones run concurrently.
+              const usage = (globalThis as any).__kairosToolUsage
+              if (usage && typeof retriever.getByNames === 'function') {
+                const hotN = Number(process.env.KAIROS_HOT_TOOLS) || 5
+                for (const d of retriever.getByNames(usage.topNames(hotN)) as any[]) {
+                  out.push({
+                    name: d.name,
+                    description: d.description,
+                    parameters: (d.parameters && typeof d.parameters === 'object' && d.parameters.type) ? d.parameters : { type: 'object', properties: {}, required: [] },
+                    execute: async (args: any) => execFn(d.name, args ?? {}),
+                    concurrencySafe: /(_LIST|_GET|_SEARCH|_FETCH|_READ|LIST_|GET_|SEARCH_|FIND_)/i.test(d.name),
+                  })
+                }
+              }
+            } catch (e) { log('[actionTools] tool dispatch bridge failed: ' + String(e), 'warn') }
+          } else {
+            // Loud signal: without these the planner has NO Composio actions at all.
+            log('[actionTools] search_tools/execute_tool NOT available (Composio subsystem not started?) — planner has no external-app tools', 'warn')
+          }
+          // Background agent lane (Batch 2): the foreground voice agent gets
+          // spawn_background_task (offload heavy/long work to an autonomous sub-agent
+          // so the conversation isn't blocked) + background_tasks (check on running
+          // sub-agents → answer "how's my task going?" in human language). Read from
+          // the stash since the manager is constructed AFTER the ContextBuilder.
+          const bgManager = (globalThis as any).__kairosBackgroundManager
+          if (bgManager) {
+            try { out.push(...buildBackgroundTools({ manager: bgManager })) }
+            catch (e) { log('[actionTools] background tools failed: ' + String(e), 'warn') }
+          }
+          const seen = new Set<string>()
+          return out.filter((t: any) => t?.name && !seen.has(t.name) && (seen.add(t.name), true))
+        },
       },
       memoryInjector: {
         inject: async (q: string, opts?: any) => {
@@ -1754,7 +1956,15 @@ async function main(): Promise<void> {
           catch { return [] }
         },
       },
+      // Phase 5: optional one-line tone override layered onto the baseline character
+      // (warm/witty/concise). soul.md's vibe still takes precedence over both.
+      personaTone: process.env.KAIROS_PERSONA_TONE,
     })
+
+    // Expose prefix invalidation so connection-complete events can refresh the
+    // planner's toolset — a newly-connected toolkit's tools won't appear until
+    // the cached session prefix is rebuilt.
+    ;(globalThis as any).__kairosInvalidatePrefix = () => { try { contextBuilder.invalidatePrefix() } catch {} }
 
     // E.2.4 — Wire a StreamingSpeaker on top of the existing sayBackend so the
     // Narrator's ack/transition/filler output gets piped through the same
@@ -1786,31 +1996,15 @@ async function main(): Promise<void> {
         searchTools: async (q: string, limit: number) => {
           if (!composioClient) return []
           try {
-            // ComposioClient exposes the SDK directly; use its native tool search.
-            // Prefer searchTools/listTools on the SDK if present; otherwise enumerate
-            // via getRawComposioTools and filter client-side by description match.
+            // @composio/core@0.10.0 has NO sdk.tools.search; the real public-API
+            // search is getRawComposioTools({ search }). It REQUIRES a filter — an
+            // unfiltered { limit } throws ValidationError (the old code's silent []).
+            // Pass `search` so the catalog is actually queried server-side.
             const sdk = composioClient.sdk
-            if (sdk?.tools?.search && typeof sdk.tools.search === 'function') {
-              const r = await sdk.tools.search({ query: q, limit })
-              const items: any[] = Array.isArray(r) ? r : (r?.items ?? [])
-              return items.slice(0, limit).map((t: any) => ({
-                slug: t.slug ?? t.name,
-                description: t.description ?? '',
-                parameters: t.inputParameters ?? t.input_parameters ?? t.inputSchema,
-                toolkit: t.toolkit?.slug ?? t.toolkit_slug,
-              }))
-            }
             if (sdk?.tools?.getRawComposioTools && typeof sdk.tools.getRawComposioTools === 'function') {
-              const r: any = await sdk.tools.getRawComposioTools({ limit: 500 })
+              const r: any = await sdk.tools.getRawComposioTools({ search: q, limit })
               const items: any[] = Array.isArray(r) ? r : (r?.items ?? [])
-              const ql = q.toLowerCase()
               return items
-                .filter((t: any) => {
-                  const slug = String(t.slug ?? t.name ?? '').toLowerCase()
-                  const desc = String(t.description ?? '').toLowerCase()
-                  const tk = String(t.toolkit?.slug ?? t.toolkit_slug ?? '').toLowerCase()
-                  return slug.includes(ql) || desc.includes(ql) || tk.includes(ql)
-                })
                 .slice(0, limit)
                 .map((t: any) => ({
                   slug: t.slug ?? t.name,
@@ -1820,7 +2014,10 @@ async function main(): Promise<void> {
                 }))
             }
             return []
-          } catch { return [] }
+          } catch (e) {
+            log(`[composio] search_tools failed for '${q}': ${String(e)}`, 'warn')
+            return []
+          }
         },
         executeTool: async (slug: string, args: any) => {
           if (!composioClient) return { error: 'no composio client' }
@@ -1869,6 +2066,9 @@ async function main(): Promise<void> {
     // Stash for future inline-on-error wiring at the action-dispatch layer
     ;(globalThis as any).__kairosSelfHealConnect = selfHeal
     ;(globalThis as any).__kairosComposioToolCache = composioCache
+    // Stash the search meta-tool so the ContextBuilder's actionTools loader can
+    // expose it to the planner (discovery of not-yet-connected toolkits).
+    ;(globalThis as any).__kairosComposioSearchTool = composioSearchTool
 
     // Captures the agent's final reply text each turn (from agent_done) so
     // handleUtterance can persist it to the ConversationStore for memory.
@@ -1930,12 +2130,147 @@ async function main(): Promise<void> {
     ;(globalThis as any).__kairosForgetDetector = forgetDetector
     ;(globalThis as any).__kairosPendingResolver = pendingResolver
 
+    // Observability: every turn (utterance, tier, tools actually called + results,
+    // reply) → a human-readable conversation.log + machine-readable turns.jsonl.
+    // Lets you verify what KAIROS really did and auto-flags tool-call leaks.
+    const convLogPath = join(config.sandboxDir, 'state', 'logs', 'conversation.log')
+    const turnsJsonlPath = join(config.sandboxDir, 'state', 'logs', 'turns.jsonl')
+    const turnLogger = new TurnLogger({
+      appendLine: (l: string) => { try { appendFileSync(convLogPath, l + '\n') } catch {} },
+      appendJsonl: (o: any) => { try { appendFileSync(turnsJsonlPath, JSON.stringify(o) + '\n') } catch {} },
+    })
+
+    // ─── Background agent lane (Batch 2) ──────────────────────────────────────
+    // KAIROS can spawn autonomous sub-agents for heavy/long work so the foreground
+    // voice stays free. Each sub-agent reuses the SAME context the foreground gets
+    // (memory + persona + skills + Composio tools via contextBuilder.build), and
+    // ADDS file/shell tools (private workdir), nested-spawn, and approval-gating on
+    // every destructive call. It runs OUR agent loop on the DEEP model and reports
+    // back by speaking a summary + emitting task_* events for the UI/HUD. The
+    // foreground gets spawn_background_task + background_tasks so it can launch them
+    // and answer "how's my task going?" in human language.
+    const backgroundSub = buildBackgroundSubsystem({
+      buildContext: (goal: string, o?: { conversationId?: string }) => contextBuilder.build({ utterance: goal, tier: 'smart', conversationId: o?.conversationId }),
+      makeLlm: (model: string) => new OpenRouterAdapter({ defaultModel: model }) as any,
+      deepModel: () => TIER_MODELS.deep(),
+      fastModel: () => process.env.KAIROS_MEMORY_MODEL ?? TIER_MODELS.fast(),
+      agentsDir: join(config.sandboxDir, 'state', 'agents'),
+      exec: (command: string, o: { cwd: string; timeoutMs: number }) =>
+        new Promise((resolveExec) => {
+          nodeExec(command, { cwd: o.cwd, timeout: o.timeoutMs, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+            const code = err ? (typeof (err as any).code === 'number' ? (err as any).code : 1) : 0
+            resolveExec({ stdout: String(stdout ?? ''), stderr: String(stderr ?? ''), code })
+          })
+        }),
+      fs: {
+        readFile: (p: string) => fsReadFile(p, 'utf8'),
+        writeFile: (p: string, c: string) => fsWriteFile(p, c, 'utf8').then(() => {}),
+        readdir: (p: string) => fsReaddir(p) as Promise<string[]>,
+        realpath: (p: string) => realpathSync(p), // enables symlink-escape guard in safePath
+        stat: async (p: string) => { const s = await fsStat(p); return { isDirectory: s.isDirectory(), isFile: s.isFile(), size: s.size, mtimeMs: s.mtimeMs } }, // powers grep/glob walk
+      },
+      speak: async (t: string) => {
+        // The StreamingSpeaker is SHARED with the foreground. begin() wipes its queue,
+        // so a background ask/report mid-foreground-turn would splice the user's reply.
+        // Wait for the foreground turn to go idle (capped so a wedged turn can't mute
+        // reports forever), then speak. The WS event already fired, so the HUD shows it
+        // immediately regardless of this spoken delay.
+        const idle = () => !activeConductorController || activeConductorController.signal.aborted
+        for (let i = 0; i < 200 && !idle(); i++) await new Promise((r) => setTimeout(r, 50)) // up to ~10s
+        streamingSpeaker.begin(); streamingSpeaker.feed(t); await streamingSpeaker.end()
+      },
+      broadcast: (e: any) => { try { wrapApi.broadcast(e) } catch { /* */ } },
+      inbox: (req) => {
+        const ib = (globalThis as any).__kairosInbox
+        try {
+          // intent_id carries the gate req.id so a non-voice approve can resolve the
+          // exact parked action. Voice ("yes"/name it) already resolves it; the inbox
+          // UI/HUD approve path resolves via __kairosResolveBgApproval(reqId, approved).
+          ib?.add?.({
+            tier: 'ORANGE',
+            intent_id: `bg_approval:${req.id}`,
+            description: `Background task wants to ${req.summary}`,
+            args_preview: JSON.stringify({ toolName: req.toolName, args: req.args ?? {} }).slice(0, 400),
+          })
+        } catch { /* */ }
+      },
+      appendTraj: (runId: string, entry: any) => {
+        // (1) Raw JSONL for inspection/debugging.
+        try {
+          const dir = join(config.sandboxDir, 'traj')
+          mkdirSync(dir, { recursive: true })
+          appendFileSync(join(dir, 'subagents.jsonl'), JSON.stringify({ runId, ...entry, at: Date.now() }) + '\n')
+        } catch { /* */ }
+        // (2) Feed the SAME persona TrajWriter the foreground uses, so the AWM
+        // self-evolving-skills worker mines recurring sub-agent workflows too
+        // (clusters on intent_id + tool sequence; needs >5 tools, >30s, success).
+        try {
+          const tw = (globalThis as any).__kairosTrajWriter
+          if (tw && typeof tw.record === 'function') {
+            tw.record({
+              ts: Date.now(),
+              task_goal: String(entry.goal ?? ''),
+              intent_id: 'subagent',
+              args_summary: String(entry.goal ?? '').slice(0, 200),
+              steps: (entry.toolCalls ?? []).map((c: any) => ({
+                action: String(c.name ?? 'tool'),
+                result_summary: c.error ? `error: ${String(c.error)}`.slice(0, 200) : 'ok',
+              })),
+              // `stopped` is a TERMINATION cause, not a success signal: a long,
+              // tool-heavy run that exhausts max_turns but produced a real answer
+              // is a SUCCESS (and is exactly the >5-tool/>30s profile AWM mines).
+              // Only genuine non-successes (user abort, stream error) are excluded.
+              outcome: (entry.stopped === 'final' || entry.stopped === 'max_turns') && String(entry.finalText ?? '').trim()
+                ? 'success'
+                : entry.stopped === 'aborted' ? 'cancelled'
+                : entry.stopped === 'error' ? 'failed'
+                : 'partial',
+              duration_ms: Number(entry.durationMs) || 0,
+            })
+          }
+        } catch { /* traj write must never break the lane */ }
+      },
+      // R8: before a sub-agent runs, surface similar PAST successful runs (from the
+      // raw subagents.jsonl, last ~150) so it reuses what worked. Bounded + best-effort.
+      priorRunsHint: (goal: string) => {
+        try {
+          const p = join(config.sandboxDir, 'traj', 'subagents.jsonl')
+          if (!existsSync(p)) return ''
+          const tail = readFileSync(p, 'utf8').split('\n').slice(-150).join('\n')
+          return buildPriorRunsHint(goal, parsePriorRuns(tail))
+        } catch { return '' }
+      },
+      caps: {
+        maxConcurrent: Number(process.env.KAIROS_BG_MAX_CONCURRENT) || 3,
+        maxDepth: Number(process.env.KAIROS_BG_MAX_DEPTH) || 2,
+        voiceWindowMs: Number(process.env.KAIROS_APPROVAL_WINDOW_MS) || 20_000,
+      },
+      mkdir: (dir: string) => { try { mkdirSync(dir, { recursive: true }) } catch { /* */ } },
+      log: (m: string) => log(m),
+    })
+    ;(globalThis as any).__kairosBackgroundManager = backgroundSub.manager
+    ;(globalThis as any).__kairosApprovalGate = backgroundSub.approvalGate
+    // Non-voice (inbox/HUD/CLI) approval resolution. Inbox items carry intent_id
+    // `bg_approval:<reqId>`; strip the prefix and call this to resolve the exact
+    // parked action. Returns true if it matched a pending approval.
+    ;(globalThis as any).__kairosResolveBgApproval = (reqId: string, approved: boolean): boolean => {
+      try { return backgroundSub.approvalGate.resolve(String(reqId).replace(/^bg_approval:/, ''), approved) } catch { return false }
+    }
+    log(`[voice] background agent lane ready — deep=${TIER_MODELS.deep()} maxConcurrent=${Number(process.env.KAIROS_BG_MAX_CONCURRENT) || 3}`)
+
     const agentConductor = new Conductor({
       classifyLlm: buildAgentLlmCompleter('fast'),
       fastLlm:     buildAgentLlmCompleter('fast'),
       smartLlm:    buildAgentLlmCompleter('smart'),
       tools: [...introspectionTools, composioSearchTool, ...composioCache.asTools()],
       contextBuilder,
+      turnLogger,
+      // Router context — lets the classifier resolve "yes"/"do it"/follow-ups.
+      conversationStore: {
+        recentTurns: async (id: string, n: number) => {
+          try { return await voiceBundle!.conversationStore.recentTurns(id, n) } catch { return [] }
+        },
+      },
       onEvent: (e: any) => {
         if (e?.kind === 'agent_done' && typeof e.text === 'string') lastAgentReply = e.text
         wrapApi.broadcast({ event: e.kind, ...e })
@@ -1949,7 +2284,13 @@ async function main(): Promise<void> {
           await streamingSpeaker.end()
         },
       },
-      personaTone: process.env.KAIROS_PERSONA_TONE,
+      // Live token-by-token streaming on the smart tier (Phase 3 — kill dead air):
+      // the StreamSpeechController drives this StreamingSpeaker directly with
+      // assistant deltas + inline tool acks AS the loop runs.
+      streamSink: streamingSpeaker,
+      // Phase 5: acks/transitions/fillers inherit KAIROS's baseline character so the
+      // whole voice surface (not just main replies) sounds warm, witty, and concise.
+      personaTone: process.env.KAIROS_PERSONA_TONE ?? 'warm, witty, and concise',
       trajWriter: {
         append: async (entry) => {
           const tw = (globalThis as any).__kairosTrajWriter
@@ -1985,6 +2326,8 @@ async function main(): Promise<void> {
 
     const handleUtterance = async (utterance: string, conversationId: string): Promise<void> => {
       log(`[voice] handleUtterance ENTER: "${utterance.slice(0, 120)}" (cid=${conversationId})`)
+      // Sub-agents spawned during this turn inherit the conversation for context parity.
+      try { backgroundSub.manager.setActiveConversation(conversationId) } catch { /* */ }
       // Supersede any in-flight turn: abort its controller AND stop the shared
       // speaker so its drain loop exits before the new turn's begin() resets state.
       // Without the stop(), the old (aborted) turn keeps draining the StreamingSpeaker
@@ -1993,6 +2336,49 @@ async function main(): Promise<void> {
       try { streamingSpeaker.cancel() } catch {}
       const controller = new AbortController()
       activeConductorController = controller
+
+      // ── Background-agent approval by voice ────────────────────────────────────
+      // A bare "yes"/"no" resolves a PARKED destructive action — the sub-agent is
+      // paused at zero token cost awaiting this answer. Only short-circuits when
+      // something is actually pending; otherwise "yes" flows to the conductor as a
+      // normal follow-up. (The user can also approve later from the inbox.)
+      const pendingApprovals = backgroundSub.approvalGate.listPending()
+      if (pendingApprovals.length > 0) {
+        const u = utterance.trim().toLowerCase()
+        const yes = /^(yes|yep|yeah|yup|sure|ok|okay|go ahead|do it|approve|approved|confirm(ed)?|send it|go for it|please do)\b/.test(u)
+        const no = /^(no|nope|nah|don'?t|do not|stop|cancel|skip|deny|denied|never ?mind)\b/.test(u)
+        if (yes || no) {
+          const speak = async (line: string) => { try { streamingSpeaker.begin(); streamingSpeaker.feed(line); await streamingSpeaker.end() } catch { /* */ } }
+          // Try to TARGET a specific pending action by matching distinctive words from
+          // the utterance against each pending summary — so "yes, send the email" hits
+          // the email one even if another action was parked more recently.
+          const STOP = new Set(['yes','yep','yeah','yup','sure','ok','okay','go','ahead','do','it','approve','approved','confirm','confirmed','send','it','for','please','no','nope','nah','dont','not','stop','cancel','skip','deny','denied','never','mind','the','a','that','this','one','please'])
+          const words = u.replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter((w) => w.length > 2 && !STOP.has(w))
+          const matched = words.length
+            ? pendingApprovals.find((p) => { const s = p.summary.toLowerCase(); return words.some((w) => s.includes(w)) })
+            : undefined
+
+          if (matched) {
+            backgroundSub.approvalGate.resolve(matched.id, yes)
+            await speak(`Okay, ${yes ? 'going ahead with' : 'skipping'}: ${matched.summary}.`)
+            log(`[voice] background approval ${yes ? 'APPROVED' : 'DENIED'} (targeted) "${matched.summary}"`)
+            return
+          }
+          if (pendingApprovals.length === 1) {
+            // Unambiguous — resolve it and NAME it so a mis-hear is audible.
+            backgroundSub.approvalGate.resolve(pendingApprovals[0]!.id, yes)
+            await speak(`Okay, ${yes ? 'going ahead with' : 'skipping'}: ${pendingApprovals[0]!.summary}.`)
+            log(`[voice] background approval ${yes ? 'APPROVED' : 'DENIED'} "${pendingApprovals[0]!.summary}"`)
+            return
+          }
+          // Ambiguous: several actions waiting and a bare yes/no — do NOT guess which
+          // irreversible action to run. Ask the user to name it.
+          const list = pendingApprovals.map((p) => p.summary).join('; or ')
+          await speak(`I have ${pendingApprovals.length} waiting: ${list}. Which one do you mean?`)
+          log(`[voice] background approval AMBIGUOUS (${pendingApprovals.length} pending) — asked to disambiguate`)
+          return
+        }
+      }
 
       // Persist the USER turn first so it's available to recentTurns() on the
       // NEXT utterance (and the agent reply is appended once we have it). Without
@@ -2014,22 +2400,37 @@ async function main(): Promise<void> {
           ctx = recent.map((t: any) => `${t.role}: ${t.text}`).join('\n')
         } catch { /* context best-effort */ }
 
+        // Per-turn memory instrumentation — one structured line so we can SEE the
+        // lifecycle working (or not) on every turn instead of guessing.
+        const mem: { resolved: number; forgot: string[]; pending?: string; extracted: boolean } = { resolved: 0, forgot: [], extracted: false }
         // 1. Resolve any outstanding confirm-before-delete asks.
         if (pendingResolver) {
           try {
             const r = await pendingResolver.resolve(utterance, conversationId)
-            if (r && r.resolved > 0) { try { contextBuilder.invalidatePrefix() } catch {} }
+            if (r && r.resolved > 0) { mem.resolved = r.resolved; try { contextBuilder.invalidatePrefix() } catch {} }
           } catch { /* */ }
         }
         // 2. Detect a NEW forget request (immediate soft-delete, or raise a pending ask).
         if (forgetDetector) {
           try {
             const f = await forgetDetector.detect(utterance, ctx, conversationId)
-            if (f) { try { contextBuilder.invalidatePrefix() } catch {} }
+            if (f) { mem.forgot = (f as any).forgot ?? []; mem.pending = (f as any).pending; try { contextBuilder.invalidatePrefix() } catch {} }
           } catch { /* */ }
         }
         // 3. Extract durable facts (write/update). Corrections resolve via ctx.
-        if (realtimeFactExtractor) { try { await realtimeFactExtractor.extract(utterance, ctx) } catch { /* */ } }
+        if (realtimeFactExtractor) {
+          try {
+            const stored = await realtimeFactExtractor.extract(utterance, ctx)
+            mem.extracted = true
+            // A durable fact changed topFacts, which is baked into the cached session
+            // prefix — invalidate so the NEXT build (incl. a background sub-agent's)
+            // reflects it instead of a stale snapshot.
+            if (Array.isArray(stored) ? stored.length > 0 : !!stored) { try { contextBuilder.invalidatePrefix() } catch { /* */ } }
+          } catch { /* */ }
+        }
+        if (mem.resolved || mem.forgot.length || mem.pending || mem.extracted) {
+          log(`[memory] turn cid=${conversationId}: resolved=${mem.resolved} forgot=${JSON.stringify(mem.forgot)}${mem.pending ? ` pending="${mem.pending}"` : ''} extracted=${mem.extracted}`)
+        }
       })()
 
       // Detect + persist standing preferences ("from now on…") to persona.md.
@@ -2040,8 +2441,12 @@ async function main(): Promise<void> {
       }
 
       lastAgentReply = ''
+      // Stable runId for THIS turn — root of the activity tree. Sub-agents spawned
+      // during the turn link to it (parentRunId) so the UI nests them under the turn.
+      const turnRunId = `turn_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
+      try { backgroundSub.manager.setActiveRunId(turnRunId) } catch { /* */ }
       try {
-        await agentConductor.handle({ utterance, conversationId, signal: controller.signal })
+        await agentConductor.handle({ utterance, conversationId, signal: controller.signal, runId: turnRunId })
         log(`[voice] handleUtterance OK`)
         // Persist the AGENT turn (captured from agent_done via onEvent).
         if (lastAgentReply.trim()) {
@@ -2093,6 +2498,24 @@ async function main(): Promise<void> {
         return
       }
 
+      // Test-genesis hook: force the AWM induction pipeline to run NOW (instead of
+      // waiting for its 4h timer), optionally with relaxed thresholds, so a test
+      // harness can prove KAIROS crystallizes a skill from recent trajectories.
+      // Read-only w.r.t. user data; only writes to ~/.kairos/skills. See the
+      // kairos-skill-genesis skill.
+      if (cmd?.cmd === 'test_run_awm') {
+        const worker = (globalThis as any).__kairosAwmWorker
+        if (!worker) {
+          wrapApi.broadcast({ event: 'awm_report', error: 'AwmWorker not available (skills subsystem disabled or persona TrajWriter/router missing)' })
+          return
+        }
+        const overrides = (cmd.overrides && typeof cmd.overrides === 'object') ? cmd.overrides : undefined
+        void worker.runOnce(overrides)
+          .then((report: any) => { wrapApi.broadcast({ event: 'awm_report', report }) })
+          .catch((err: any) => { wrapApi.broadcast({ event: 'awm_report', error: String(err?.message ?? err) }) })
+        return
+      }
+
       // Renderer-mic mode: Electron captured an utterance (WAV, base64) and ships
       // it here. Transcribe via the same cloud Whisper used by the sidecar bridge,
       // then run the full agent loop. Mirrors VoiceConductor's audio_blob path.
@@ -2111,11 +2534,20 @@ async function main(): Promise<void> {
             const { text } = await whisper.transcribe(wavBytes)
             const clean = (text ?? '').trim()
             log(`[voice] STT(renderer) [${Date.now() - t0}ms]: "${clean}"`)
-            if (!clean) { wrapApi.broadcast({ event: 'stt_final', text: '' }); return }
+            // Always surface what was heard in the TERMINAL (log() only prints in
+            // verbose mode → file-only otherwise, which is why transcripts looked
+            // intermittent). console.log is unconditional.
+            if (!clean) {
+              console.log(`  🎤 heard nothing (STT empty, ${Date.now() - t0}ms) — say it again`)
+              wrapApi.broadcast({ event: 'stt_final', text: '' })
+              return
+            }
+            console.log(`  🎤 heard: "${clean}" (${Date.now() - t0}ms)`)
             wrapApi.broadcast({ event: 'stt_final', text: clean })
             await handleUtterance(clean, cid)
           } catch (e) {
             log(`[voice] STT(renderer) error: ${(e as Error).message}`)
+            console.log(`  🎤 STT FAILED: ${(e as Error).message}`)
             wrapApi.broadcast({ event: 'agent_error', message: `STT: ${(e as Error).message}` })
           }
         })()
@@ -2136,6 +2568,22 @@ async function main(): Promise<void> {
         try { streamingSpeaker.cancel() } catch {}
         try { voiceBundle!.sayBackend.stop() } catch {}
         wrapApi.broadcast({ event: 'agent_interrupted' })
+        return
+      }
+
+      // Hook #10 (UI half): resolve a PARKED background-agent destructive approval
+      // from the HUD / inbox card — the non-voice path. item_id is the gate req.id
+      // (from an `approval_request` event) OR the inbox intent_id (`bg_approval:<id>`);
+      // both are accepted (the prefix is stripped). The parked sub-agent (zero token
+      // cost) resumes on approve, or skips the action on deny. Replies with
+      // `approval_resolved{item_id, decision, matched}` so the UI can clear the card.
+      if ((cmd?.cmd === 'approve' || cmd?.cmd === 'deny') && cmd.item_id != null) {
+        const approved = cmd.cmd === 'approve'
+        const reqId = String(cmd.item_id).replace(/^bg_approval:/, '')
+        let matched = false
+        try { matched = backgroundSub.approvalGate.resolve(reqId, approved) } catch { /* */ }
+        log(`[voice] WS ${cmd.cmd} item=${reqId} → ${matched ? 'resolved' : 'no pending match'}`)
+        wrapApi.broadcast({ event: 'approval_resolved', item_id: cmd.item_id, decision: approved ? 'approved' : 'denied', matched })
         return
       }
     })

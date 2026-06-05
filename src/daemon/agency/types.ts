@@ -32,6 +32,8 @@ export type ActionRequest = {
   source_episode_id?: number          // mem_l2_episodes.id (null = direct user / external)
   reasoning: string                   // why this action — for trajectory log
   requested_at: number
+  source?: 'user' | 'proactive'       // 'user' = interactive/foreground (the user asked → bypasses
+                                       // restraint debounce; tier/approval still applies). default 'proactive'.
 }
 
 /** Pre-execution status of a queued action. */
