@@ -23,6 +23,7 @@ import { buildCompactor, COMPACT_PROMPT } from "./compactor"
 import { buildDestructiveVerifier } from "./verifier"
 import { runAgentLoop } from "./agentLoop"
 import { join } from "node:path"
+import { verifyModel } from "../types"
 import type { ToolDef } from "../types"
 import type { LoopEvent, LoopLlm, LoopMsg } from "./types"
 
@@ -188,7 +189,10 @@ export function buildBackgroundSubsystem(deps: BackgroundSubsystemDeps): Backgro
     // MORE than the foreground (the user wasn't watching), so on a flag it
     // self-corrects (actually performs the claimed action / restates from results)
     // rather than just appending a hedge. Same general check: claim ⊆ tool ledger.
-    const verifier = buildDestructiveVerifier({ llm: { complete: (b: any) => (fastLlm as any).complete(b) } })
+    // Capable judge for the grounding verify gate — the unattended lane benefits
+    // most from a sharp verifier (the user isn't watching). Same KAIROS_VERIFY_MODEL.
+    const verifyLlm = deps.makeLlm(verifyModel())
+    const verifier = buildDestructiveVerifier({ llm: { complete: (b: any) => (verifyLlm as any).complete(b) } })
 
     const startedAt = Date.now()
     const res = await runAgentLoop(

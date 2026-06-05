@@ -332,11 +332,14 @@ async function defaultPlannerRunner(
   const { buildCompactor, COMPACT_PROMPT } = await import("./loop/compactor")
   const { buildUpdatePlanTool } = await import("./loop/updatePlanTool")
   const { buildDestructiveVerifier } = await import("./loop/verifier")
-  const { TIER_MODELS } = await import("./types")
+  const { TIER_MODELS, verifyModel } = await import("./types")
 
   const smart = new OpenRouterAdapter({ defaultModel: TIER_MODELS.smart() })
-  // Cheap model for compaction summaries + the destructive-verify gate.
+  // Cheap model for compaction summaries.
   const fast = new OpenRouterAdapter({ defaultModel: process.env.KAIROS_MEMORY_MODEL ?? TIER_MODELS.fast() })
+  // SEPARATE, more-capable model for the grounding verify gate (the anti-hallucination
+  // judge) — a sharper reader catches the subtle misreads gpt-4o-mini lets slide.
+  const verify = new OpenRouterAdapter({ defaultModel: verifyModel() })
 
   // Context compaction — summarize-and-replace when a long multi-tool task grows.
   const compactor = buildCompactor({
@@ -357,13 +360,12 @@ async function defaultPlannerRunner(
   const tools = [...opts.tools, buildUpdatePlanTool({})]
 
   // Grounded verify gate, run INSIDE the loop (see runAgentLoop): before any
-  // tool-using turn's answer stands, a cheap fast-model judge checks the claim is
-  // supported by the FULL tool ledger. On a flag the loop self-corrects — it
-  // actually performs the claimed action or restates from the results — rather
-  // than letting KAIROS speak something the tools never did. General: catches a
-  // phantom action ("Deleted" with no delete call) AND a misread ("last email is
-  // X" when the fetch returned Y), with no verb/keyword lists.
-  const verifier = buildDestructiveVerifier({ llm: { complete: (b: any) => fast.complete(b) } })
+  // tool-using turn's answer stands, a capable judge (verifyModel) checks the claim
+  // is supported by the FULL tool ledger. On a flag the loop self-corrects — it
+  // restates from the results rather than letting KAIROS speak something the tools
+  // never did. General: catches a phantom action ("Deleted" with no delete call)
+  // AND a misread ("last email is X" when the fetch returned Y), with no verb lists.
+  const verifier = buildDestructiveVerifier({ llm: { complete: (b: any) => verify.complete(b) } })
 
   const res = await runAgentLoop(
     [

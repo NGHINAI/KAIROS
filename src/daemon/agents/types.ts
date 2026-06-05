@@ -10,6 +10,13 @@ export const TIER_MODELS: Record<Tier, () => string> = {
   vision: () => process.env.KAIROS_VISION_MODEL ?? "openai/gpt-4o",
 }
 
+/** Model for the grounding VERIFY gate (claim ⊆ tool results). Deliberately MORE
+ *  capable than the fast tier — a sharper, reliably-JSON judge catches the subtle
+ *  misreads a weak model lets slide. This is the highest-leverage anti-hallucination
+ *  knob; override per-launch with KAIROS_VERIFY_MODEL (e.g. to a cheaper model to
+ *  trade some accuracy for cost). Runs on tool turns only (~160-token judgments). */
+export const verifyModel = (): string => process.env.KAIROS_VERIFY_MODEL ?? "openai/gpt-4o"
+
 export interface IntentDecision {
   tier: Tier
   reason: string         // why this tier
