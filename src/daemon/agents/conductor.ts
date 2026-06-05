@@ -306,8 +306,15 @@ export class Conductor {
 // markup must never reach TTS. If detected, we speak a recovery line instead.
 const TOOL_MARKUP_RE = /<tool_call|tool_calls_section|<\|tool|functions\.[a-zA-Z_]+\s*[\{<]/
 
+// Reasoning models wrap their chain-of-thought in <think>/<thinking>/<reasoning>
+// tags — that internal monologue must NEVER be spoken. Strip the tagged blocks (and
+// any dangling open tag) before TTS. (The real fix for CoT leakage is a non-reasoning
+// SMART model — see TIER_MODELS.smart — but this catches a tagged model defensively.)
+const THINK_BLOCK_RE = /<(think|thinking|reasoning|thought)>[\s\S]*?<\/\1>/gi
+const THINK_DANGLING_RE = /<(think|thinking|reasoning|thought)>[\s\S]*$/i
+
 function sanitizeReply(text: unknown): string {
-  const t = String(text ?? "").trim()
+  let t = String(text ?? "").replace(THINK_BLOCK_RE, " ").replace(THINK_DANGLING_RE, " ").trim()
   if (!t) return ""
   if (TOOL_MARKUP_RE.test(t)) return "Sorry, I hit a snag running that — let me try again in a moment."
   return t

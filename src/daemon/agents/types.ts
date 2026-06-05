@@ -5,7 +5,9 @@ export type Tier = "fast" | "smart" | "deep" | "vision"
 
 export const TIER_MODELS: Record<Tier, () => string> = {
   fast:   () => process.env.KAIROS_FAST_MODEL   ?? "openai/gpt-4o-mini",
-  smart:  () => process.env.KAIROS_SMART_MODEL  ?? "moonshotai/kimi-k2",
+  // SMART generates the SPOKEN reply — keep it a NON-reasoning model. Reasoning models
+  // (kimi-k2.5, etc.) leak their chain-of-thought + recite the system prompt aloud.
+  smart:  () => process.env.KAIROS_SMART_MODEL  ?? "openai/gpt-4o",
   deep:   () => process.env.KAIROS_DEEP_MODEL   ?? "moonshotai/kimi-k2-thinking",
   vision: () => process.env.KAIROS_VISION_MODEL ?? "openai/gpt-4o",
 }
