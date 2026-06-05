@@ -6,6 +6,7 @@
 
 import AppKit
 import Metal
+import SwiftUI
 
 let arguments = CommandLine.arguments
 let app = NSApplication.shared
@@ -49,6 +50,35 @@ if arguments.contains("--probe") {
     client.connect()
     FileHandle.standardError.write("probing ws://127.0.0.1:\(kairosDaemonPort())/v1/voice/events for 6s…\n".data(using: .utf8)!)
     RunLoop.main.run(until: Date().addingTimeInterval(6))
+    exit(0)
+}
+
+// Render the Lane-A activity overlay + card to PNGs (mock data) for visual verification.
+@MainActor func renderActivitySnaps(toDir dir: String) {
+    let a = ActivityModel()
+    a.intent(tier: "smart"); a.setStatus("creating your calendar event")
+    a.toolCall(id: "1", name: "search_gmail"); a.toolDone(id: "1", summary: "3 results")
+    a.toolCall(id: "2", name: "create_event")
+    a.toolCall(id: "3", name: "send_reply")
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    func write(_ view: some View, _ name: String, _ w: CGFloat, _ h: CGFloat) {
+        let r = ImageRenderer(content: view.frame(width: w, height: h)); r.scale = 2
+        if let img = r.nsImage, let tiff = img.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+           let png = rep.representation(using: .png, properties: [:]) {
+            try? png.write(to: URL(fileURLWithPath: dir).appendingPathComponent(name))
+        }
+    }
+    write(ZStack { Color(white: 0.05); ActivityCardView(activity: a) }, "activity-card.png", 290, 160)
+    write(ZStack {
+        Color(white: 0.05)
+        Circle().strokeBorder(.white.opacity(0.18), lineWidth: 1).frame(width: 88, height: 88)
+        ActivityNodesView(activity: a)
+    }, "activity-nodes.png", 200, 200)
+    FileHandle.standardError.write("wrote activity-card.png + activity-nodes.png\n".data(using: .utf8)!)
+}
+
+if let i = arguments.firstIndex(of: "--activitysnap"), i + 1 < arguments.count {
+    MainActor.assumeIsolated { renderActivitySnaps(toDir: arguments[i + 1]) }
     exit(0)
 }
 

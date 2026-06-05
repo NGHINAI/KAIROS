@@ -9,23 +9,24 @@ import AppKit
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let model = OrbModel()
+    let activity = ActivityModel()
     private var orbManager: OrbPanelManager?
     private var mock: MockDriver?
     private var daemon: DaemonClient?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let manager = OrbPanelManager(model: model)
+        let manager = OrbPanelManager(model: model, activity: activity)
         manager.show()
         orbManager = manager
 
         if CommandLine.arguments.contains("--mock") {
-            // Daemon-free dev: scripted state/level cycle.
-            let driver = MockDriver(model: model)
+            // Daemon-free dev: scripted state/level + tool-call cycle.
+            let driver = MockDriver(model: model, activity: activity)
             driver.start()
             mock = driver
         } else {
-            // Live: react to the real daemon's voice events (auto-reconnects if it's down).
-            let client = DaemonClient(model: model, port: kairosDaemonPort())
+            // Live: react to the real daemon's voice + activity events (auto-reconnects if it's down).
+            let client = DaemonClient(model: model, activity: activity, port: kairosDaemonPort())
             client.connect()
             daemon = client
         }
