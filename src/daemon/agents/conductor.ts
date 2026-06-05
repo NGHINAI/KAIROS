@@ -341,7 +341,14 @@ async function defaultPlannerRunner(
   const { buildDestructiveVerifier } = await import("./loop/verifier")
   const { TIER_MODELS, verifyModel } = await import("./types")
 
-  const smart = new OpenRouterAdapter({ defaultModel: TIER_MODELS.smart() })
+  // Generous token budget: a reasoning SMART model (kimi-k2.5/minimax) spends tokens
+  // on its (excluded) chain-of-thought, so a 512 default left no room for the actual
+  // answer → empty reply. The spoken answer stays short (the prompt enforces brevity);
+  // this headroom is for the hidden reasoning. Tune with KAIROS_SMART_MAX_TOKENS.
+  const smart = new OpenRouterAdapter({
+    defaultModel: TIER_MODELS.smart(),
+    defaultMaxTokens: Number(process.env.KAIROS_SMART_MAX_TOKENS) || 4096,
+  })
   // Cheap model for compaction summaries.
   const fast = new OpenRouterAdapter({ defaultModel: process.env.KAIROS_MEMORY_MODEL ?? TIER_MODELS.fast() })
   // SEPARATE, more-capable model for the grounding verify gate (the anti-hallucination
