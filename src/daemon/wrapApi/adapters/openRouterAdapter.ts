@@ -95,6 +95,14 @@ export type OpenRouterAdapterDeps = {
   defaultMaxTokens?: number
   appName?: string                // OpenRouter wants HTTP-Referer + X-Title
   fetchImpl?: typeof fetch
+  /** DISABLE thinking (not just hide it). For a hybrid/thinking model used on the
+   *  SPOKEN tier (e.g. gemini-2.5-flash), set true → sends reasoning.max_tokens:0
+   *  (OpenRouter maps this to Gemini's thinkingBudget:0) so the model does NOT spend
+   *  latency/tokens thinking and can't return an empty answer because thinking ate the
+   *  budget. `exclude:true` alone only HIDES thinking — the model still thinks. Harmless
+   *  on pure non-thinking models (the param is ignored). Leave false for the DEEP tier,
+   *  which we WANT to reason. */
+  disableThinking?: boolean
 }
 
 export class OpenRouterAdapter {
@@ -104,6 +112,7 @@ export class OpenRouterAdapter {
   private defaultMaxTokens: number
   private appName: string
   private fetchImpl: typeof fetch
+  private disableThinking: boolean
 
   constructor(deps: OpenRouterAdapterDeps = {}) {
     this.apiKey = deps.apiKey ?? process.env.OPENROUTER_API_KEY ?? ''
@@ -112,6 +121,7 @@ export class OpenRouterAdapter {
     this.defaultMaxTokens = deps.defaultMaxTokens ?? 512
     this.appName = deps.appName ?? 'KAIROS'
     this.fetchImpl = (deps.fetchImpl ?? fetch) as typeof fetch
+    this.disableThinking = deps.disableThinking ?? false
   }
 
   /** One-shot non-streaming completion (compat with LLMAdapter shape). */
@@ -152,7 +162,12 @@ export class OpenRouterAdapter {
     // from the response — so the chain-of-thought can't reach the spoken `content`.
     // (Harmless on non-reasoning models.) Edit-2 below also strips inline <think> tags
     // for models that bake CoT into content regardless. Disable with KAIROS_OR_EXCLUDE_REASONING=false.
-    if (process.env.KAIROS_OR_EXCLUDE_REASONING !== 'false') reqBody.reasoning = { exclude: true }
+    if (process.env.KAIROS_OR_EXCLUDE_REASONING !== 'false') {
+      // exclude:true HIDES reasoning tokens; for a thinking model on the spoken tier
+      // we also DISABLE thinking entirely via max_tokens:0 (→ Gemini thinkingBudget:0)
+      // so the answer can't come back empty because thinking burned the budget.
+      reqBody.reasoning = this.disableThinking ? { exclude: true, max_tokens: 0 } : { exclude: true }
+    }
     if (body.temperature !== undefined) reqBody.temperature = body.temperature
     if (body.tools && body.tools.length > 0) {
       reqBody.tools = body.tools

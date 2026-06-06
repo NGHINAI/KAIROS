@@ -13,7 +13,7 @@ import { StreamSpeechController, type SpeakSink } from "./streamSpeechController
 import { pickAck, pickFiller, describeAction } from "./fillerBank"
 import { isDestructiveCall } from "./loop/verifier"
 import type { AgentEventHandler, ConductorOpts, Tier, ToolDef } from "./types"
-import type { LoopEvent } from "./loop/types"
+import type { LoopEvent, LoopMsg } from "./loop/types"
 
 interface ContextBuilder {
   build(input: { utterance: string; tier: Tier; conversationId?: string }): Promise<{ system: string; tools: ToolDef[] }>
@@ -23,7 +23,16 @@ interface ContextBuilder {
  *  Injected so tests can stub the heavy SDK invocation. `onEvent` streams live
  *  loop events (deltas, tool starts) so the conductor can speak as it generates. */
 export interface PlannerRunner {
-  (input: string, opts: { tools: ToolDef[]; instructions: string; signal?: AbortSignal; onEvent?: (e: LoopEvent) => void }): Promise<{
+  (input: string, opts: {
+    tools: ToolDef[]
+    instructions: string
+    signal?: AbortSignal
+    onEvent?: (e: LoopEvent) => void
+    /** Durable conversation history (real messages incl. prior tool results) replayed
+     *  before the user turn so the model can chain off what it already did (e.g. a
+     *  gmail threadId from an earlier send). Empty/omitted = no replay. */
+    history?: LoopMsg[]
+  }): Promise<{
     finalOutput: string
     /** The model's raw final answer that was STREAMED live (pre-verify-gate).
      *  If finalOutput differs, the verify-gate corrected it → speak a follow-up. */
@@ -55,6 +64,17 @@ export interface ConductorDeps {
   /** Recent turns for the ROUTER — lets the classifier resolve short replies
    *  ("yes", "do it", "the second one") against what KAIROS just said. */
   conversationStore?: { recentTurns: (id: string, n: number) => Promise<Array<{ role: string; text: string }>> }
+  /** Durable full-message transcript (incl. tool results). When present, the smart
+   *  tier loads a bounded, tool-pair-safe replay of prior turns to seed the planner,
+   *  and persists each turn after it runs. This is what lets a later turn reuse an id
+   *  (gmail threadId, issue id, file path) from an action it already took. */
+  conversationMessages?: {
+    loadForReplay: (conversationId: string, opts?: { maxTurns?: number; maxChars?: number }) => Promise<LoopMsg[]>
+    appendTurn: (conversationId: string, turnId: string, msgs: LoopMsg[]) => Promise<void>
+    /** Off-hot-path: fold turns older than the recent window into a rolling summary so
+     *  the whole conversation is remembered (recent verbatim + older summarized). */
+    updateRollingSummary?: (conversationId: string, summarize: (text: string) => Promise<string>, opts?: { keepRecent?: number }) => Promise<void>
+  }
 }
 
 export class Conductor {
@@ -110,7 +130,7 @@ export class Conductor {
       // can talk as it generates instead of dead-air-then-dump.
       if (decision.tier === "fast") {
         console.log('[conductor] -> handleFast')
-        await this.handleFast(utterance, ctx, emit, signal)
+        await this.handleFast(utterance, ctx, emit, signal, conversationId)
       } else if (decision.tier === "smart") {
         console.log('[conductor] -> handleSmart')
         await this.handleSmart(opts, ctx, emit)
@@ -169,6 +189,7 @@ export class Conductor {
     ctx: { system: string; tools: ToolDef[] },
     emit: AgentEventHandler,
     signal?: AbortSignal,
+    conversationId?: string,
   ): Promise<void> {
     const resp = await this.deps.fastLlm.complete({
       messages: [
@@ -185,6 +206,11 @@ export class Conductor {
     // Fast path is a single quick completion → speak it whole (no dead air to fill).
     if (this.deps.speakBackend && !signal?.aborted) {
       try { await this.deps.speakBackend.speak(text) } catch (err) { console.log(`[conductor] fast speak error: ${(err as Error).message}`) }
+    }
+    // Persist the (tool-less) turn so the replay transcript stays continuous — a
+    // "thank you / got it" between two action turns shouldn't leave a hole.
+    if (this.deps.conversationMessages && conversationId) {
+      try { await this.deps.conversationMessages.appendTurn(conversationId, `turn_${Date.now().toString(36)}`, [{ role: "user", content: utterance }, { role: "assistant", content: text }]) } catch { /* best-effort */ }
     }
   }
 
@@ -261,12 +287,22 @@ export class Conductor {
     }
     activity("planning") // root node appears the moment the turn starts working
 
+    // Durable replay: seed the planner with prior real messages (incl. tool results)
+    // so it can chain off what it already did ("reply to that same email" → the gmail
+    // threadId from the earlier send). Off the hot path's critical section (a cheap
+    // indexed read); disabled with KAIROS_CONV_REPLAY=0.
+    let history: LoopMsg[] = []
+    if (process.env.KAIROS_CONV_REPLAY !== "0" && this.deps.conversationMessages && opts.conversationId) {
+      try { history = await this.deps.conversationMessages.loadForReplay(opts.conversationId) } catch { /* replay is best-effort */ }
+    }
+
     const runFn = this.deps.runPlanner ?? defaultPlannerRunner
     const result = await runFn(opts.utterance, {
       tools: ctx.tools,
       instructions: ctx.system,
       signal: opts.signal,
       onEvent,
+      history,
     })
 
     try { opts.signal?.removeEventListener?.("abort", onAbort) } catch { /* */ }
@@ -298,8 +334,80 @@ export class Conductor {
     }
 
     emit({ kind: "agent_done", text: reply })
+
+    // Persist this turn's real messages (user + tool exchange incl. results + final
+    // answer) so the NEXT turn can replay them. Off the hot path — already spoke.
+    if (this.deps.conversationMessages && opts.conversationId) {
+      try {
+        const turnId = opts.runId ?? `turn_${Date.now().toString(36)}`
+        await this.deps.conversationMessages.appendTurn(opts.conversationId, turnId, buildTurnMessages(opts.utterance, result.toolCalls, reply))
+      } catch { /* persistence is best-effort; must never break a turn */ }
+
+      // Roll older turns into the summary OFF the hot path (fire-and-forget — we've
+      // already spoken). Cheap fast-model digest; never blocks or breaks the turn.
+      if (process.env.KAIROS_CONV_SUMMARY !== "0" && this.deps.conversationMessages.updateRollingSummary) {
+        const cid = opts.conversationId
+        void this.deps.conversationMessages
+          .updateRollingSummary(cid, (text) => this.summarizeConversation(text))
+          .catch(() => { /* summary is best-effort */ })
+      }
+    }
+  }
+
+  /** Cheap-model digest of older conversation turns for the rolling summary. */
+  private async summarizeConversation(text: string): Promise<string> {
+    const r = await this.deps.fastLlm.complete({
+      messages: [
+        { role: "system", content: CONVERSATION_SUMMARY_PROMPT },
+        { role: "user", content: text },
+      ],
+      max_tokens: fastMax(300),
+    })
+    return sanitizeReply(r.text)
   }
 }
+
+const CONVERSATION_SUMMARY_PROMPT =
+  "You are maintaining a running memory of a voice conversation so it can be remembered after the recent turns scroll off. " +
+  "Given the existing summary (if any) plus the newer earlier turns, write an updated, compact summary. " +
+  "PRESERVE: what the user asked for and cares about, decisions made, names/people, and any concrete identifiers or values that a later turn might need (email recipients, thread ids, issue ids, file paths, amounts, dates). " +
+  "Drop pleasantries and filler. Keep it tight — a few sentences. Write plain text, no markdown."
+
+/** Reconstruct a turn's durable real-message trace from the planner result: the user
+ *  utterance, the tool exchange (one assistant tool_calls message + a tool result per
+ *  call, carrying ids/threadIds), and the final spoken answer. update_plan is a
+ *  loop-scoped scratchpad → excluded. Tool results are clamped (ids survive; full
+ *  bodies don't bloat the store/replay). Pairs stay intact (orphan-safe). */
+function buildTurnMessages(
+  input: string,
+  toolCalls: Array<{ id: string; name: string; args: any; result?: any; error?: string }>,
+  reply: string,
+): LoopMsg[] {
+  const msgs: LoopMsg[] = [{ role: "user", content: input }]
+  const real = toolCalls.filter((c) => c.name !== "update_plan")
+  if (real.length > 0) {
+    msgs.push({
+      role: "assistant",
+      tool_calls: real.map((c) => ({ id: c.id, type: "function" as const, function: { name: c.name, arguments: safeStringify(c.args) } })),
+    })
+    for (const c of real) {
+      const content = c.error
+        ? `Error: ${String(c.error).slice(0, 600)}`
+        : clampResult(c.result)
+      msgs.push({ role: "tool", tool_call_id: c.id, content })
+    }
+  }
+  if (reply && reply.trim()) msgs.push({ role: "assistant", content: reply })
+  return msgs
+}
+
+const REPLAY_RESULT_MAX = Number(process.env.KAIROS_REPLAY_RESULT_MAX) || 1500
+function clampResult(result: any): string {
+  if (result == null) return "(no result)"
+  const s = typeof result === "string" ? result : safeStringify(result)
+  return s.length > REPLAY_RESULT_MAX ? s.slice(0, REPLAY_RESULT_MAX) + "…(truncated)" : s
+}
+function safeStringify(v: any): string { try { return JSON.stringify(v ?? {}) } catch { return "{}" } }
 
 // Raw tool-call markup that must NEVER be spoken. Some models (e.g. Kimi K2 via
 // certain providers) emit tool calls as TEXT instead of structured calls; that
@@ -327,7 +435,7 @@ function sanitizeReply(text: unknown): string {
  *  so handleSmart and the conductor tests are unaffected. */
 async function defaultPlannerRunner(
   input: string,
-  opts: { tools: ToolDef[]; instructions: string; signal?: AbortSignal; onEvent?: (e: LoopEvent) => void },
+  opts: { tools: ToolDef[]; instructions: string; signal?: AbortSignal; onEvent?: (e: LoopEvent) => void; history?: LoopMsg[] },
 ): Promise<{
   finalOutput: string
   streamedText?: string
@@ -345,15 +453,27 @@ async function defaultPlannerRunner(
   // on its (excluded) chain-of-thought, so a 512 default left no room for the actual
   // answer → empty reply. The spoken answer stays short (the prompt enforces brevity);
   // this headroom is for the hidden reasoning. Tune with KAIROS_SMART_MAX_TOKENS.
+  // SMART generates the SPOKEN reply, so it must be talk-and-tools, NOT thinking. If
+  // it's a thinking/hybrid model (gemini-2.5-flash), disableThinking forces thinking
+  // OFF (reasoning.max_tokens:0) so it can't burn the budget and return empty. Off via
+  // KAIROS_SMART_DISABLE_THINKING=0. Harmless on a pure non-thinking smart model.
+  const disableThinking = process.env.KAIROS_SMART_DISABLE_THINKING !== "0"
   const smart = new OpenRouterAdapter({
     defaultModel: TIER_MODELS.smart(),
     defaultMaxTokens: Number(process.env.KAIROS_SMART_MAX_TOKENS) || 4096,
+    disableThinking,
   })
   // Cheap model for compaction summaries.
   const fast = new OpenRouterAdapter({ defaultModel: process.env.KAIROS_MEMORY_MODEL ?? TIER_MODELS.fast() })
-  // SEPARATE, more-capable model for the grounding verify gate (the anti-hallucination
-  // judge) — a sharper reader catches the subtle misreads gpt-4o-mini lets slide.
-  const verify = new OpenRouterAdapter({ defaultModel: verifyModel() })
+  // SEPARATE model for the grounding verify gate (the anti-hallucination judge). It
+  // tracks the smart model unless KAIROS_VERIFY_MODEL pins it (types.ts), so a
+  // gemini-only user no longer fires silent gpt-4o verify calls. Same thinking-off
+  // policy (it produces a JSON verdict, not reasoning prose).
+  const verify = new OpenRouterAdapter({ defaultModel: verifyModel(), disableThinking })
+  // Observability: log the resolved models for THIS planner turn. Nothing logged
+  // per-turn model usage before, which is why the phantom gpt-4o verify calls were
+  // invisible. One line per smart/planner turn makes model routing auditable.
+  console.log(`[models] planner turn — smart=${TIER_MODELS.smart()} verify=${verifyModel()}`)
 
   // Context compaction — summarize-and-replace when a long multi-tool task grows.
   const compactor = buildCompactor({
@@ -384,6 +504,9 @@ async function defaultPlannerRunner(
   const res = await runAgentLoop(
     [
       { role: "system", content: opts.instructions },
+      // Durable replay of prior turns (real messages incl. tool results) so the model
+      // can chain off an id it already obtained. Bounded + tool-pair-safe upstream.
+      ...(opts.history ?? []),
       { role: "user", content: input },
     ],
     {

@@ -41,13 +41,14 @@ test("tool that THROWS → error result fed back so the model can route around i
   expect(r.content).toContain("kaboom")
 })
 
-test("oversized result is truncated with an explicit marker (not a raw mid-JSON cut)", async () => {
-  const huge = { items: Array.from({ length: 5000 }, (_, i) => ({ i, name: "x".repeat(20) })) }
+test("oversized result is elided with an explicit marker (middle-elision, not a raw mid-JSON cut)", async () => {
+  const huge = { headField: "HEAD", items: Array.from({ length: 5000 }, (_, i) => ({ i, name: "x".repeat(20) })) }
   const big: ToolDef[] = [{ name: "big", description: "", parameters: {}, execute: async () => huge }]
   const r = await executeToolCall({ id: "c7", name: "big", argsJson: "{}" }, big, { maxChars: 500 })
   expect(r.ok).toBe(true)
   expect(r.content.length).toBeLessThan(700)
-  expect(r.content).toMatch(/truncat/i) // tells the model it was cut
+  expect(r.content).toMatch(/elided/i)     // tells the model it was cut
+  expect(r.content).toContain("HEAD")      // head preserved (middle-elision keeps both ends)
 })
 
 test("aborted signal → synthetic 'aborted' result (never an orphaned tool_call_id)", async () => {

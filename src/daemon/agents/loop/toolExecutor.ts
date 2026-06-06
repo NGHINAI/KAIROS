@@ -17,14 +17,47 @@ export interface ToolResult {
   result?: any
 }
 
-// Cap a tool result so one huge payload can't blow context. Env-configurable.
-const MAX_CONTENT = Number(process.env.KAIROS_MAX_TOOL_CHARS) || 16000
+// Cap a tool result so one huge payload can't blow context. Lowered from 16000 →
+// 6000: combined with shaping (below) this cuts a verbose inbox dump from ~16KB to
+// ~1–2KB, which is the bulk of the "seeing a lot at once" overload. Env-configurable.
+const MAX_CONTENT = Number(process.env.KAIROS_MAX_TOOL_CHARS) || 6000
 
-/** Truncate with an explicit marker so the model knows it's incomplete (rather
- *  than silently cutting mid-JSON and making the model waste a turn recovering). */
-function clamp(content: string, max: number): string {
+/** Middle-elision: keep the HEAD and the TAIL with an explicit marker. A plain
+ *  head-cut would drop ids that live near the end of a list result; keeping both ends
+ *  preserves far more usable structure than a tail-truncate. */
+export function clampMiddle(content: string, max: number): string {
   if (content.length <= max) return content
-  return content.slice(0, max) + `\n…(truncated; showed ${max} of ${content.length} characters)`
+  const head = Math.floor(max * 0.6)
+  const tail = Math.max(0, max - head - 60)
+  return content.slice(0, head) + `\n…(${content.length - head - tail} chars elided)…\n` + content.slice(content.length - tail)
+}
+
+// Fields worth keeping from a list element — ids/handles + the human-meaningful bits.
+// Everything else (bodies, payloads, attachmentList, labelIds, raw MIME) is dropped.
+const KEEP_FIELDS = ["id", "threadId", "messageId", "from", "sender", "to", "subject", "title", "name", "snippet", "preview", "summary", "date", "timestamp", "status", "state", "url", "permalink"]
+
+/** Shape a verbose LIST/FETCH/SEARCH result down to a compact, id-preserving form
+ *  BEFORE it reaches the model. Returns null for non-list results (e.g. a single
+ *  send/get) so they pass through untouched. Preserves the threadId — the exact field
+ *  the email-reply arc needs — while dropping the multi-KB bodies/payloads. */
+export function shapeToolResult(toolName: string, result: any): any | null {
+  if (!/(_FETCH|_LIST|_SEARCH|FETCH_EMAILS|LIST_MESSAGES|GET_MESSAGES|SEARCH)/i.test(toolName)) return null
+  const data = result?.data ?? result
+  const arr =
+    data?.messages ?? data?.items ?? data?.results ?? data?.issues ?? data?.threads ?? data?.events ?? (Array.isArray(data) ? data : null)
+  if (!Array.isArray(arr) || arr.length === 0) return null
+  const items = arr.slice(0, 25).map((it: any) => {
+    if (it == null || typeof it !== "object") return it
+    const out: Record<string, any> = {}
+    for (const k of KEEP_FIELDS) if (it[k] !== undefined) out[k] = typeof it[k] === "string" ? it[k].slice(0, 300) : it[k]
+    return out
+  })
+  return {
+    count: arr.length,
+    ...(arr.length > items.length ? { showing: items.length } : {}),
+    items,
+    ...(result?.successful !== undefined ? { successful: result.successful } : {}),
+  }
 }
 
 export async function executeToolCall(
@@ -60,8 +93,12 @@ export async function executeToolCall(
 
   try {
     const result = await tool.execute(args)
-    const content = typeof result === "string" ? result : JSON.stringify(result ?? null)
-    return { tool_call_id: call.id, content: clamp(content, opts?.maxChars ?? MAX_CONTENT), ok: true, result }
+    // Shape verbose list/fetch/search results to a compact, id-preserving form for the
+    // MODEL (the raw `result` is kept intact for the verify gate + replay persistence).
+    const shaped = typeof result === "string" ? null : shapeToolResult(call.name, result)
+    const forModel = shaped ?? result
+    const content = typeof forModel === "string" ? forModel : JSON.stringify(forModel ?? null)
+    return { tool_call_id: call.id, content: clampMiddle(content, opts?.maxChars ?? MAX_CONTENT), ok: true, result }
   } catch (e) {
     return {
       tool_call_id: call.id,

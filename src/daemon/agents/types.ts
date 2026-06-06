@@ -9,15 +9,19 @@ export const TIER_MODELS: Record<Tier, () => string> = {
   // (kimi-k2.5, etc.) leak their chain-of-thought + recite the system prompt aloud.
   smart:  () => process.env.KAIROS_SMART_MODEL  ?? "openai/gpt-4o",
   deep:   () => process.env.KAIROS_DEEP_MODEL   ?? "moonshotai/kimi-k2-thinking",
-  vision: () => process.env.KAIROS_VISION_MODEL ?? "openai/gpt-4o",
+  // Vision falls back to the SMART model (the one knob the user sets) before the
+  // hardcoded OpenAI id — so a gemini-only user never silently hits gpt-4o.
+  vision: () => process.env.KAIROS_VISION_MODEL ?? process.env.KAIROS_SMART_MODEL ?? "openai/gpt-4o",
 }
 
-/** Model for the grounding VERIFY gate (claim ⊆ tool results). Deliberately MORE
- *  capable than the fast tier — a sharper, reliably-JSON judge catches the subtle
- *  misreads a weak model lets slide. This is the highest-leverage anti-hallucination
- *  knob; override per-launch with KAIROS_VERIFY_MODEL (e.g. to a cheaper model to
- *  trade some accuracy for cost). Runs on tool turns only (~160-token judgments). */
-export const verifyModel = (): string => process.env.KAIROS_VERIFY_MODEL ?? "openai/gpt-4o"
+/** Model for the grounding VERIFY gate (claim ⊆ tool results). Runs on tool turns
+ *  only (~160-token judgments). Resolution order: KAIROS_VERIFY_MODEL → the SMART
+ *  model (KAIROS_SMART_MODEL) → openai/gpt-4o as the terminal fallback. Tracking the
+ *  smart model means the single knob the user sets governs every selection: a
+ *  gemini-only user no longer fires silent gpt-4o verify calls. Pin
+ *  KAIROS_VERIFY_MODEL to force a sharper, separate judge if smart is weak. */
+export const verifyModel = (): string =>
+  process.env.KAIROS_VERIFY_MODEL ?? process.env.KAIROS_SMART_MODEL ?? "openai/gpt-4o"
 
 export interface IntentDecision {
   tier: Tier

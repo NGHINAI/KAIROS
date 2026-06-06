@@ -35,6 +35,7 @@ import { MemoryStore } from './memory'
 import { Voice } from './voice'
 import { bootstrapVoice } from './voice/bootstrap'
 import { StreamingSpeaker } from './voice/streamingSpeaker'
+import { ConversationMessageStore } from './voice/conversationMessageStore'
 import { startWrapApi, type WrapApiServer } from './wrapApi/server'
 import { LLMAdapter } from './wrapApi/adapters/llmAdapter'
 import { VoiceAdapter } from './wrapApi/adapters/voiceAdapter'
@@ -2265,6 +2266,10 @@ async function main(): Promise<void> {
     }
     log(`[voice] background agent lane ready — deep=${TIER_MODELS.deep()} maxConcurrent=${Number(process.env.KAIROS_BG_MAX_CONCURRENT) || 3}`)
 
+    // Durable full-message transcript (incl. tool results) — the "remember everything"
+    // backbone for cross-turn replay. Shares the daemon's SQLite DB (state.db).
+    const conversationMessageStore = new ConversationMessageStore(db)
+
     const agentConductor = new Conductor({
       classifyLlm: buildAgentLlmCompleter('fast'),
       fastLlm:     buildAgentLlmCompleter('fast'),
@@ -2277,6 +2282,13 @@ async function main(): Promise<void> {
         recentTurns: async (id: string, n: number) => {
           try { return await voiceBundle!.conversationStore.recentTurns(id, n) } catch { return [] }
         },
+      },
+      // Durable replay: seed the smart planner with prior real messages (tool results
+      // incl. ids/threadIds) and persist each turn. Fixes "reply to that same email".
+      conversationMessages: {
+        loadForReplay: (id, o) => conversationMessageStore.loadForReplay(id, o),
+        appendTurn: (id, turnId, msgs) => conversationMessageStore.appendTurn(id, turnId, msgs),
+        updateRollingSummary: (id, summarize, o) => conversationMessageStore.updateRollingSummary(id, summarize, o),
       },
       onEvent: (e: any) => {
         if (e?.kind === 'agent_done' && typeof e.text === 'string') lastAgentReply = e.text
@@ -2387,6 +2399,37 @@ async function main(): Promise<void> {
         }
       }
 
+      // ── Memory-confirmation short-circuit ─────────────────────────────────────
+      // A bare "yes"/"no" answering a pending "forget X?" is a MEMORY op (resolved in
+      // the BACKGROUND by pendingResolver — no tool, the chat LLM is never involved).
+      // The intent classifier can't tell it apart from a real tool delete, so it
+      // escalates the "yes" to the SMART model, which then reasons aloud about an
+      // ambiguous one-word reply. We have the missing signal HERE (a live pending
+      // marker), so resolve it deterministically and skip the conductor entirely.
+      // resolve() is a cheap DB read (no LLM) when nothing is pending, so gating on a
+      // yes/no regex keeps normal "yes" follow-ups flowing to the conductor untouched.
+      let memoryResolveHandled = false
+      {
+        const u = utterance.trim().toLowerCase()
+        const denied = /^(no|nope|nah|don'?t|do not|cancel|skip|keep it|keep that|leave it|never ?mind)\b/.test(u)
+        const confirmed = /^(yes|yep|yeah|yup|sure|ok|okay|go ahead|do it|confirm(ed)?|please do|delete it|remove it)\b/.test(u)
+        if (pendingResolver && (denied || confirmed)) {
+          memoryResolveHandled = true  // we own resolve() this turn — don't double-run it in the fire-and-forget below
+          let resolved = 0
+          try { const r = await pendingResolver.resolve(utterance, conversationId); resolved = r?.resolved ?? 0 } catch { /* */ }
+          if (resolved > 0) {
+            try { contextBuilder.invalidatePrefix() } catch { /* */ }
+            const ack = denied ? "Okay, I'll leave it as is." : "Okay, done."
+            try { await voiceBundle!.conversationStore.appendTurn(conversationId, { role: 'user', text: utterance, at: Date.now() }) } catch { /* */ }
+            try { streamingSpeaker.begin(); streamingSpeaker.feed(ack); await streamingSpeaker.end() } catch { /* */ }
+            try { await voiceBundle!.conversationStore.appendTurn(conversationId, { role: 'agent', text: ack, at: Date.now() }) } catch { /* */ }
+            try { wrapApi.broadcast({ event: 'agent_done', text: ack }) } catch { /* */ }
+            log(`[voice] memory-confirm short-circuit: resolved=${resolved} → conductor (smart) skipped`)
+            return
+          }
+        }
+      }
+
       // Persist the USER turn first so it's available to recentTurns() on the
       // NEXT utterance (and the agent reply is appended once we have it). Without
       // this the agent has no memory of the conversation (recentTurns → []).
@@ -2410,8 +2453,10 @@ async function main(): Promise<void> {
         // Per-turn memory instrumentation — one structured line so we can SEE the
         // lifecycle working (or not) on every turn instead of guessing.
         const mem: { resolved: number; forgot: string[]; pending?: string; extracted: boolean } = { resolved: 0, forgot: [], extracted: false }
-        // 1. Resolve any outstanding confirm-before-delete asks.
-        if (pendingResolver) {
+        // 1. Resolve any outstanding confirm-before-delete asks. Skipped when the
+        //    yes/no short-circuit above already owned resolution this turn (so we
+        //    never run the resolver LLM twice for the same utterance).
+        if (pendingResolver && !memoryResolveHandled) {
           try {
             const r = await pendingResolver.resolve(utterance, conversationId)
             if (r && r.resolved > 0) { mem.resolved = r.resolved; try { contextBuilder.invalidatePrefix() } catch {} }
