@@ -25,12 +25,23 @@ export type ToolkitInfo = {
   tools_count: number              // count of tools the toolkit exposes
 }
 
+/** A candidate toolkit when a fuzzy phrase resolves to several plausible slugs. */
+export type ToolkitCandidate = {
+  slug: ToolkitSlug
+  name?: string
+  description?: string
+  score: number
+}
+
 export type ConnectFlowResult = {
-  status: 'success' | 'failed' | 'cancelled'
+  status: 'success' | 'failed' | 'cancelled' | 'needs_disambiguation'
   toolkit_slug: ToolkitSlug
   connection_id?: string
   duration_ms: number
   error?: string
+  /** Present when status === 'needs_disambiguation': ranked toolkit candidates the
+   *  model should relay so the user can confirm which one to connect. */
+  candidates?: ToolkitCandidate[]
 }
 
 export type ComposioConfig = {

@@ -8,9 +8,14 @@
 // validation. Downstream tasks can introduce Zod conversion if strict mode is
 // required.
 
-import { Agent, tool } from "@openai/agents"
+import { Agent, tool, setTracingDisabled } from "@openai/agents"
 import { buildOpenRouterModel } from "./agentsRouterAdapter"
 import type { ToolDef } from "./types"
+
+// We run on OpenRouter, not OpenAI — the SDK's trace exporter has no OPENAI_API_KEY
+// and logs "No API key provided for OpenAI tracing exporter" on every run. Disable
+// it once at load to silence the noise (tracing uploads to OpenAI aren't wanted here).
+try { setTracingDisabled(true) } catch { /* older SDK without the helper */ }
 
 export interface PlannerOpts {
   instructions: string

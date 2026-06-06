@@ -3,6 +3,8 @@ state/
 runtime/
 bin/
 local_cache/
+# runtime agent/sub-agent trajectory logs (may contain user data)
+traj/
 
 # Bun / Node
 node_modules/
@@ -38,3 +40,5 @@ Thumbs.db
 .env
 .env.local
 .env.*.local
+.env.bak*
+*.env.bak

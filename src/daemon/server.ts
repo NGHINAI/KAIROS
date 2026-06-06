@@ -388,7 +388,7 @@ async function handleTool(
           const args = (body.args as string[]) ?? []
           if (!name) return { ok: false, error: 'name required for invoke' }
           const result = await registry.invokeSkill(name, args)
-          return { ok: result.ok, ...result }
+          return { ...result }
         }
 
         case 'reload': {

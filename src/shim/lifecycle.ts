@@ -113,7 +113,7 @@ function findBun(): string {
   const candidates = [
     'bun',                                    // on PATH
     join(process.env.HOME ?? '~', '.bun', 'bin', 'bun'), // default install
-    Bun.argv[0],                              // the bun that started us
+    Bun.argv[0]!,                             // the bun that started us
   ]
   for (const c of candidates) {
     try {

@@ -20,6 +20,7 @@ import type { InboxSurface } from './inboxSurface'
 import type { NativeNotifier } from './nativeNotifier'
 import type { ActionRequest, ActionStatus, TrajectoryStep } from './types'
 import type { RestraintPipeline, EvaluateInputs } from '../restraint/restraintPipeline'
+import type { DeliveryDecision } from '../restraint/types'
 import type { TrajWriter } from '../persona/trajWriter'
 import type { TrajEntry } from '../persona/types'
 
@@ -89,6 +90,10 @@ export class ActionExecutor {
     // Consult the RestraintPipeline BEFORE idempotency / tier checks.
     // Default EvaluateInputs are conservative; C.3 will wire intent metadata
     // and LLM persona checks to refine these per-request.
+    // The delivery mode restraint actually chose, recorded against the rate budget
+    // below (interrupt and surface have SEPARATE budgets — see R2). Defaults to
+    // 'interrupt' for the no-restraint path.
+    let deliveredMode: DeliveryDecision['mode'] = 'interrupt'
     if (this.restraintPipeline) {
       const inputs: EvaluateInputs = {
         urgency: 0.5,              // default; trigger metadata overrides in C.3
@@ -98,6 +103,7 @@ export class ActionExecutor {
         urgent: false,             // explicit flag from caller, default false
       }
       const decision = await this.restraintPipeline.evaluate(request, inputs)
+      deliveredMode = decision.mode
 
       // Modes that bypass execution entirely
       if (
@@ -170,12 +176,17 @@ export class ActionExecutor {
 
     const result = await this.executeAndLog(request, trajectoryId)
 
-    // Notify the restraint pipeline that an interrupt/surface was actually delivered
-    if (this.restraintPipeline && result.status === 'completed') {
+    // Notify the restraint pipeline that an interrupt/surface was actually delivered.
+    // Skip for user-initiated actions: a foreground request carries no source_trigger_id,
+    // so recording a fire here would write the cooldown on the BARE intent_id and poison
+    // the *proactive* debounce for that same intent (the root cause of the repeat-block).
+    if (this.restraintPipeline && result.status === 'completed' && request.source !== 'user') {
       const triggerId = request.source_trigger_id ?? request.intent_id
-      // We only reach here when restraint returned 'interrupt' or 'surface'
-      // (or when no restraint was applied). The pipeline handles the mode internally.
-      this.restraintPipeline.recordDelivered(triggerId, 'interrupt')
+      // Record against the ACTUAL mode restraint chose (interrupt vs surface) — the
+      // two have separate rate budgets, and hardcoding 'interrupt' made every surface
+      // delivery eat the scarce interrupt budget (R2). recordDelivered no-ops for
+      // non-interrupt/surface modes, so passing the real mode is always safe.
+      this.restraintPipeline.recordDelivered(triggerId, deliveredMode)
     }
 
     return result

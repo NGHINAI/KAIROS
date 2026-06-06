@@ -73,7 +73,7 @@ let sessionToolCount = 0
 let sessionResult: AssertResult
 
 try {
-  const sdk = new Composio({ apiKey, baseUrl: 'https://backend.composio.dev' })
+  const sdk = new Composio({ apiKey, baseURL: 'https://backend.composio.dev' })
   const sessionManager = new ComposioSessionManager({
     sdk,
     userId: 'validate-c2-7-user',
@@ -199,8 +199,9 @@ try {
   confirmerCallArgs = null
   const blockedResult = await runGuard('slack_delete_message', { message_id: 'abc123' })
 
-  const confirmerWasCalled = confirmerCallArgs !== null
-  const calledWithCorrectName = confirmerCallArgs?.tool_name === 'slack_delete_message'
+  const blockedCall = confirmerCallArgs as { tool_name: string; description: string } | null
+  const confirmerWasCalled = blockedCall !== null
+  const calledWithCorrectName = blockedCall?.tool_name === 'slack_delete_message'
   const callWasBlocked = !blockedResult.allowed
 
   // Test 2: allowed when confirmer returns true
@@ -219,7 +220,7 @@ try {
   } else {
     const failures = [
       !confirmerWasCalled && 'confirmer not called',
-      !calledWithCorrectName && `wrong tool name: ${confirmerCallArgs?.tool_name}`,
+      !calledWithCorrectName && `wrong tool name: ${blockedCall?.tool_name}`,
       !callWasBlocked && 'call not blocked when confirmer=false',
       !callWasAllowed && 'call not allowed when confirmer=true',
       !nonDestructiveBypassed && 'non-destructive tool hit confirmer',

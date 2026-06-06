@@ -5,6 +5,19 @@
 // /v1/llm/complete on the wrap-API. When KAIROS Cloud ships, this swaps for a
 // Cloud-side proxy with zero changes to the daemon, sidecar, or anything else.
 
+// Reasoning models sometimes bake their chain-of-thought INLINE into `content`
+// wrapped in <think>…</think> (vs the separate `reasoning` field). That internal
+// monologue must NEVER be streamed to TTS. We strip complete think-blocks and a
+// dangling open block; the streamer re-strips the ACCUMULATED content each chunk and
+// emits only the newly-clean text, holding back a short tail so a tag split across
+// chunks ("<thi" | "nk>") is never spoken before it completes.
+const THINK_BLOCK_RE = /<(think|thinking|reasoning|thought)>[\s\S]*?<\/\1>/gi
+const THINK_DANGLING_RE = /<(think|thinking|reasoning|thought)>[\s\S]*$/i
+const TAG_HOLDBACK = 16 // ≥ longest open tag, so a split partial tag is never emitted early
+function stripThink(s: string): string {
+  return s.replace(THINK_BLOCK_RE, "").replace(THINK_DANGLING_RE, "")
+}
+
 /**
  * Build the OpenRouter `provider` field from env vars.
  *
@@ -82,6 +95,14 @@ export type OpenRouterAdapterDeps = {
   defaultMaxTokens?: number
   appName?: string                // OpenRouter wants HTTP-Referer + X-Title
   fetchImpl?: typeof fetch
+  /** DISABLE thinking (not just hide it). For a hybrid/thinking model used on the
+   *  SPOKEN tier (e.g. gemini-2.5-flash), set true → sends reasoning.max_tokens:0
+   *  (OpenRouter maps this to Gemini's thinkingBudget:0) so the model does NOT spend
+   *  latency/tokens thinking and can't return an empty answer because thinking ate the
+   *  budget. `exclude:true` alone only HIDES thinking — the model still thinks. Harmless
+   *  on pure non-thinking models (the param is ignored). Leave false for the DEEP tier,
+   *  which we WANT to reason. */
+  disableThinking?: boolean
 }
 
 export class OpenRouterAdapter {
@@ -91,6 +112,7 @@ export class OpenRouterAdapter {
   private defaultMaxTokens: number
   private appName: string
   private fetchImpl: typeof fetch
+  private disableThinking: boolean
 
   constructor(deps: OpenRouterAdapterDeps = {}) {
     this.apiKey = deps.apiKey ?? process.env.OPENROUTER_API_KEY ?? ''
@@ -99,6 +121,7 @@ export class OpenRouterAdapter {
     this.defaultMaxTokens = deps.defaultMaxTokens ?? 512
     this.appName = deps.appName ?? 'KAIROS'
     this.fetchImpl = (deps.fetchImpl ?? fetch) as typeof fetch
+    this.disableThinking = deps.disableThinking ?? false
   }
 
   /** One-shot non-streaming completion (compat with LLMAdapter shape). */
@@ -134,6 +157,17 @@ export class OpenRouterAdapter {
       max_tokens: body.max_tokens ?? this.defaultMaxTokens,
       provider: buildProviderRouting(),
     }
+    // Reasoning models (kimi-k2.5, minimax-m3) must reason INTERNALLY, never speak it.
+    // OpenRouter's `reasoning.exclude` lets the model think but omits reasoning tokens
+    // from the response — so the chain-of-thought can't reach the spoken `content`.
+    // (Harmless on non-reasoning models.) Edit-2 below also strips inline <think> tags
+    // for models that bake CoT into content regardless. Disable with KAIROS_OR_EXCLUDE_REASONING=false.
+    if (process.env.KAIROS_OR_EXCLUDE_REASONING !== 'false') {
+      // exclude:true HIDES reasoning tokens; for a thinking model on the spoken tier
+      // we also DISABLE thinking entirely via max_tokens:0 (→ Gemini thinkingBudget:0)
+      // so the answer can't come back empty because thinking burned the budget.
+      reqBody.reasoning = this.disableThinking ? { exclude: true, max_tokens: 0 } : { exclude: true }
+    }
     if (body.temperature !== undefined) reqBody.temperature = body.temperature
     if (body.tools && body.tools.length > 0) {
       reqBody.tools = body.tools
@@ -161,7 +195,9 @@ export class OpenRouterAdapter {
     const reader = resp.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
-    let fullText = ''
+    let rawContent = ''   // ALL content received (may contain <think> blocks)
+    let emittedLen = 0    // how much CLEAN (think-stripped) text we've already yielded
+    let fullText = ''     // the final clean spoken text (for the `done` event)
     let tokensIn: number | undefined
     let tokensOut: number | undefined
     const toolCallAcc: Record<number, { id?: string; name?: string; args: string }> = {}
@@ -183,8 +219,16 @@ export class OpenRouterAdapter {
             const delta = parsed?.choices?.[0]?.delta
             const content = delta?.content
             if (typeof content === 'string' && content.length > 0) {
-              fullText += content
-              yield { kind: 'delta', text: content }
+              rawContent += content
+              // Re-strip the whole accumulated content; emit only the newly-clean
+              // text, minus a small tail (guards a tag split across chunks). While
+              // inside a <think> block the clean text doesn't grow → nothing spoken.
+              const clean = stripThink(rawContent)
+              const emitTo = Math.max(emittedLen, clean.length - TAG_HOLDBACK)
+              if (emitTo > emittedLen) {
+                yield { kind: 'delta', text: clean.slice(emittedLen, emitTo) }
+                emittedLen = emitTo
+              }
             }
             if (delta && Array.isArray(delta.tool_calls)) {
               for (const tc of delta.tool_calls) {
@@ -205,6 +249,13 @@ export class OpenRouterAdapter {
       }
     } finally {
       try { reader.releaseLock() } catch { /* swallow */ }
+    }
+
+    // Flush the held-back tail of clean text (and drop any unclosed think-block).
+    fullText = stripThink(rawContent)
+    if (fullText.length > emittedLen) {
+      yield { kind: 'delta', text: fullText.slice(emittedLen) }
+      emittedLen = fullText.length
     }
 
     for (const acc of Object.values(toolCallAcc)) {

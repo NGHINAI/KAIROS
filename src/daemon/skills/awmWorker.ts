@@ -37,6 +37,32 @@ export type AwmRunReport = {
   queued: number
   deduplicated: number
   errors: number
+  /** True when this call was DROPPED because another runOnce was already in flight
+   *  (re-entrancy guard) — distinguishes "skipped" from a genuine empty result, so a
+   *  caller (e.g. the genesis harness) doesn't read it as "no cluster formed". */
+  skipped?: boolean
+}
+
+// Numeric threshold floors. An override is applied ONLY if it coerces to a finite
+// number; it's then floored to an integer and clamped to its minimum. A non-numeric
+// override (e.g. min_occurrences:"abc") is IGNORED — it must never turn into NaN and
+// silently disable a gate (NaN comparisons are always false → a single trajectory
+// would crystallize straight into the real skill library).
+const OVERRIDE_FLOORS: Record<string, number> = {
+  lookback_days: 1, min_tool_calls: 0, min_duration_ms: 0, min_occurrences: 1,
+}
+function sanitizeOverrides(o: Partial<AwmWorkerConfig>): Partial<AwmWorkerConfig> {
+  const clean: Partial<AwmWorkerConfig> = {}
+  for (const [k, floor] of Object.entries(OVERRIDE_FLOORS)) {
+    const v = (o as any)[k]
+    if (v === undefined || v === null) continue
+    const n = Number(v)
+    if (Number.isFinite(n)) (clean as any)[k] = Math.max(floor, Math.floor(n))
+  }
+  if (Array.isArray(o.outcomes_accepted) && o.outcomes_accepted.every((x) => typeof x === "string" && x)) {
+    clean.outcomes_accepted = o.outcomes_accepted
+  }
+  return clean
 }
 
 export class AwmWorker {
@@ -48,11 +74,17 @@ export class AwmWorker {
     this.cfg = { ...DEFAULTS, ...config }
   }
 
-  async runOnce(): Promise<AwmRunReport> {
+  /** Run the induction pipeline once. `overrides` temporarily relaxes/tightens the
+   *  thresholds for THIS run only (restored after) — used by the test-genesis hook
+   *  so a couple of real runs can crystallize on demand instead of waiting for the
+   *  production defaults (3 occurrences × >5 tool calls × >30s) to accrue. */
+  async runOnce(overrides?: Partial<AwmWorkerConfig>): Promise<AwmRunReport> {
     if (this.running) {
-      return { candidates_found: 0, promoted: 0, queued: 0, deduplicated: 0, errors: 0 }
+      return { candidates_found: 0, promoted: 0, queued: 0, deduplicated: 0, errors: 0, skipped: true }
     }
     this.running = true
+    const savedCfg = this.cfg
+    if (overrides) this.cfg = { ...this.cfg, ...sanitizeOverrides(overrides) }
     try {
       const entries = this.loadEntries()
       const filtered = entries.filter(e => this.passesThreshold(e))
@@ -84,6 +116,7 @@ export class AwmWorker {
       }
       return report
     } finally {
+      this.cfg = savedCfg
       this.running = false
     }
   }

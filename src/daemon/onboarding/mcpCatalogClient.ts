@@ -64,7 +64,7 @@ function parseReadme(markdown: string): McpCatalogEntry[] {
 
     const argsPat = /"args"\s*:\s*\[(?:[^[\]]*?"-y"\s*,\s*)"(@[a-z0-9@/.-]+)"/g
     for (const m of markdown.matchAll(argsPat)) {
-      const pkg = m[1]
+      const pkg = m[1]!
       // Derive a service slug from the package name
       const slug = pkg
         .replace('@modelcontextprotocol/server-', '')
@@ -77,7 +77,7 @@ function parseReadme(markdown: string): McpCatalogEntry[] {
     // Also match standalone: npx -y @modelcontextprotocol/server-X
     const npxPat = /npx\s+(?:-y\s+)?(@modelcontextprotocol\/server-[a-z0-9-]+)/g
     for (const m of markdown.matchAll(npxPat)) {
-      const pkg = m[1]
+      const pkg = m[1]!
       const slug = pkg.replace('@modelcontextprotocol/server-', '').toLowerCase()
       pkgMap.set(slug, pkg)
     }
@@ -93,8 +93,8 @@ function parseReadme(markdown: string): McpCatalogEntry[] {
       // Detect section/subsection headers
       const headingMatch = line.match(/^(#+)\s+(.+)/)
       if (headingMatch) {
-        const level = headingMatch[1].length
-        const heading = headingMatch[2].toLowerCase().replace(/[^\w\s]/g, '')
+        const level = headingMatch[1]!.length
+        const heading = headingMatch[2]!.toLowerCase().replace(/[^\w\s]/g, '')
         if (heading.includes('community')) {
           currentSource = 'community'
           inArchived = false
@@ -116,8 +116,8 @@ function parseReadme(markdown: string): McpCatalogEntry[] {
       // Also handles: * **[Name](url)** (description)
       const bulletMatch = line.match(/^[-*]\s+\*\*\[([^\]]+)\]\(([^)]*)\)\*\*/)
       if (bulletMatch) {
-        const displayName = bulletMatch[1].trim()
-        const url = bulletMatch[2].trim()
+        const displayName = bulletMatch[1]!.trim()
+        const url = bulletMatch[2]!.trim()
 
         // Try to look up package from our pkgMap using the service name slug
         const slug = displayName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')
@@ -141,7 +141,7 @@ function parseReadme(markdown: string): McpCatalogEntry[] {
         // Look for npmjs.com links in the line
         if (!packageName) {
           const npmLink = line.match(/npmjs\.com\/package\/([^)\s"]+)/)
-          if (npmLink) packageName = decodeURIComponent(npmLink[1])
+          if (npmLink) packageName = decodeURIComponent(npmLink[1]!)
         }
 
         const install_type = detectInstallType(packageName, line)
@@ -161,21 +161,21 @@ function parseReadme(markdown: string): McpCatalogEntry[] {
       // | [Name](url) | description | ... |
       const tableRowMatch = line.match(/^\|\s*\[([^\]]+)\]\(([^)]*)\)\s*\|(.+)/)
       if (tableRowMatch) {
-        const displayName = tableRowMatch[1].trim()
-        const url = tableRowMatch[2].trim()
-        const rest = tableRowMatch[3]
+        const displayName = tableRowMatch[1]!.trim()
+        const url = tableRowMatch[2]!.trim()
+        const rest = tableRowMatch[3]!
 
         let packageName: string | null = null
 
         const backtickPkg = rest.match(/`(@[a-z0-9@/-]+|[a-z0-9-]+\/[a-z0-9-]+|mcp-server-[a-z0-9-]+)`/)
-        if (backtickPkg) packageName = backtickPkg[1]
+        if (backtickPkg) packageName = backtickPkg[1]!
 
         const scopedPkg = rest.match(/@modelcontextprotocol\/server-[a-z0-9-]+/)
         if (scopedPkg && !packageName) packageName = scopedPkg[0]
 
         if (!packageName && url.includes('npmjs.com/package/')) {
           const urlPkg = url.match(/npmjs\.com\/package\/([^)"\s]+)/)
-          if (urlPkg) packageName = decodeURIComponent(urlPkg[1])
+          if (urlPkg) packageName = decodeURIComponent(urlPkg[1]!)
         }
 
         const slug = displayName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')

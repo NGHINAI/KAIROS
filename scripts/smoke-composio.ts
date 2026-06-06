@@ -57,7 +57,7 @@ console.log(`  No-auth candidates in first 30: ${noAuthOnes.length} (${noAuthOne
 
 step('2/6  Creating ToolRouter session (workbench: disabled)')
 
-const sdk = new Composio({ apiKey, baseUrl: 'https://backend.composio.dev' })
+const sdk = new Composio({ apiKey, baseURL: 'https://backend.composio.dev' })
 const sessionManager = new ComposioSessionManager({
   sdk,
   userId: 'smoke-test-user',

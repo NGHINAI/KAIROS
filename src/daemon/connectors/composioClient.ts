@@ -34,7 +34,7 @@ export class ComposioClient {
     if (!opts.apiKey) throw new Error('ComposioClient: api_key is required')
     this.sdk = opts._sdk ?? new Composio({
       apiKey: opts.apiKey,
-      baseUrl: opts.baseUrl ?? 'https://backend.composio.dev',
+      baseURL: opts.baseUrl ?? 'https://backend.composio.dev',
     })
   }
 

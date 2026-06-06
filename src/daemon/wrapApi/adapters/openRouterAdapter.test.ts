@@ -33,3 +33,29 @@ test('stream() emits tool_use event when LLM returns tool_calls', async () => {
   expect(toolUse.name).toBe('get_weather')
   expect(toolUse.args_json).toBe('{"loc":"NYC"}')
 })
+
+test('stream() strips inline <think> reasoning from spoken content (tag split across chunks)', async () => {
+  const sse = [
+    `data: {"choices":[{"delta":{"content":"Hello. <thi"}}]}\n`,
+    `data: {"choices":[{"delta":{"content":"nk>secret reasoning about "}}]}\n`,
+    `data: {"choices":[{"delta":{"content":"the user</think> Your email is from Amazon."}}]}\n`,
+    `data: {"choices":[{"delta":{"content":" Done."}}]}\n`,
+    `data: [DONE]\n`,
+  ].join('\n')
+  const mockFetch = async (): Promise<Response> =>
+    new Response(sse, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+  const adapter = new OpenRouterAdapter({ apiKey: 'sk-test', defaultModel: 'x', fetchImpl: mockFetch as any })
+  const deltas: string[] = []
+  let doneText = ''
+  for await (const e of adapter.stream({ messages: [{ role: 'user', content: 'hi' }] })) {
+    if (e.kind === 'delta') deltas.push(e.text)
+    if (e.kind === 'done') doneText = e.text
+  }
+  const spoken = deltas.join('')
+  expect(spoken).not.toContain('secret reasoning') // CoT never spoken
+  expect(spoken).not.toContain('<think')
+  expect(spoken).toContain('Hello.')
+  expect(spoken).toContain('Your email is from Amazon.')
+  expect(spoken).toContain('Done.')
+  expect(doneText).toBe(spoken) // done text == the clean spoken text
+})

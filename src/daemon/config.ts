@@ -87,7 +87,9 @@ const DEFAULTS: Config = {
   agency: {
     enabled: true,
     inboxPath: join(process.env.HOME ?? '', '.kairos', 'inbox.md'),
-    daemonHttpPort: 9877,
+    // Sibling of the wrap-api port (KAIROS_DAEMON_PORT, default 9876). Overridable so a
+    // second isolated instance (e.g. a test/verify daemon) can coexist with a live one.
+    daemonHttpPort: Number(process.env.KAIROS_AGENCY_HTTP_PORT) || 9877,
   },
   mcp: {
     enabled: true,

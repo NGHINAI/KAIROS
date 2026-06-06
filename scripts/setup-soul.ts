@@ -1,6 +1,7 @@
 // scripts/setup-soul.ts
 // First-run wizard for ~/.kairos/soul.md. Voice-driven version ships in Phase E.
 
+import { Database } from 'bun:sqlite'
 import { SoulWizard } from '../src/daemon/persona/soulWizard'
 import { buildRouter } from '../src/daemon/llm'
 import { loadConfig } from '../src/daemon/config'
@@ -8,7 +9,8 @@ import { homedir } from 'os'
 import { join } from 'path'
 
 const config = loadConfig()
-const router = buildRouter(config)
+const db = new Database(':memory:')
+const router = buildRouter(db, config.proactive.providerConfigPath, config.mode ?? 'byo')
 const wizard = new SoulWizard({
   path: join(homedir(), '.kairos', 'soul.md'),
   router,

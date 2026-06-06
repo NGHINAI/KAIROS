@@ -25,6 +25,21 @@ test("classifyIntent returns 'vision' for screen intents", async () => {
   expect(result.tier).toBe("vision")
 })
 
+test("classifyIntent passes recent conversation context to the router (so 'Yes' routes correctly)", async () => {
+  let seen = ""
+  const fakeLlm = {
+    complete: mock(async (body: any) => { seen = JSON.stringify(body.messages); return { text: JSON.stringify({ tier: "smart", reason: "confirming retry", confidence: 0.9 }) } }),
+  }
+  await classifyIntent("Yes.", { llm: fakeLlm as any, recentContext: "KAIROS: The delete failed — want me to retry?\nuser: Yes." })
+  expect(seen).toContain("delete failed")  // the router actually sees the prior turn
+})
+
+test("classifyIntent strips markdown code fences before parsing JSON", async () => {
+  const fakeLlm = { complete: mock(async () => ({ text: '```json\n{"tier":"smart","reason":"x","confidence":0.8}\n```' })) }
+  const r = await classifyIntent("do it", { llm: fakeLlm as any })
+  expect(r.tier).toBe("smart")
+})
+
 test("classifyIntent falls back to 'fast' on malformed LLM output", async () => {
   const fakeLlm = {
     complete: mock(async () => ({ text: "not json" })),

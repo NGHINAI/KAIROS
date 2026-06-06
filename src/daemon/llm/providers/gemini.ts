@@ -286,7 +286,7 @@ export class GeminiApiProvider extends GeminiProvider {
   }
 
   /** Single-arg complete using the default model. */
-  async complete(modelOrReq: string | CompletionRequest, req?: CompletionRequest): Promise<CompletionResult> {
+  override async complete(modelOrReq: string | CompletionRequest, req?: CompletionRequest): Promise<CompletionResult> {
     if (typeof modelOrReq === 'string') {
       return super.complete(modelOrReq, req!)
     }

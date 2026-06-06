@@ -71,7 +71,7 @@ export class InboxUserChannel implements UserChannel {
           const userReplyMatch = newContent.match(/^USER:\s*(yes|y|no|n)\s*$/im)
           if (userReplyMatch) {
             clearInterval(pollInterval)
-            const reply = userReplyMatch[1].toLowerCase()
+            const reply = userReplyMatch[1]!.toLowerCase()
             resolve(reply === 'yes' || reply === 'y')
           }
         } catch (err) {

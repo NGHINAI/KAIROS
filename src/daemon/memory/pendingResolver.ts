@@ -109,5 +109,5 @@ function parseDecisions(text: string): Array<{ id: string; decision: string }> {
 /** Best-effort: pull a forget target out of a marker if it has no subject column. */
 function stripMarker(text: string): string {
   const m = text.match(/forget "([^"]+)"/i) ?? text.match(/about ([^:]+):/i)
-  return m ? m[1].trim() : text
+  return m ? m[1]!.trim() : text
 }

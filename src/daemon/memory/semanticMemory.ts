@@ -276,6 +276,21 @@ export class SemanticStore {
     } catch { return [] }
   }
 
+  /** Highest-confidence live facts (excluding pending markers). The always-on
+   *  "what KAIROS knows about you" set — injected into the session header so the
+   *  agent has the user's KEY facts every turn, regardless of utterance relevance.
+   *  This is what makes replies feel personalized rather than relevance-gated. */
+  topFacts(limit = 8): SemanticHit[] {
+    this.init()
+    try {
+      return this.db.query(
+        `SELECT id, text, ts, subject, category FROM ${FACTS_TABLE}
+         WHERE superseded_at IS NULL AND (category IS NULL OR category != '_pending_confirmation')
+         ORDER BY confidence DESC, ts DESC LIMIT ?`,
+      ).all(limit) as SemanticHit[]
+    } catch { return [] }
+  }
+
   async recall(query: string, limit: number): Promise<SemanticHit[]> {
     this.init()
     const base = this.vectorIndex
@@ -306,7 +321,10 @@ export class SemanticStore {
     const pending = this.liveByCategory('_pending_confirmation', 5)
     if (pending.length === 0) return base.slice(0, limit)
     const seen = new Set(pending.map(p => p.id))
-    const rest = base.filter(h => !seen.has(h.id))
+    // Suppress facts of any subject under open confirmation — surface the
+    // QUESTION, not the contested/stale value (so we never speak the losing fact).
+    const contested = new Set(pending.map(p => p.subject).filter(Boolean) as string[])
+    const rest = base.filter(h => !seen.has(h.id) && !(h.subject && contested.has(h.subject)))
     return [...pending, ...rest].slice(0, limit)
   }
 

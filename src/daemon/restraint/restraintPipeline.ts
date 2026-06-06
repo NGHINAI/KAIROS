@@ -78,6 +78,18 @@ export class RestraintPipeline {
       }
     }
 
+    // 0.5 USER-INITIATED bypass — the restraint gates (karma/cooldown/focus/
+    // rate-limit) exist to decide whether to interrupt the user PROACTIVELY.
+    // A foreground/interactive request is one the user explicitly made, so that
+    // question is already answered: do it. This skips ONLY the restraint debounce;
+    // tier/approval gating still runs later in ActionExecutor (a RED action still
+    // confirms first). Without this, a user saying "connect Linear" twice in 5min
+    // was wrongly 'suppressed: cooldown active'.
+    if (request.source === 'user') {
+      this.deps.karma.recordFire(triggerId)
+      return { mode: 'interrupt', score: null, reason: 'user-initiated — restraint bypassed' }
+    }
+
     // 1. Dry-run check
     if (this.deps.dryRun.isInDryRun(triggerId)) {
       this.deps.dryRun.recordWouldFire(triggerId, request.reasoning.slice(0, 80))

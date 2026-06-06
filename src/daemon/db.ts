@@ -348,7 +348,7 @@ export function updateTaskStatus(db: DB, taskId: string, status: string, extra?:
   }
 
   vals.push(taskId)
-  db.run(`UPDATE tasks SET ${sets.join(', ')} WHERE task_id = ?`, vals)
+  db.run(`UPDATE tasks SET ${sets.join(', ')} WHERE task_id = ?`, vals as import('bun:sqlite').SQLQueryBindings[])
 }
 
 // ─── Tick queries ───────────────────────────────────────────────────

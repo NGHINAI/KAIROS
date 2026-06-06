@@ -116,7 +116,7 @@ export class AnthropicApiProvider implements LLMProvider {
 
     // Build system: array form when caching is needed, string form for legacy no-block path
     const systemParam: string | AnthropicSystemBlock[] =
-      hasCacheable || systemBlocks.length > 0 ? systemBlocks : (req.system ?? '')
+      hasCacheable || systemBlocks.length > 0 ? systemBlocks : ((req as { system?: string }).system ?? '')
 
     const start = Date.now()
     const resp = await this.getClient().messages.create({

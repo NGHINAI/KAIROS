@@ -14,7 +14,10 @@ function fakeCtx() {
 }
 
 function fakeDispatcher(impl: (slug: string, args: Record<string, unknown>) => Promise<SkillExecutionResult>) {
-  return { invoke: impl }
+  // The real SkillDispatcher.invoke returns DispatchResult (= SkillExecutionResult &
+  // { slug }); inject the slug so the fake matches the contract without touching the
+  // call sites' return literals.
+  return { invoke: async (slug: string, args: Record<string, unknown>) => ({ slug, ...(await impl(slug, args)) }) }
 }
 
 describe('invoke_skill intent', () => {
@@ -42,7 +45,7 @@ describe('invoke_skill intent', () => {
     expect(result.details).toContain('Invoked')
     expect(result.details).toContain('ts_worker')
     expect(result.details).toContain('hello world')
-    expect(captured).toEqual({ slug: 'greet', args: { name: 'nirmal' } })
+    expect(captured as any).toEqual({ slug: 'greet', args: { name: 'nirmal' } })
   })
 
   it('returns failure when skill returns ok=false', async () => {
@@ -76,7 +79,7 @@ describe('invoke_skill intent', () => {
     })
     const entry = reg.get('invoke_skill')!
     await entry.handler({ slug: 'no-args-skill' }, fakeCtx() as any)
-    expect(receivedArgs).toEqual({})
+    expect(receivedArgs as any).toEqual({})
   })
 
   it('catches thrown errors from dispatcher and returns failure', async () => {

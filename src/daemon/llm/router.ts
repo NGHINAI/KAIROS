@@ -178,7 +178,7 @@ export class ModelRouter {
 
   private estimateCostCents(p: LLMProvider, model: string, req: CompletionRequest): number {
     const price = p.pricePerMillion(model)
-    const inputTok = Math.ceil((req.prompt.length + (req.system?.length ?? 0)) / 4)
+    const inputTok = Math.ceil((req.prompt.length + ((req as { system?: string }).system?.length ?? 0)) / 4)
     const outputTok = req.max_output_tokens ?? Math.ceil(inputTok * 0.3)
     return Math.ceil(
       ((inputTok / 1_000_000) * price.input + (outputTok / 1_000_000) * price.output) * 100,

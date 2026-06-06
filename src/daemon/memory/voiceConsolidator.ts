@@ -61,7 +61,7 @@ export class VoiceConsolidator {
 
     if (rows.length === 0) return 0
 
-    const newWatermark = rows[rows.length - 1].ts
+    const newWatermark = rows[rows.length - 1]!.ts
     const observations = rows.map(r => `- ${r.text}`).join("\n")
 
     let factsCreated = 0

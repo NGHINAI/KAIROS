@@ -515,15 +515,9 @@ for (const candidate of SMOKE_CANDIDATES) {
       smokeSuccess = true
       // Sanitize: parse response and show only item count (never auth headers)
       let parsedContent: unknown = null
-      if (toolResult.result) {
+      if (toolResult.output_text) {
         try {
-          const content = toolResult.result as any
-          const text = Array.isArray(content?.content)
-            ? content.content.find((c: any) => c.type === 'text')?.text
-            : null
-          if (text) {
-            parsedContent = JSON.parse(text)
-          }
+          parsedContent = JSON.parse(toolResult.output_text)
         } catch { /* parse failure is non-fatal */ }
       }
       if (parsedContent && typeof parsedContent === 'object' && parsedContent !== null) {

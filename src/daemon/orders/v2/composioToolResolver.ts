@@ -17,6 +17,23 @@ import { homedir } from 'os'
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000
 const ONMISS_REFRESH_INTERVAL_MS = 60 * 60 * 1000
 
+// The model labels each tool read/write from its own name+description (no verb list).
+const NATURE_SYSTEM =
+  "You label developer API tools as 'read' or 'write'. " +
+  "'read' = the tool ONLY retrieves, lists, searches, gets, counts, or exports data with NO side effects. " +
+  "'write' = it creates, updates, deletes, sends, posts, replies, books, schedules, pays, moves, archives, " +
+  "or otherwise CHANGES external state. You are given a JSON array of {slug, description}. " +
+  "Return STRICT JSON: an object mapping each slug to exactly 'read' or 'write'. When unsure, answer 'write' (the safe side)."
+
+/** Parse a JSON object out of an LLM reply, tolerating ```json fences / prose wrappers. */
+function extractJsonObject(text: string): any {
+  let s = String(text ?? '').trim()
+  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i)
+  if (fence) s = fence[1]!.trim()
+  if (!s.startsWith('{')) { const m = s.match(/\{[\s\S]*\}/); if (m) s = m[0] }
+  try { return JSON.parse(s) } catch { return null }
+}
+
 export type ComposioToolResolverDeps = {
   // @composio/core@0.10.0 exposes getRawComposioTools (NOT tools.list). The return shape is
   // an array of tool descriptors, not { items: [...] } — we handle both defensively.
@@ -24,6 +41,18 @@ export type ComposioToolResolverDeps = {
   userId: string
   cachePath?: string
   now?: () => number
+  /** Connected toolkit slugs to catalog. REQUIRED at runtime: @composio/core@0.10.0
+   *  rejects getRawComposioTools without a filter ({tools|toolkits|search|authConfigIds}),
+   *  so we fetch per connected toolkit. Without this the catalog is empty (no crash). */
+  toolkits?: () => string[] | Promise<string[]>
+  /** Cheap LLM used to classify each tool's read/write nature ONCE from its name +
+   *  description (result is cached). Omit → nature stays undefined (callers default
+   *  to the safe side). Same {complete} shape as the verifier/memory completers. */
+  classifyLlm?: { complete: (body: any) => Promise<{ text: string }> }
+  /** Called after refresh/load with the current slug→nature map, so the verifier /
+   *  stream controller / approval gate can consult it (via setToolNature). */
+  onNature?: (map: Map<string, 'read' | 'write'>) => void
+  log?: (msg: string) => void
 }
 
 /** A Composio action tool, in the shape OrdersAuthor needs to brief the LLM. */
@@ -33,6 +62,10 @@ export type ToolDescriptor = {
   toolkit: string               // toolkit slug, e.g. 'gmail'
   description: string
   inputParameters: any          // JSON-schema-ish; Composio's tool input definition
+  /** Agentic read/write classification — the MODEL's one-time labelling of this tool
+   *  from its description (no verb list). 'read' = retrieves only; 'write' = mutates
+   *  external state. Cached; drives latency tiering + approval gating downstream. */
+  nature?: 'read' | 'write'
 }
 
 type CacheFile = {
@@ -58,11 +91,53 @@ export class ComposioToolResolver {
 
   async initialize(): Promise<void> {
     if (this.loadCache()) {
+      await this.classifyNatures()  // fill nature for any cached tools missing it (e.g. pre-nature cache)
+      this.emitNature()
       this.startDailyTimer()
       return
     }
-    await this.refresh()
+    await this.refresh()            // refresh classifies + emits
     this.startDailyTimer()
+  }
+
+  /** slug → 'read'|'write' for every classified tool (the source of truth wired into
+   *  the verifier / stream controller / approval gate). */
+  natureMap(): Map<string, 'read' | 'write'> {
+    const m = new Map<string, 'read' | 'write'>()
+    for (const [slug, d] of this.descriptors) if (d.nature) m.set(slug, d.nature)
+    return m
+  }
+
+  private emitNature(): void { try { this.deps.onNature?.(this.natureMap()) } catch { /* */ } }
+
+  /** Classify (ONCE, batched, best-effort) the read/write nature of any descriptor
+   *  that lacks it — the model labels each tool from its own name + description, so
+   *  it generalizes to ANY toolkit with no hardcoded verb list. Persists results. */
+  private async classifyNatures(): Promise<void> {
+    if (!this.deps.classifyLlm) return
+    const todo = [...this.descriptors.values()].filter((d) => !d.nature)
+    if (todo.length === 0) return
+    const BATCH = 40
+    let changed = 0
+    for (let i = 0; i < todo.length; i += BATCH) {
+      const batch = todo.slice(i, i + BATCH)
+      try {
+        const resp = await this.deps.classifyLlm.complete({
+          messages: [
+            { role: 'system', content: NATURE_SYSTEM },
+            { role: 'user', content: JSON.stringify(batch.map((d) => ({ slug: d.slug, description: (d.description || d.friendly).slice(0, 220) }))) },
+          ],
+          max_tokens: 1800,
+          temperature: 0,
+        })
+        const parsed = extractJsonObject(resp.text)  // tolerant of ```json fences / prose wrappers
+        for (const d of batch) {
+          const v = parsed?.[d.slug]
+          if (v === 'read' || v === 'write') { d.nature = v; changed++ }
+        }
+      } catch { /* leave unclassified — downstream defaults safely */ }
+    }
+    if (changed > 0) { this.saveCache(); this.deps.log?.(`[orders-v2] classified ${changed}/${todo.length} tools read/write`) }
   }
 
   // ── RESOLVE path (used by ActionDispatcher) ────────────────────────────
@@ -114,10 +189,22 @@ export class ComposioToolResolver {
   // ── Refresh + cache ────────────────────────────────────────────────────
 
   async refresh(): Promise<void> {
-    const result: any = await this.deps.composio.sdk.tools.getRawComposioTools({ limit: 500 })
-    // getRawComposioTools can return either { items: [...] } or a bare array depending
-    // on SDK version. Handle both shapes; this is canonical-defensive.
-    const items: any[] = Array.isArray(result) ? result : (result?.items ?? [])
+    const items: any[] = []
+    if (this.deps.toolkits) {
+      // @composio/core@0.10.0 REQUIRES a filter (one of tools|toolkits|search|authConfigIds)
+      // — calling with just {limit} throws a ValidationError. Fetch per connected toolkit.
+      const slugs = [...new Set((await this.deps.toolkits()).filter(Boolean))]
+      for (const slug of slugs) {
+        try {
+          const r: any = await this.deps.composio.sdk.tools.getRawComposioTools({ toolkits: [slug], limit: 200 })
+          items.push(...(Array.isArray(r) ? r : (r?.items ?? [])))
+        } catch { /* one bad toolkit shouldn't sink the whole catalog */ }
+      }
+    } else {
+      // No toolkits provider (tests / legacy callers) — unfiltered fetch.
+      const result: any = await this.deps.composio.sdk.tools.getRawComposioTools({ limit: 500 })
+      items.push(...(Array.isArray(result) ? result : (result?.items ?? [])))
+    }
     const aliases = new Map<string, string>()
     const descriptors = new Map<string, ToolDescriptor>()
     for (const t of items) {
@@ -132,11 +219,14 @@ export class ComposioToolResolver {
         toolkit: toolkitSlug,
         description: typeof t.description === 'string' ? t.description : '',
         inputParameters: t.inputParameters ?? t.input_parameters ?? t.inputSchema ?? {},
+        nature: this.descriptors.get(canonical)?.nature, // carry over a prior classification (no re-LLM)
       })
     }
     this.aliases = aliases
     this.descriptors = descriptors
     this.saveCache()
+    await this.classifyNatures()  // classify any newly-seen tools (re-saves if changed)
+    this.emitNature()
   }
 
   stop(): void {

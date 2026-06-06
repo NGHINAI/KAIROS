@@ -41,6 +41,32 @@ describe('ComposioToolResolver', () => {
     r.stop()
   })
 
+  it('AGENTIC nature: the model labels each tool read/write, it caches + emits, and never re-classifies', async () => {
+    const c = fakeComposio([
+      { toolkit: { slug: 'gmail' }, slug: 'GMAIL_SEND_EMAIL', name: 'Send Email', description: 'Send an email' },
+      { toolkit: { slug: 'gmail' }, slug: 'GMAIL_FETCH_EMAILS', name: 'Fetch Emails', description: 'List recent emails' },
+    ])
+    let classifyCalls = 0
+    const classifyLlm = { complete: async () => { classifyCalls++; return { text: JSON.stringify({ GMAIL_SEND_EMAIL: 'write', GMAIL_FETCH_EMAILS: 'read' }) } } }
+    let emitted: Map<string, 'read' | 'write'> | null = null
+    const cachePath = join(tmp, 'cache.json')
+    const r = new ComposioToolResolver({ composio: c, userId: 'local', cachePath, classifyLlm, onNature: (m) => { emitted = m } })
+    await r.initialize()
+    expect(r.natureMap().get('GMAIL_SEND_EMAIL')).toBe('write')
+    expect(r.natureMap().get('GMAIL_FETCH_EMAILS')).toBe('read')
+    expect(emitted!.get('GMAIL_SEND_EMAIL')).toBe('write') // wired out for setToolNature
+    expect(JSON.parse(readFileSync(cachePath, 'utf8')).descriptors.GMAIL_SEND_EMAIL.nature).toBe('write') // persisted
+    r.stop()
+
+    // Re-init from the fresh cache → natures carried over, NO re-classification.
+    classifyCalls = 0
+    const r2 = new ComposioToolResolver({ composio: c, userId: 'local', cachePath, classifyLlm, onNature: () => {} })
+    await r2.initialize()
+    expect(classifyCalls).toBe(0)
+    expect(r2.natureMap().get('GMAIL_FETCH_EMAILS')).toBe('read')
+    r2.stop()
+  })
+
   it('indexes friendly aliases — stripped toolkit prefix + suffix truncation', async () => {
     const c = fakeComposio([
       { toolkit: { slug: 'slack' }, slug: 'SLACK_SEND_MESSAGE', name: 'Send Slack message' },
@@ -148,6 +174,36 @@ describe('ComposioToolResolver', () => {
     ;(c.sdk.tools.getRawComposioTools as any) = async () => [{ toolkit: { slug: 'slack' }, slug: 'SLACK_NEW_THING', name: 'New thing' }]
     await r.refresh()
     expect(r.resolve('slack', 'thing')).toBe('SLACK_NEW_THING')
+    r.stop()
+  })
+
+  it('passes a toolkits FILTER per connected toolkit (SDK rejects an unfiltered fetch)', async () => {
+    const calls: any[] = []
+    const c = {
+      sdk: { tools: { getRawComposioTools: async (opts: any) => {
+        calls.push(opts)
+        return [{ toolkit: { slug: opts.toolkits[0] }, slug: `${String(opts.toolkits[0]).toUpperCase()}_DO`, name: 'do' }]
+      } } },
+    } as any
+    const r = new ComposioToolResolver({
+      composio: c, userId: 'local', cachePath: join(tmp, 'cache.json'),
+      toolkits: () => ['gmail', 'slack'],
+    })
+    await r.initialize()
+    // one call per connected toolkit, each WITH a toolkits filter (never unfiltered)
+    expect(calls.length).toBe(2)
+    expect(calls.every((o) => Array.isArray(o.toolkits) && o.toolkits.length === 1)).toBe(true)
+    expect(r.resolve('gmail', 'do')).toBe('GMAIL_DO')
+    expect(r.resolve('slack', 'do')).toBe('SLACK_DO')
+    r.stop()
+  })
+
+  it('with NO connected toolkits, refresh fetches nothing (no unfiltered call, no crash)', async () => {
+    const calls: any[] = []
+    const c = { sdk: { tools: { getRawComposioTools: async (o: any) => { calls.push(o); return [] } } } } as any
+    const r = new ComposioToolResolver({ composio: c, userId: 'local', cachePath: join(tmp, 'cache.json'), toolkits: () => [] })
+    await r.initialize()
+    expect(calls.length).toBe(0) // never called the SDK without a filter
     r.stop()
   })
 

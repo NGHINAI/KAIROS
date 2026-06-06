@@ -72,7 +72,7 @@ export class SayBackend {
     return stdout
       .split('\n')
       .filter(line => line.trim())
-      .map(line => {
+      .map((line): Voice | null => {
         const m = line.match(/^(.+?)\s{2,}(\S+)\s*#\s*(.*)$/)
         if (!m) return null
         return { name: m[1]!.trim(), language: m[2]!.trim(), sample: m[3]?.trim() }
