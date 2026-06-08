@@ -14,6 +14,7 @@
 // Read-only turns are unaffected: their answer streams live as before.
 
 import type { LoopEvent } from "./loop/types"
+import { SpokenStreamFilter } from "./spokenSanitizer"
 
 export interface SpeakSink {
   begin(): void
@@ -58,6 +59,10 @@ export class StreamSpeechController {
   private cancelled = false
   private fillerCount = 0
   private lastTool: { name: string; args: any } | undefined
+  // Defense-in-depth at the speech boundary: strip <think>/tool-markup from the LIVE
+  // token stream so a reasoning/hybrid model can never voice its internals before the
+  // end-of-turn sanitize runs (2026-06-08 TTS-leak audit). One per turn.
+  private filter = new SpokenStreamFilter()
 
   constructor(private deps: StreamSpeechDeps) {}
 
@@ -67,6 +72,7 @@ export class StreamSpeechController {
     this.suppressed = false
     this.cancelled = false
     this.fillerCount = 0
+    this.filter = new SpokenStreamFilter()
     this.deps.speaker.begin()
     this.armFiller()
   }
@@ -81,8 +87,10 @@ export class StreamSpeechController {
         // still recorded in `held` for reference; the canonical reply comes from
         // the loop result, not from here.)
         if (this.suppressed) { this.held += e.text; break }
-        this.spoken += e.text
-        this.deps.speaker.feed(e.text)
+        // Filter the live stream: only speak text proven free of <think>/tool-markup
+        // (holds back a short tail so a tag split across deltas is never spoken early).
+        const safe = this.filter.push(e.text)
+        if (safe) { this.spoken += safe; this.deps.speaker.feed(safe) }
         break
       case "tool_call_start": {
         this.clearFiller()
@@ -113,6 +121,9 @@ export class StreamSpeechController {
   async finish(): Promise<string> {
     this.clearFiller()
     if (!this.cancelled) {
+      // Flush the filter's held-back tail (the last clean chars we kept back as a
+      // split-tag guard) before closing the speaker, so the end of the reply isn't lost.
+      if (!this.suppressed) { const tail = this.filter.flush(); if (tail) { this.spoken += tail; this.deps.speaker.feed(tail) } }
       try { await this.deps.speaker.end() } catch { /* never throw on close */ }
     }
     return this.spoken

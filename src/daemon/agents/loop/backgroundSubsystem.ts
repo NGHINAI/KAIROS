@@ -19,6 +19,7 @@ import { buildSystemTools, type SystemToolsDeps } from "./systemTools"
 import { buildBackgroundTools } from "./backgroundTools"
 import { wrapToolsWithApproval } from "./approvalWrap"
 import { buildUpdatePlanTool } from "./updatePlanTool"
+import { sanitizeSpoken } from "../spokenSanitizer"
 import { buildCompactor, COMPACT_PROMPT } from "./compactor"
 import { buildDestructiveVerifier } from "./verifier"
 import { runAgentLoop } from "./agentLoop"
@@ -247,9 +248,12 @@ export function buildBackgroundSubsystem(deps: BackgroundSubsystemDeps): Backgro
   return { manager, approvalGate, foregroundTools }
 }
 
-/** The spoken "I'm done" line. Short goal echo + the agent's own summary. */
+/** The spoken "I'm done" line. Short goal echo + the agent's own summary. The summary
+ *  is the sub-agent's raw final text (DEEP model — a reasoning model, e.g. minimax-m3),
+ *  so it MUST be sanitized before TTS — never voice a leaked <think> block or tool
+ *  markup in the report (2026-06-08 TTS-leak audit). */
 function reportLine(goal: string, summary: string): string {
   const g = goal.length > 60 ? goal.slice(0, 60) + "…" : goal
-  const s = (summary ?? "").trim() || "It's finished."
+  const s = sanitizeSpoken(summary).trim() || "It's finished."
   return `Done with "${g}". ${s}`
 }
