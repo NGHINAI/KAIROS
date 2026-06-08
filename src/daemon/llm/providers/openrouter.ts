@@ -18,34 +18,7 @@ import type {
 } from '../types'
 import { PromptAssembler } from '../cache/promptAssembler'
 import { OpenRouterAdapter } from '../../wrapApi/adapters/openRouterAdapter'
-
-// USD per million tokens (best-effort static map for common OpenRouter models).
-// OpenRouter pricing fluctuates by upstream provider; numbers below are the
-// published list price at time of writing. Unknown models fall through to
-// FALLBACK_PRICE so we still produce *some* cost estimate.
-const PRICING: Record<string, { input: number; output: number }> = {
-  // OpenAI via OpenRouter
-  'openai/gpt-4o-mini':            { input: 0.15, output: 0.60  },
-  'openai/gpt-4o':                 { input: 2.50, output: 10.00 },
-  'openai/gpt-5-mini':             { input: 0.25, output: 2.00  },
-  'openai/gpt-5-nano':             { input: 0.05, output: 0.40  },
-  'openai/gpt-4.1-mini':           { input: 0.40, output: 1.60  },
-
-  // Anthropic via OpenRouter
-  'anthropic/claude-haiku-4-5':    { input: 1.00, output: 5.00  },
-  'anthropic/claude-sonnet-4-5':   { input: 3.00, output: 15.00 },
-  'anthropic/claude-sonnet-4-6':   { input: 3.00, output: 15.00 },
-
-  // Moonshot Kimi via OpenRouter
-  'moonshotai/kimi-k2':            { input: 0.55, output: 2.20  },
-  'moonshotai/kimi-k2-thinking':   { input: 0.95, output: 4.00  },
-
-  // Google via OpenRouter
-  'google/gemini-2.5-flash-lite':  { input: 0.10, output: 0.40  },
-  'google/gemini-2.5-flash':       { input: 0.30, output: 2.50  },
-}
-
-const FALLBACK_PRICE = { input: 1, output: 5 } as const
+import { estimateCostCents, PRICING, FALLBACK_PRICE } from '../pricing'
 
 // Tier → ordered model list. The first entry is the user-controllable env var
 // override; the second is the hard-coded default (same value when env var is
@@ -149,11 +122,8 @@ export class OpenRouterProvider implements LLMProvider {
     const inputTok = result.tokensIn ?? 0
     const outputTok = result.tokensOut ?? 0
 
-    const pricing = PRICING[model] ?? FALLBACK_PRICE
-    const costCents = Math.ceil((
-      (inputTok  / 1_000_000) * pricing.input  +
-      (outputTok / 1_000_000) * pricing.output
-    ) * 100)
+    // PRECISE cost — no per-call ceil (the ~12× over-count bug). Sub-cent kept.
+    const costCents = estimateCostCents(model, inputTok, outputTok)
 
     let parsed: unknown = undefined
     if (req.structured) {

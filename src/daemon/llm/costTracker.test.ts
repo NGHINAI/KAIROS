@@ -78,4 +78,28 @@ describe('CostTracker', () => {
     // 100 cents/day × 30 days = 3000 cents = $30
     expect(proj).toBeCloseTo(3000, 0)
   })
+
+  it('preserves sub-cent precision (no Math.ceil over-count) and stays under budget', () => {
+    // 4,970 classify-style sub-cent calls (~0.08¢ each) — the old code ceiled each to
+    // 1¢ → ~$50 → false over-budget. Precise: 4970 × ~0.0008$ ≈ $4 — well under $50.
+    for (let i = 0; i < 4970; i++) {
+      tracker.record({ provider: 'openrouter', model: 'openai/gpt-4o-mini', task_type: 'classify', input_tokens: 5304, output_tokens: 4, cost_cents: 0.0808 })
+    }
+    expect(tracker.monthlyCostCents()).toBeLessThan(500)  // < $5, not $50
+    expect(tracker.isOverBudget()).toBe(false)
+  })
+
+  it('backfills historically over-counted (Math.ceil) rows from token counts', () => {
+    const d = new Database(':memory:')
+    d.exec(`CREATE TABLE IF NOT EXISTS llm_call_log (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, task_type TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, cached_input_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0, cost_cents INTEGER NOT NULL, fallback_count INTEGER NOT NULL DEFAULT 0, latency_ms INTEGER)`)
+    // Insert 100 inflated rows recorded at the ceiled 1¢ (= $1 total, falsely).
+    for (let i = 0; i < 100; i++) {
+      d.run(`INSERT INTO llm_call_log (ts, provider, model, task_type, input_tokens, output_tokens, cost_cents) VALUES (?,?,?,?,?,?,?)`, [Date.now(), 'openrouter', 'openai/gpt-4o-mini', 'classify', 5304, 4, 1])
+    }
+    // Constructing the tracker runs the one-time backfill → recomputes from tokens.
+    const t = new CostTracker(d, 50)
+    const corrected = t.monthlyCostCents()
+    expect(corrected).toBeLessThan(10)   // 100 × ~0.08¢ ≈ 8¢, not 100¢
+    expect(corrected).toBeGreaterThan(0)
+  })
 })

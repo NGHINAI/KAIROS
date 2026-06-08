@@ -57,7 +57,12 @@ function effectiveName(call: VerifyToolCall): string {
  *  decides: 'read' (verifier/controller — stream live; the grounding LLM still
  *  verifies) or 'write' (approval-gate — gate the unknown, the safe side). */
 export function isDestructiveCall(call: VerifyToolCall, opts?: { unmappedDefault?: "read" | "write" }): boolean {
-  if (LOCAL_TOOLS.has(call.name)) return false // our confined/internal tools — never external
+  // Our confined/internal tools — never external, never approval-gated. The kairos_*
+  // introspection/self-management tools (kairos_composio_status, kairos_help,
+  // kairos_memory_*, kairos_activity, …) are all OURS — without this they were
+  // mis-gated as destructive writes (unmappedDefault), pausing sub-agents for a
+  // pointless human approval on a read (2026-06-07 diagnosis #3).
+  if (LOCAL_TOOLS.has(call.name) || call.name.startsWith("kairos_")) return false
   const name = effectiveName(call)
   if (DESTRUCTIVE_NAMES.has(call.name) || DESTRUCTIVE_NAMES.has(name)) return true
   const nat = toolNature?.get(name) ?? toolNature?.get(call.name)

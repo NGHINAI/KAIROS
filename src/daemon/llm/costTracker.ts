@@ -5,6 +5,7 @@
 
 import type { Database } from 'bun:sqlite'
 import type { ProviderId, TaskType } from './types'
+import { estimateCostCents } from './pricing'
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS llm_call_log (
@@ -62,6 +63,27 @@ export class CostTracker {
         db.exec(`ALTER TABLE llm_call_log ADD COLUMN ${col} INTEGER NOT NULL DEFAULT 0`)
       } catch { /* column already exists */ }
     }
+    this.backfillCosts()
+  }
+
+  /** One-time: correct historically OVER-COUNTED costs (the old per-call Math.ceil
+   *  recorded every sub-cent call as ≥1¢ → ~12× over → false budget exhaustion).
+   *  Recompute cost_cents precisely from the stored token counts. Runs once. */
+  private backfillCosts(): void {
+    try {
+      this.db.exec(`CREATE TABLE IF NOT EXISTS cost_tracker_meta (key TEXT PRIMARY KEY, value TEXT)`)
+      const done = this.db.query(`SELECT value FROM cost_tracker_meta WHERE key = 'cost_backfill_v1'`).get()
+      if (done) return
+      const rows = this.db
+        .query(`SELECT id, model, input_tokens, output_tokens FROM llm_call_log`)
+        .all() as Array<{ id: number; model: string; input_tokens: number; output_tokens: number }>
+      const upd = this.db.prepare(`UPDATE llm_call_log SET cost_cents = ? WHERE id = ?`)
+      const tx = this.db.transaction((rs: typeof rows) => {
+        for (const r of rs) upd.run(estimateCostCents(r.model, r.input_tokens, r.output_tokens), r.id)
+      })
+      tx(rows)
+      this.db.run(`INSERT OR REPLACE INTO cost_tracker_meta (key, value) VALUES ('cost_backfill_v1', ?)`, [String(Date.now())])
+    } catch { /* backfill is best-effort; never block startup */ }
   }
 
   record(r: CostRecord): void {

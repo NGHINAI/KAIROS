@@ -70,17 +70,26 @@ export function wrapToolsWithApproval(tools: ToolDef[], gate: ApprovalLike, sign
 }
 
 /** A short spoken-friendly description of the pending action — includes the actual
- *  command / target path / recipient so the user knows exactly what they approve. */
-function humanSummary(toolName: string, effective: string, args: any): string {
+ *  command / target path / recipient so the user knows exactly what they approve.
+ *  CRITICAL (2026-06-07 diagnosis #4): this is SPOKEN aloud, so it must NEVER emit a
+ *  raw snake_case tool id ("do via kairos_composio_status"). We de-snake every tool
+ *  name to plain words, so even a mis-gated/unknown tool reads naturally. */
+export function humanSummary(toolName: string, effective: string, args: any): string {
   if (toolName === "run_shell") return `run a shell command: ${String(args?.command ?? "").slice(0, 120)}`
   if (toolName === "write_file") return `write to the file ${String(args?.path ?? "?").slice(0, 80)}`
   const label = effective || toolName
-  const verb = /SEND/i.test(label) ? "send"
-    : /DELETE|REMOVE|TRASH/i.test(label) ? "delete"
-    : /CREATE/i.test(label) ? "create"
-    : /PAY|CHARGE/i.test(label) ? "pay"
-    : label === "connect_service" ? "connect a service"
-    : "do"
+  if (label === "connect_service") return `connect a service${args?.toolkit_slug ? ` (${String(args.toolkit_slug).slice(0, 40)})` : ""}`
+
   const target = args?.args?.to ?? args?.to ?? args?.args?.recipient ?? args?.toolkit_slug ?? ""
-  return `${verb} via ${label}${target ? ` (${String(target).slice(0, 40)})` : ""}`
+  const targetStr = target ? ` (${String(target).slice(0, 40)})` : ""
+
+  // Humanize the id: "GMAIL_SEND_EMAIL" → "Gmail send email" → spoken as
+  // "send email via Gmail"; "kairos_composio_status" → "composio status".
+  const human = label.replace(/^kairos_/, "").replace(/_/g, " ").trim().toLowerCase()
+  const parts = human.split(/\s+/).filter(Boolean)
+  if (parts.length >= 2) {
+    // first segment = toolkit (gmail/slack/linear), rest = the action
+    return `${parts.slice(1).join(" ")} via ${parts[0]}${targetStr}`
+  }
+  return `${human || "run a tool"}${targetStr}`
 }
