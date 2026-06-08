@@ -12,6 +12,7 @@ import { fastMax } from "./tokenBudget"
 import { StreamSpeechController, type SpeakSink } from "./streamSpeechController"
 import { pickAck, pickFiller, describeAction } from "./fillerBank"
 import { isDestructiveCall } from "./loop/verifier"
+import { sanitizeSpoken } from "./spokenSanitizer"
 import type { AgentEventHandler, ConductorOpts, Tier, ToolDef } from "./types"
 import type { LoopEvent, LoopMsg } from "./loop/types"
 
@@ -75,6 +76,9 @@ export interface ConductorDeps {
      *  the whole conversation is remembered (recent verbatim + older summarized). */
     updateRollingSummary?: (conversationId: string, summarize: (text: string) => Promise<string>, opts?: { keepRecent?: number }) => Promise<void>
   }
+  /** Durable activity log — records WHAT KAIROS DID per turn so it can later answer
+   *  "what did you do yesterday". Only action/tool turns are recorded (chitchat skipped). */
+  activity?: { record: (ev: { at: number; kind: string; lane: "foreground"; title: string; detail?: string; tool?: string; status?: string; importance?: number; conversationId?: string; ref?: Record<string, unknown> }) => void }
 }
 
 export class Conductor {
@@ -352,6 +356,31 @@ export class Conductor {
           .catch(() => { /* summary is best-effort */ })
       }
     }
+
+    // Log to the durable ACTIVITY timeline — only turns that DID something (used a
+    // real tool); pure chitchat is skipped. Powers "what did you do yesterday".
+    if (this.deps.activity && opts.conversationId) {
+      try {
+        const real = result.toolCalls.filter((c) => c.name !== "update_plan" && c.name !== "search_tools")
+        if (real.length > 0) {
+          const isWrite = (c: { name: string; args: any }) => { try { return isDestructiveCall({ name: c.name, args: c.args }) } catch { return false } }
+          const hadWrite = real.some(isWrite)
+          const primary = real.find(isWrite) ?? real[real.length - 1]!
+          this.deps.activity.record({
+            at: Date.now(),
+            kind: hadWrite ? "action" : "read",
+            lane: "foreground",
+            conversationId: opts.conversationId,
+            tool: effectiveToolName(primary),
+            title: activityTitle(primary),
+            detail: opts.utterance,
+            status: real.some((c) => c.error) ? "failed" : "done",
+            importance: hadWrite ? 0.8 : 0.4,
+            ref: extractRefs(real),
+          })
+        }
+      } catch { /* activity logging is best-effort; never breaks a turn */ }
+    }
   }
 
   /** Cheap-model digest of older conversation turns for the rolling summary. */
@@ -401,6 +430,34 @@ function buildTurnMessages(
   return msgs
 }
 
+/** The REAL action behind a call: execute_tool wraps the Composio action under
+ *  `tool_name` (matches verifier.effectiveName). */
+function effectiveToolName(c: { name: string; args: any }): string {
+  if (c.name === "execute_tool" && c.args && typeof c.args === "object") {
+    return c.args.tool_name || c.args.tool || c.args.toolName || c.args.action || c.name
+  }
+  return c.name
+}
+
+/** A short, human title for the activity log. Humanizing the SCREAMING_SNAKE tool name
+ *  is reliable + informative ("GMAIL_SEND_EMAIL" → "Gmail send email"); the user's
+ *  request is stored separately as the detail. */
+function activityTitle(c: { name: string; args: any }): string {
+  const name = effectiveToolName(c)
+  const human = String(name).replace(/_/g, " ").toLowerCase().trim()
+  return human ? human.charAt(0).toUpperCase() + human.slice(1) : name
+}
+
+/** Pull id-like handles from the tool results (for linking in the HUD — not bodies). */
+function extractRefs(calls: Array<{ result?: any }>): Record<string, unknown> | undefined {
+  const ref: Record<string, unknown> = {}
+  for (const c of calls) {
+    const r = c.result?.data ?? c.result
+    if (r && typeof r === "object") for (const k of ["id", "threadId", "messageId", "issueId", "url"]) if (r[k] != null && ref[k] == null) ref[k] = r[k]
+  }
+  return Object.keys(ref).length ? ref : undefined
+}
+
 const REPLAY_RESULT_MAX = Number(process.env.KAIROS_REPLAY_RESULT_MAX) || 1500
 function clampResult(result: any): string {
   if (result == null) return "(no result)"
@@ -409,24 +466,9 @@ function clampResult(result: any): string {
 }
 function safeStringify(v: any): string { try { return JSON.stringify(v ?? {}) } catch { return "{}" } }
 
-// Raw tool-call markup that must NEVER be spoken. Some models (e.g. Kimi K2 via
-// certain providers) emit tool calls as TEXT instead of structured calls; that
-// markup must never reach TTS. If detected, we speak a recovery line instead.
-const TOOL_MARKUP_RE = /<tool_call|tool_calls_section|<\|tool|functions\.[a-zA-Z_]+\s*[\{<]/
-
-// Reasoning models wrap their chain-of-thought in <think>/<thinking>/<reasoning>
-// tags — that internal monologue must NEVER be spoken. Strip the tagged blocks (and
-// any dangling open tag) before TTS. (The real fix for CoT leakage is a non-reasoning
-// SMART model — see TIER_MODELS.smart — but this catches a tagged model defensively.)
-const THINK_BLOCK_RE = /<(think|thinking|reasoning|thought)>[\s\S]*?<\/\1>/gi
-const THINK_DANGLING_RE = /<(think|thinking|reasoning|thought)>[\s\S]*$/i
-
-function sanitizeReply(text: unknown): string {
-  let t = String(text ?? "").replace(THINK_BLOCK_RE, " ").replace(THINK_DANGLING_RE, " ").trim()
-  if (!t) return ""
-  if (TOOL_MARKUP_RE.test(t)) return "Sorry, I hit a snag running that — let me try again in a moment."
-  return t
-}
+// The ONE guard for spoken text (strip <think>/reasoning, never voice tool-markup) —
+// shared with the background report + the live delta stream so all three can't drift.
+const sanitizeReply = sanitizeSpoken
 
 /** Default planner runner — drives the KAIROS Agent Loop (our owned, Codex-grade
  *  loop) on the streaming OpenRouter adapter with the SMART-tier model. Replaces

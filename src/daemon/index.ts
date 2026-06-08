@@ -36,6 +36,7 @@ import { Voice } from './voice'
 import { bootstrapVoice } from './voice/bootstrap'
 import { StreamingSpeaker } from './voice/streamingSpeaker'
 import { ConversationMessageStore } from './voice/conversationMessageStore'
+import { ActivityStore } from './activity/activityStore'
 import { startWrapApi, type WrapApiServer } from './wrapApi/server'
 import { LLMAdapter } from './wrapApi/adapters/llmAdapter'
 import { VoiceAdapter } from './wrapApi/adapters/voiceAdapter'
@@ -293,6 +294,11 @@ async function main(): Promise<void> {
   // 4. Init database
   const dbPath = join(config.sandboxDir, 'state', 'state.db')
   const db = initDatabase(dbPath)
+
+  // Durable activity log — "what did you do yesterday?". Written by the conductor
+  // (foreground actions) + the background appendTraj hook; read by the kairos_activity
+  // tool + the HUD recall feed. Constructed early so it's in scope for all three.
+  const activityStore = new ActivityStore(db)
   log(`Database initialized at ${dbPath}`)
 
   // 5. Handle tasks from previous runs
@@ -1646,13 +1652,24 @@ async function main(): Promise<void> {
   // (tts_begin/chunk/end/abort frames) flows to WS clients from here on.
   deferredBroadcast = (event) => wrapApi.broadcast(event as any)
 
+  // When did OUR TTS last stop? The VAD can self-trigger a "barge_in" on KAIROS's
+  // own tail audio / echo right after it stops speaking (diagnosis #4-truncation:
+  // a barge_in fired +89ms after a reply finished, with NO transcribed user speech,
+  // clipping the tail). We debounce barge-in for a short window after TTS ends so a
+  // self-trigger can't cut the reply; a REAL interruption lands DURING TTS (large
+  // elapsed-since-end) and is unaffected.
+  let lastTtsEndAt = 0
+  const BARGE_DEBOUNCE_MS = Number(process.env.KAIROS_BARGE_DEBOUNCE_MS) || 350
+
   // 10e. Wire voice conductor bus → wrap-API WebSocket broadcast.
   // bootstrapVoice() installs a no-op bus stub; swap it for one that pushes
   // events out to every connected /v1/voice/events WS client (Electron, etc.).
   if (voiceBundle) {
     voiceBundle.conductor.replaceBus({
       publish: (kind: string, payload: any) => {
-        wrapApi.broadcast({ event: voiceEventName(kind), ...payload })
+        const event = voiceEventName(kind)
+        if (event === 'tts_end' || event === 'tts_abort') lastTtsEndAt = Date.now()
+        wrapApi.broadcast({ event, ...payload })
       },
     })
     log('[voice] conductor bus wired to wrap-API WebSocket broadcast')
@@ -1779,6 +1796,11 @@ async function main(): Promise<void> {
           const dn = (globalThis as any).__kairosDailyNarrative
           return dn?.recent ? dn.recent(n) : []
         },
+      },
+      // "what did you do yesterday" — the durable activity log (voice answer only).
+      activityStore: {
+        query: (range, opts) => activityStore.query(range, opts),
+        digest: (items) => activityStore.digest(items as any),
       },
     })
 
@@ -2237,6 +2259,22 @@ async function main(): Promise<void> {
             })
           }
         } catch { /* traj write must never break the lane */ }
+        // (3) Durable ACTIVITY event so "what did you do yesterday" can name this
+        // background run (the in-memory BgTask is evicted at 24 + lost on restart).
+        try {
+          const ok = (entry.stopped === 'final' || entry.stopped === 'max_turns') && String(entry.finalText ?? '').trim()
+          activityStore.record({
+            at: Date.now(),
+            kind: 'subagent',
+            lane: 'background',
+            runId,
+            tool: 'spawn_background_task',
+            title: `Background: ${String(entry.goal ?? 'task').slice(0, 120)}`,
+            detail: String(entry.finalText ?? '').slice(0, 600),
+            status: entry.stopped === 'aborted' ? 'cancelled' : entry.stopped === 'error' ? 'failed' : ok ? 'done' : 'failed',
+            importance: 0.8,
+          })
+        } catch { /* activity log is best-effort */ }
       },
       // R8: before a sub-agent runs, surface similar PAST successful runs (from the
       // raw subagents.jsonl, last ~150) so it reuses what worked. Bounded + best-effort.
@@ -2290,6 +2328,8 @@ async function main(): Promise<void> {
         appendTurn: (id, turnId, msgs) => conversationMessageStore.appendTurn(id, turnId, msgs),
         updateRollingSummary: (id, summarize, o) => conversationMessageStore.updateRollingSummary(id, summarize, o),
       },
+      // Records WHAT KAIROS DID per foreground turn (for "what did you do yesterday").
+      activity: { record: (ev) => activityStore.record(ev) },
       onEvent: (e: any) => {
         if (e?.kind === 'agent_done' && typeof e.text === 'string') lastAgentReply = e.text
         wrapApi.broadcast({ event: e.kind, ...e })
@@ -2617,6 +2657,13 @@ async function main(): Promise<void> {
       // KAIROS was talking. Abort the in-flight turn + stop TTS. The renderer also
       // stops its own Web Audio playback locally for instant cutoff.
       if (cmd?.cmd === 'barge_in') {
+        // Ignore a barge-in that lands within the debounce window after OUR TTS
+        // stopped — that's the VAD self-triggering on our own tail audio, not the user.
+        const sinceTts = Date.now() - lastTtsEndAt
+        if (lastTtsEndAt > 0 && sinceTts < BARGE_DEBOUNCE_MS) {
+          log(`[barge-in] (renderer VAD) IGNORED — ${sinceTts}ms after our TTS ended (self-trigger guard)`)
+          return
+        }
         if (activeConductorController) {
           log('[barge-in] (renderer VAD) aborting active conductor turn')
           activeConductorController.abort()
@@ -2650,6 +2697,11 @@ async function main(): Promise<void> {
     // Listen for barge_in events from sidecar → abort active conductor turn + stop TTS.
     voiceBundle.sidecar.onEvent((e: any) => {
       if (e.event === 'barge_in_detected' || e.event === 'barge_in' || e.event === 'vad_speech_during_tts') {
+        const sinceTts = Date.now() - lastTtsEndAt
+        if (lastTtsEndAt > 0 && sinceTts < BARGE_DEBOUNCE_MS) {
+          log(`[barge-in] (sidecar VAD) IGNORED — ${sinceTts}ms after our TTS ended (self-trigger guard)`)
+          return
+        }
         if (activeConductorController) {
           log('[barge-in] aborting active conductor turn')
           activeConductorController.abort()

@@ -2,6 +2,9 @@
 // All kairos_* tools — voice introspection + self-management.
 
 import type { ToolDef } from "./types"
+import { resolveWhen } from "../util/timeRange"
+
+type ActivityItemLite = { at: number; kind: string; lane: string; title: string; detail?: string; status: string }
 
 export interface IntrospectionDeps {
   soulLoader:      { load: () => Promise<string> }
@@ -16,6 +19,14 @@ export interface IntrospectionDeps {
   personaUpdater?: { recordNudge: (nudge: string) => any }
   /** Optional — daily narrative diary reader for kairos_daily_log. */
   dailyNarrative?: { recent: (n: number) => Array<{ day: string; text: string }> }
+  /** Optional — the durable activity log for kairos_activity ("what did you do…"). */
+  activityStore?: {
+    query: (
+      range: { fromDay: string; toDay: string; from: number; to: number; label: string },
+      opts?: { minImportance?: number; limit?: number },
+    ) => ActivityItemLite[]
+    digest: (items: ActivityItemLite[]) => string
+  }
 }
 
 export function buildIntrospectionTools(deps: IntrospectionDeps): ToolDef[] {
@@ -43,8 +54,27 @@ export function buildIntrospectionTools(deps: IntrospectionDeps): ToolDef[] {
       },
     },
     {
+      name: "kairos_activity",
+      description: "Recall what KAIROS actually DID over a time period: actions it took (emails sent, issues created, things looked up), background tasks it ran and what they found, and proactive things it did (reminders fired, messages sent). THIS is the tool for 'what did you do yesterday / today / this week', 'what have you been up to', 'did you do X recently'. Returns a digest + a timeline of items.",
+      parameters: {
+        type: "object",
+        properties: { when: { type: "string", description: "Time range: 'today', 'yesterday', 'this week', 'last 7 days', or an explicit date 'YYYY-MM-DD'. Defaults to today." } },
+        required: [],
+      },
+      execute: async (args: { when?: string }) => {
+        if (!deps.activityStore) return { items: [], note: "activity log not available" }
+        const range = resolveWhen(args?.when ?? "today")
+        const items = deps.activityStore.query(range, { minImportance: 0.5, limit: 50 })
+        const tz = process.env.KAIROS_TZ?.trim()
+        const fmtTime = (at: number) => { try { return new Date(at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", ...(tz ? { timeZone: tz } : {}) }) } catch { return "" } }
+        const shaped = items.map((i) => ({ time: fmtTime(i.at), what: i.title, detail: i.detail, lane: i.lane, status: i.status }))
+        const digest = deps.activityStore.digest(items)
+        return { period: range.label, digest, count: items.length, items: shaped }
+      },
+    },
+    {
       name: "kairos_daily_log",
-      description: "Read KAIROS's recent daily diary entries — a human-readable narrative of what happened and what was learned about the user on prior days. Use to recall 'what did we do yesterday / this week'.",
+      description: "Read KAIROS's daily diary NARRATIVE (a reflective prose summary of prior days; may be sparse). For a precise list of what KAIROS DID/actions taken, prefer kairos_activity.",
       parameters: {
         type: "object",
         properties: { days: { type: "number", description: "How many recent days to read (default 3)." } },
@@ -127,7 +157,7 @@ export function buildIntrospectionTools(deps: IntrospectionDeps): ToolDef[] {
     },
     {
       name: "kairos_traj_recent",
-      description: "Get KAIROS's recent activity log (last N episodes).",
+      description: "Get recent low-level PERCEPTION episodes (sensor-level things KAIROS noticed in the environment — often routine). This is NOT the action log; for 'what did you do', use kairos_activity instead.",
       parameters: {
         type: "object",
         properties: { n: { type: "number", default: 10 } },
@@ -137,7 +167,7 @@ export function buildIntrospectionTools(deps: IntrospectionDeps): ToolDef[] {
     },
     {
       name: "kairos_traj_search",
-      description: "Search KAIROS's activity log (L2 episodes) for past events.",
+      description: "Search low-level PERCEPTION/observation episodes (L2) by keyword. NOT the action log; for what KAIROS DID, use kairos_activity.",
       parameters: {
         type: "object",
         properties: { query: { type: "string" }, limit: { type: "number", default: 5 } },
