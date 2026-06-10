@@ -62,10 +62,11 @@ final class MetalOrbView: NSView {
 
     @objc private func tick() {
         guard let orb, let drawable = metalLayer.nextDrawable() else { return }
-        model.tick()  // advance level smoothing + palette cross-fade
+        model.tick()  // advance eased level + motion archetype weights + hue rotation
         let t = Float(CACurrentMediaTime() - start)
         let size = SIMD2(Float(drawable.texture.width), Float(drawable.texture.height))
-        let u = orb.uniforms(palette: model.paletteDisplay, time: t, level: Float(model.display), size: size, mode: model.state.mode, baseAngle: model.state.sweepRotation)
+        let u = orb.uniforms(time: t, level: Float(model.display), size: size,
+                             motion: model.motion, baseAngle: Float(model.rotDisplay))
         guard let cmd = orb.queue.makeCommandBuffer() else { return }
         orb.encode(into: drawable.texture, clear: MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0), uniforms: u, commandBuffer: cmd)
         cmd.present(drawable)

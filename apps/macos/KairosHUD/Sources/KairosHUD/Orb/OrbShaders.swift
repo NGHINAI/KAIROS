@@ -68,21 +68,34 @@ enum OrbShaders {
         float r = length(c); float ang = atan2(c.y, c.x);
         float t = U.time, level = U.level;
         float flip = (U.cRim.y == 0.0) ? 1.0 : U.cRim.y;
-        float baseAng = U.cRim.x, mode = U.cRim.z;
+        float baseAng = U.cRim.x;
         float bloom = U.params.x, ringR = U.params.y, coreW = U.params.z, rotSpeed = U.params.w;
         float gA = flip * ang + baseAng + t * rotSpeed;       // sweep lookup angle
 
-        // shape per mode (the ring's silhouette)
-        float A = 0.02; float3 F = float3(2, 3, 5); float3 S = float3(0.6, 0.5, 0.3); float pulse = 0.0;
-        float breathe = 0.5 + 0.5 * sin(t * 0.6);
-        if (mode < 0.5)      { A = 0.018; F = float3(2, 3, 5); S = float3(0.6, 0.5, 0.3); }
-        else if (mode < 1.5) { A = 0.028 + 0.035 * level; F = float3(2, 3, 5); S = float3(0.8, 0.6, 0.4); pulse = 0.018 * sin(t * 1.7); }
-        else if (mode < 2.5) { A = 0.055; F = float3(4, 6, 3); S = float3(1.6, 1.1, 0.8); }
-        else if (mode < 3.5) { A = 0.06 + 0.13 * level; F = float3(5, 7, 3); S = float3(2.0, 1.6, 1.2); }
-        else                 { A = 0.05; F = float3(8, 8, 8); S = float3(8.0, 8.0, 8.0); }
+        // DISTINCT per-state motion, blended from archetypes (each weight eased on the CPU so states
+        // cross-fade). amp/spd scale the whole thing; the weights pick the CHARACTER:
+        //   breathe = slow uniform swell (idle) · pulse = faster uniform (listening) ·
+        //   travel  = a wave running AROUND the ring (thinking) · lobe = voice-driven lobes (speaking) ·
+        //   jitter  = agitated high-freq shake (error).
+        float amp = U.cWarm.x;
+        float spd = U.cWarm.y;
+        float wBreathe = U.cAccent.x, wPulse = U.cAccent.y, wTravel = U.cAccent.z, wLobe = U.cAccent.w;
+        float wJitter = U.cCool.x;
 
-        float baseW = 0.5 * sin(F.x * ang + t * S.x) + 0.3 * sin(F.y * ang - t * S.y) + 0.2 * sin(F.z * ang + t * S.z);
-        float rs = ringR * (1.0 + 0.02 * breathe + pulse + 0.03 * level + A * baseW);
+        float a_breathe = sin(t * 0.85 * spd);                                  // uniform, slow
+        float a_pulse   = sin(t * 1.8 * spd);                                   // uniform, faster
+        float a_travel  = sin(3.0 * ang - t * 1.7 * spd);                       // bump travels around ring
+        float a_lobe    = (0.62 * sin(2.0 * ang + t * 0.9 * spd)
+                          + 0.38 * sin(3.0 * ang - t * 0.7 * spd)) * (0.45 + 1.7 * level); // voice lobes
+        float a_jitter  = sin(11.0 * ang + t * 6.5) * 0.55
+                          + (vnoise(float2(ang * 4.0, t * 7.0)) - 0.5) * 1.1;   // shaky
+
+        float disp = wBreathe * a_breathe + wPulse * a_pulse + wTravel * a_travel
+                   + wLobe * a_lobe + wJitter * a_jitter;
+        float rs = ringR * (1.0 + amp * disp + 0.025 * level);   // small live baseline swell while speaking
+
+        // flares (wisps/filaments/spikes) fade in with overall activity — clean ring at idle
+        float energy = clamp(amp * 8.0 + level * 0.7 + (wTravel + wLobe + wJitter) * 0.12, 0.05, 1.0);
         float d = r - rs;                                     // signed distance to the ring
         float3 acc = float3(0.0); float white = 0.0;
         float3 col = sweep(gA);
@@ -90,7 +103,7 @@ enum OrbShaders {
         // (1) ULTRA-THIN ring core (condensed light) — 2 nearly-coincident strands for a hint of weave
         for (int s = 0; s < 2; s++) {
             float off = (float(s) - 0.5) * 0.010;
-            float weave = 0.008 * sin((F.x + 2.0) * ang - t * (S.x + 0.5) + float(s) * 3.0);
+            float weave = 0.008 * sin(5.0 * ang - t * (0.6 * spd + 0.5) + float(s) * 3.0);
             float ds = d - ringR * (off + weave);
             float core = exp(-pow(ds / coreW, 2.0));
             white += core;
@@ -110,7 +123,7 @@ enum OrbShaders {
         float pr = (r - ringR) * 3.2 - t * 0.45;
         float n = fbm(float2(pa, pr) + 1.7 * fbm(float2(pa * 0.6 + t * 0.1, pr * 0.6)));
         n = pow(max(0.0, n), 1.6);
-        acc += col * n * outward * falloff * (0.55 + level * 0.6);
+        acc += col * n * outward * falloff * (0.55 + level * 0.6) * energy;
 
         // (4) curved orbiting FILAMENTS — thin arcs that wander out and drift around the ring
         for (int f = 0; f < 2; f++) {
@@ -118,7 +131,7 @@ enum OrbShaders {
             float filR = ringR * (1.0 + 0.05 + 0.045 * ff + 0.05 * sin(3.0 * ang + t * (0.7 + 0.3 * ff) + ff * 2.1));
             float dF = r - filR;
             float win = smoothstep(0.25, 0.85, 0.5 + 0.5 * sin(ang * 1.0 - t * (0.5 + 0.2 * ff) + ff * 3.0));
-            acc += sweep(gA + ff * 0.4) * exp(-pow(dF / (coreW * 3.0), 2.0)) * win * 0.45;
+            acc += sweep(gA + ff * 0.4) * exp(-pow(dF / (coreW * 3.0), 2.0)) * win * 0.45 * energy;
         }
 
         // (5) sparse sharp SPIKES — elegant radial beams (occasional bursts), reactive to level
@@ -127,7 +140,7 @@ enum OrbShaders {
             float burst = smoothstep(0.55, 1.0, 0.5 + 0.5 * sin(t * 1.3 + float(k) * 2.3));
             float dA = angWrap(ang - ka);
             float beam = exp(-pow(dA / 0.05, 2.0)) * outward * exp(-pow(max(0.0, d) / (ringR * 0.8), 2.0));
-            acc += sweep(flip * ka + baseAng) * beam * burst * (0.35 + level * 0.7);
+            acc += sweep(flip * ka + baseAng) * beam * burst * (0.35 + level * 0.7) * energy;
         }
 
         white = clamp(white, 0.0, 1.0);

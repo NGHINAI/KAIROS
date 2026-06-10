@@ -8,6 +8,12 @@
 import AppKit
 
 final class NonActivatingHUDPanel: NSPanel {
+    /// RECORDABLE BY DEFAULT (`.readOnly`) so demo recordings capture the orb/console/
+    /// guide. `--capture-invisible` flips back to `.none` — Phase-H hygiene for when
+    /// the agent takes its own screenshots and must not see itself. Set in main.swift
+    /// before any panel is constructed.
+    static var recordable = true
+
     init(contentRect: NSRect) {
         super.init(
             contentRect: contentRect,
@@ -26,7 +32,7 @@ final class NonActivatingHUDPanel: NSPanel {
         // Draggable anywhere on screen by clicking the orb; never steals focus (.nonactivatingPanel).
         isMovableByWindowBackground = true
         // Never appear in screen captures (Phase H: the agent must not "see itself").
-        sharingType = .none
+        sharingType = Self.recordable ? .readOnly : .none
         ignoresMouseEvents = false
     }
 

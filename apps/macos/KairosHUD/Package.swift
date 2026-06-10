@@ -1,4 +1,4 @@
-// swift-tools-version:5.9
+// swift-tools-version:6.2
 // Package.swift — KairosHUD
 //
 // The native macOS "Living Oval" HUD sidecar (amends Architecture A; Electron retired for the HUD).
@@ -10,14 +10,14 @@
 //   swift run KairosHUD            # live (connects ws://127.0.0.1:9876 — wired in a later step)
 //   swift run KairosHUD --mock     # daemon-free: scripted state/level cycling
 //
-// NOTE: true Liquid Glass (.glassEffect) needs the macOS 26 SDK (Xcode 26 / 26.x Command Line Tools).
-// On the current SDK we use NSVisualEffectView / .ultraThinMaterial via the GlassEffect shim.
+// Targets macOS 26 (Tahoe) so we use NATIVE Liquid Glass (.glassEffect / GlassEffectContainer /
+// glassEffectID) unconditionally — verified available on the active SDK 26.2 toolchain.
 
 import PackageDescription
 
 let package = Package(
     name: "KairosHUD",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v26)],
     products: [
         .executable(name: "KairosHUD", targets: ["KairosHUD"]),
     ],
@@ -26,6 +26,12 @@ let package = Package(
         .executableTarget(
             name: "KairosHUD",
             path: "Sources/KairosHUD",
+            // tools 6.2 is required only for the macOS-26 platform (Liquid Glass). Keep the Swift 5
+            // language mode so the single-threaded UI client isn't forced through Swift 6 strict
+            // actor-isolation refactors (URLSession callbacks hopping to @MainActor are fine here).
+            swiftSettings: [
+                .swiftLanguageMode(.v5),
+            ],
             linkerSettings: [
                 .linkedFramework("AppKit"),
             ]

@@ -57,6 +57,11 @@ export function App() {
   // pttActiveRef: Option/Talk held → mic audio is being buffered for send.
   const speakingRef = useRef(false)
   const pttActiveRef = useRef(false)
+  // playbackRef: last PLAYBACK state reported to the daemon (`tts_playback`).
+  // This is the GROUND TRUTH the HUD orb's speaking state rides on — tts_end only
+  // means "chunks finished downloading"; Web Audio keeps playing for seconds after.
+  const playbackRef = useRef(false)
+  const playbackKeepaliveRef = useRef(0)
   const [micReady, setMicReady] = useState(false)
   // Live VAD diagnostics surfaced in the UI (no devtools needed): speech
   // probability of the latest frame + a running frame count to prove audio flows.
@@ -96,6 +101,38 @@ export function App() {
       }
     }
     connect()
+
+    // Playback reporter: tell the daemon when audio is ACTUALLY playing (change-
+    // triggered + ~2s keepalive while playing, so the daemon's freshness window
+    // never lapses mid-reply). Quiet sender — never surfaces status messages.
+    const reportPlayback = () => {
+      const ws = wsRef.current
+      if (!ws || ws.readyState !== WebSocket.OPEN) return
+      const playing = !!playerRef.current?.isPlaying()
+      const now = Date.now()
+      const changed = playing !== playbackRef.current
+      const keepaliveDue = playing && now - playbackKeepaliveRef.current >= 2000
+      if (changed || keepaliveDue) {
+        playbackRef.current = playing
+        playbackKeepaliveRef.current = now
+        try { ws.send(JSON.stringify({ cmd: 'tts_playback', playing })) } catch { /* quiet */ }
+      }
+    }
+    const playbackTimer = window.setInterval(reportPlayback, 150)
+
+    // Live voice level → the orb's lobes. ~15Hz while audio is audible, one final 0
+    // on silence. (Chunk-arrival RMS was wrong: chunks download in a burst seconds
+    // before playback finishes, so the orb sat static mid-speech.)
+    let lastLevelSent = -1
+    const reportLevel = () => {
+      const ws = wsRef.current
+      if (!ws || ws.readyState !== WebSocket.OPEN) return
+      const level = playerRef.current?.level() ?? 0
+      if (level === 0 && lastLevelSent === 0) return        // stay quiet while idle
+      lastLevelSent = level
+      try { ws.send(JSON.stringify({ cmd: 'tts_level', level: Number(level.toFixed(3)) })) } catch { /* quiet */ }
+    }
+    const levelTimer = window.setInterval(reportLevel, 66)
 
     // Renderer-owned mic + Silero VAD. Loaded via dynamic import() so that any
     // failure in the heavy ORT/VAD module (wasm compile, CSP, etc.) degrades to
@@ -170,6 +207,8 @@ export function App() {
 
     return () => {
       cancelled = true
+      window.clearInterval(playbackTimer)
+      window.clearInterval(levelTimer)
       if (reconnectTimer.current) window.clearTimeout(reconnectTimer.current)
       hotkeyCleanup?.()
       wsRef.current?.close()

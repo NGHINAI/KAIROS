@@ -17,6 +17,11 @@ export class PcmPlayer {
   // Next time (in ctx.currentTime units) a chunk should start. Keeps playback gapless.
   private nextStartAt = 0
   private sources = new Set<AudioBufferSourceNode>()
+  // Analyser tap on the playback graph: the LIVE output level drives the orb's
+  // voice lobes (chunk-arrival RMS is wrong — chunks download in a burst seconds
+  // before the audio actually plays, leaving the orb static mid-speech).
+  private analyser: AnalyserNode | null = null
+  private levelBuf: Float32Array | null = null
 
   /** Start a new utterance. Resets the schedule clock. */
   begin(speakId: string, sampleRate: number): void {
@@ -40,7 +45,7 @@ export class PcmPlayer {
 
     const src = ctx.createBufferSource()
     src.buffer = buffer
-    src.connect(ctx.destination)
+    src.connect(this.ensureAnalyser(ctx))
 
     const startAt = Math.max(this.nextStartAt, ctx.currentTime)
     src.start(startAt)
@@ -65,6 +70,28 @@ export class PcmPlayer {
     return this.ctx != null && this.nextStartAt > this.ctx.currentTime + 0.02
   }
 
+  /** Instantaneous output level [0..1] from the analyser tap — what's audible NOW. */
+  level(): number {
+    if (!this.analyser || !this.isPlaying()) return 0
+    if (!this.levelBuf || this.levelBuf.length !== this.analyser.fftSize) {
+      this.levelBuf = new Float32Array(this.analyser.fftSize)
+    }
+    this.analyser.getFloatTimeDomainData(this.levelBuf)
+    let sum = 0
+    for (let i = 0; i < this.levelBuf.length; i++) sum += this.levelBuf[i] * this.levelBuf[i]
+    const rms = Math.sqrt(sum / this.levelBuf.length)
+    return Math.min(1, rms * 3.2)   // speech RMS ~0.05-0.3 → scale into a lively 0..1
+  }
+
+  private ensureAnalyser(ctx: AudioContext): AnalyserNode {
+    if (!this.analyser) {
+      this.analyser = ctx.createAnalyser()
+      this.analyser.fftSize = 512
+      this.analyser.connect(ctx.destination)
+    }
+    return this.analyser
+  }
+
   /** Hard stop (barge-in): kill all scheduled audio immediately. */
   abort(speakId: string): void {
     if (speakId !== this.activeSpeakId && this.activeSpeakId !== null) return
@@ -83,6 +110,7 @@ export class PcmPlayer {
     this.stopAll()
     this.ctx?.close().catch(() => {})
     this.ctx = null
+    this.analyser = null
   }
 
   private stopAll(): void {

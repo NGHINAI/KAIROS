@@ -12,6 +12,12 @@ let arguments = CommandLine.arguments
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 
+// RECORDABLE BY DEFAULT: HUD panels are visible to screen recordings/captures
+// (sharingType .readOnly) so demos just work. `--capture-invisible` opts back into
+// .none — needed later when the Phase-H agent takes its own screenshots and must
+// not see itself. Must be set before any panel is constructed.
+NonActivatingHUDPanel.recordable = !arguments.contains("--capture-invisible")
+
 // Dev tool: render the Metal orb states to PNGs over a purple desktop and exit (no window).
 if let i = arguments.firstIndex(of: "--snapshot"), i + 1 < arguments.count {
     let dir = arguments[i + 1]
@@ -21,17 +27,34 @@ if let i = arguments.firstIndex(of: "--snapshot"), i + 1 < arguments.count {
     }
     try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
     let cases: [(String, OrbState, Float)] = [
-        ("idle", .idle, 0.10), ("listening", .listening, 0.55),
-        ("thinking", .thinking, 0.40), ("speaking", .speaking, 0.90), ("error", .error, 0.60),
+        ("idle", .idle, 0.0), ("listening", .listening, 0.3),
+        ("thinking", .thinking, 0.2), ("speaking", .speaking, 0.9), ("error", .error, 0.3),
     ]
     let clear = MTLClearColor(red: 0.02, green: 0.02, blue: 0.03, alpha: 1.0)  // near-black (matches the references)
     for (name, state, level) in cases {
-        // render at t=0.6 so the speaking/listening shape deformation is visible in the still
-        if let png = orb.snapshotPNG(width: 360, height: 360, time: 0.6, level: level, palette: .of(state), clear: clear, mode: state.mode, baseAngle: state.sweepRotation) {
+        // render at t=0.6 so each state's deformation character is visible in the still.
+        // (Motion/easing only show live; a still uses each state's resting archetype mix.)
+        if let png = orb.snapshotPNG(width: 360, height: 360, time: 0.6, level: level,
+                                     motion: state.motion,
+                                     clear: clear, baseAngle: Float(state.sweepRotation)) {
             try? png.write(to: URL(fileURLWithPath: dir).appendingPathComponent("orb-\(name).png"))
             FileHandle.standardError.write("metal snapshot: orb-\(name).png\n".data(using: .utf8)!)
         }
     }
+    exit(0)
+}
+
+// Dev probe: resolve an element via the AX walker and dump what it saw, then exit.
+// Usage: KairosHUD --axprobe "Privacy and Security" "System Settings"
+if let i = arguments.firstIndex(of: "--axprobe"), i + 2 < arguments.count {
+    AXFinder.debug = true
+    let r = AXFinder.find(query: arguments[i + 1], appName: arguments[i + 2] == "frontmost" ? nil : arguments[i + 2])
+    switch r {
+    case .found(let m): print("FOUND \"\(m.title)\" at \(m.frame)")
+    case .notFound(let reason): print("NOT FOUND: \(reason)")
+    }
+    print("--- labels seen during walk (\(AXFinder.seenLabels.count)):")
+    for l in AXFinder.seenLabels.prefix(150) { print("  \(l)") }
     exit(0)
 }
 
@@ -43,23 +66,46 @@ func kairosDaemonPort() -> Int {
     return 9876
 }
 
-// Probe: connect, log events for ~6s, exit — verifies the live wire without launching the GUI.
-if arguments.contains("--probe") {
+// Probe: connect, log full event JSON for N seconds (default 6), exit — verifies the live wire
+// without launching the GUI. Usage: KairosHUD --probe [seconds]
+if let i = arguments.firstIndex(of: "--probe") {
+    let secs = (i + 1 < arguments.count ? Double(arguments[i + 1]) : nil) ?? 6
     let probeModel = OrbModel()
     let client = DaemonClient(model: probeModel, port: kairosDaemonPort(), verbose: true)
     client.connect()
-    FileHandle.standardError.write("probing ws://127.0.0.1:\(kairosDaemonPort())/v1/voice/events for 6s…\n".data(using: .utf8)!)
-    RunLoop.main.run(until: Date().addingTimeInterval(6))
+    FileHandle.standardError.write("probing ws://127.0.0.1:\(kairosDaemonPort())/v1/voice/events for \(Int(secs))s…\n".data(using: .utf8)!)
+    RunLoop.main.run(until: Date().addingTimeInterval(secs))
     exit(0)
 }
 
-// Render the Lane-A activity overlay + card to PNGs (mock data) for visual verification.
+// Render the Liquid Glass console to a PNG (mock Lane A + Lane B) for layout verification.
+// NOTE: ImageRenderer composites over the backdrop we supply here, so the glass refraction looks
+// only approximate — judge the TRUE Liquid Glass live (`swift run KairosHUD --mock`). This still
+// verifies layout, spacing, the expanded-agent detail, and the count badge.
 @MainActor func renderActivitySnaps(toDir dir: String) {
     let a = ActivityModel()
-    a.intent(tier: "smart"); a.setStatus("creating your calendar event")
-    a.toolCall(id: "1", name: "search_gmail"); a.toolDone(id: "1", summary: "3 results")
-    a.toolCall(id: "2", name: "create_event")
-    a.toolCall(id: "3", name: "send_reply")
+    a.intent(tier: "smart"); a.setStatus("Working on your calendar")
+    a.toolCall(id: "1", name: DaemonClient.humanizeTool("GMAIL_FETCH_EMAILS"))
+    a.toolDone(id: "1", summary: DaemonClient.humanizeSummary("{\"successful\":true,\"data\":{\"messages\":[{},{},{}]}}"))
+    a.toolCall(id: "2", name: DaemonClient.humanizeTool("GOOGLECALENDAR_CREATE_EVENT"))
+
+    let bg = BackgroundModel()
+    bg.spawned(id: "bg-inbox", goal: "Organize my inbox")
+    bg.tool(id: "bg-inbox", name: DaemonClient.humanizeTool("GMAIL_FETCH_EMAILS"))
+    bg.tool(id: "bg-inbox", name: DaemonClient.humanizeTool("GMAIL_MODIFY_LABELS"))
+    bg.progress(id: "bg-inbox", note: DaemonClient.humanizeNote("using GMAIL_MODIFY_LABELS"))
+    bg.spawned(id: "bg-flights", goal: "Research SF→Tokyo flights")
+    bg.progress(id: "bg-flights", note: "comparing 6 itineraries…")
+
+    let approval = ApprovalModel()
+    approval.request(id: "ap-1", summary: "Send the weekly report email to the team",
+                     toolName: DaemonClient.humanizeTool("GMAIL_SEND_EMAIL"))
+
+    let hud = HUDState()
+    hud.consoleOpen = true
+    hud.expandedAgentID = "bg-inbox"   // one agent opened to its full step list
+    hud.todosExpanded = true           // show the to-dos list expanded for the snapshot
+
     try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
     func write(_ view: some View, _ name: String, _ w: CGFloat, _ h: CGFloat) {
         let r = ImageRenderer(content: view.frame(width: w, height: h)); r.scale = 2
@@ -68,18 +114,29 @@ if arguments.contains("--probe") {
             try? png.write(to: URL(fileURLWithPath: dir).appendingPathComponent(name))
         }
     }
-    write(ZStack { Color(white: 0.05); ActivityCardView(activity: a) }, "activity-card.png", 290, 160)
-    write(ZStack {
-        Color(white: 0.05)
-        Circle().strokeBorder(.white.opacity(0.18), lineWidth: 1).frame(width: 88, height: 88)
-        ActivityNodesView(activity: a)
-    }, "activity-nodes.png", 200, 200)
-    FileHandle.standardError.write("wrote activity-card.png + activity-nodes.png\n".data(using: .utf8)!)
+    // Faux desktop backdrop so the glass has something to (approximately) refract.
+    let backdrop = LinearGradient(colors: [Color(.sRGB, red: 0.10, green: 0.08, blue: 0.18),
+                                           Color(.sRGB, red: 0.04, green: 0.05, blue: 0.10)],
+                                  startPoint: .topLeading, endPoint: .bottomTrailing)
+    write(ZStack { backdrop; ConsoleView(activity: a, bg: bg, hud: hud, approval: approval).environment(\.glassEnabled, false) },
+          "console.png", 420, 560)
+    FileHandle.standardError.write("wrote console.png\n".data(using: .utf8)!)
 }
 
 if let i = arguments.firstIndex(of: "--activitysnap"), i + 1 < arguments.count {
     MainActor.assumeIsolated { renderActivitySnaps(toDir: arguments[i + 1]) }
     exit(0)
+}
+
+// Dev tool: render the console with REAL Liquid Glass over a colorful backdrop in a normal
+// (capturable) full-screen window, screenshot it, and exit. This is the only way to SEE the true
+// .glassEffect (ImageRenderer can't draw it and the HUD panel is sharingType=.none). The opaque
+// fullscreen backdrop also means the screenshot shows only our content, not the user's screen.
+// Usage: KairosHUD --glasstest /tmp/glass.png
+if let i = arguments.firstIndex(of: "--glasstest"), i + 1 < arguments.count {
+    let out = arguments[i + 1]
+    MainActor.assumeIsolated { GlassTest.run(out: out) }
+    app.run()
 }
 
 let delegate = AppDelegate()

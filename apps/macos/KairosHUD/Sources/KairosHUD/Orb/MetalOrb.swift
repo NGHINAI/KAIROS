@@ -52,15 +52,18 @@ final class MetalOrb {
         }
     }
 
-    func uniforms(palette p: Palette, time: Float, level: Float, size: SIMD2<Float>, mode: Float = 0, baseAngle: Float = 1.5708, flip: Float = 1) -> OrbUniforms {
+    /// CPU-eased motion drivers. The shader composes the ring deformation from archetype weights:
+    /// cWarm.xy = amp, speed · cAccent = (breathe, pulse, travel, lobe) · cCool.x = jitter.
+    /// Color is generated entirely inside the shader's `sweep()`, so no palette here.
+    func uniforms(time: Float, level: Float, size: SIMD2<Float>, motion m: OrbMotion, baseAngle: Float = 1.5708, flip: Float = 1) -> OrbUniforms {
         var u = OrbUniforms()
         u.resolution = size
         u.time = time
         u.level = level
-        u.cWarm = p.g0.simd                        // 3 gradient colors (per state)
-        u.cAccent = p.g1.simd
-        u.cCool = p.g2.simd
-        u.cRim = SIMD4(baseAngle, flip, mode, 0)   // sweepRotation, handedness, state mode
+        u.cWarm = SIMD4(Float(m.amp), Float(m.speed), 0, 0)
+        u.cAccent = SIMD4(Float(m.breathe), Float(m.pulse), Float(m.travel), Float(m.lobe))
+        u.cCool = SIMD4(Float(m.jitter), 0, 0, 0)
+        u.cRim = SIMD4(baseAngle, flip, 0, 0)      // x=sweepRotation, y=handedness
         u.params = SIMD4(1.1, 0.44, 0.006, 0.0)    // bloom/exposure, ringRadius(leave margin for glow), coreWidth(LASER-thin), rotSpeed
         return u
     }
@@ -81,12 +84,12 @@ final class MetalOrb {
     }
 
     /// Headless: render to an offscreen texture and read back a PNG. No window/display needed.
-    func snapshotPNG(width: Int, height: Int, time: Float, level: Float, palette: Palette, clear: MTLClearColor, mode: Float = 0, baseAngle: Float = 1.5708, flip: Float = 1) -> Data? {
+    func snapshotPNG(width: Int, height: Int, time: Float, level: Float, motion: OrbMotion, clear: MTLClearColor, baseAngle: Float = 1.5708, flip: Float = 1) -> Data? {
         let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
         td.usage = [.renderTarget, .shaderRead]
         td.storageMode = .shared
         guard let tex = device.makeTexture(descriptor: td), let cmd = queue.makeCommandBuffer() else { return nil }
-        let u = uniforms(palette: palette, time: time, level: level, size: SIMD2(Float(width), Float(height)), mode: mode, baseAngle: baseAngle, flip: flip)
+        let u = uniforms(time: time, level: level, size: SIMD2(Float(width), Float(height)), motion: motion, baseAngle: baseAngle, flip: flip)
         encode(into: tex, clear: clear, uniforms: u, commandBuffer: cmd)
         cmd.commit()
         cmd.waitUntilCompleted()
