@@ -976,3 +976,222 @@ KEY INTERFACES WORTH COPYING:
 - https://github.com/leomariga/ProactiveAgent/blob/main/proactiveagent/sleep_time_calculators/README.md
 - https://github.com/leomariga/ProactiveAgent/blob/main/pyproject.toml
 - https://pypi.org/project/proactiveagent/
+
+---
+
+## 5. v2 ADDITIONS — locked with the user 2026-06-10 (supersedes §1 where they conflict)
+
+The doc above is the brain + the manners. v2 adds the HANDS AT SCALE. Governing doctrine:
+
+> **Unbounded silent industry, rationed attention.** Proactive WORK (watching, drafting,
+> chasing, preparing) is effectively unlimited and silent, governed only by budget.
+> Proactive INTERRUPTION stays brutally rationed through the gate stack. The "ONE
+> well-timed thing" rule governs *telling*, never *doing*.
+
+### 5.1 MANDATES — standing directives as maintained invariants (first-class, new)
+"From now on, make sure no email goes unanswered" is not an event rule and not an
+inferred concern — it is a **user-declared invariant KAIROS maintains forever**:
+- **Compile exchange** (one breath of voice): resolve scope/SLA/exceptions —
+  "Unanswered by you, older than a day, skipping newsletters — and I'll be replying
+  myself, in my voice as your assistant. Okay?" → `{invariant, scope, SLA, exceptions,
+  playbook, granted_autonomy}` stored in the Concern Canvas as kind:'mandate'.
+- **Autonomy = WARM-UP semantics (user-locked):** compile-confirm, then the first **3
+  executions are draft-and-propose**; after 3 accepts the mandate runs **fully
+  autonomous in scope** (including sends). Applies to any outbound/irreversible-class
+  mandate. ⚠️ This AMENDS §1's hard no-go "send in the user's name → always ask":
+  a warmed-up mandate IS the standing authorization (identity stays clearly-the-
+  assistant in signature/voice). Revocable any time by voice; every act → receipts.
+- **Violations spawn WORK, not notifications**: sweep checks each mandate's invariant →
+  violation → campaign/draft → pending store → morning brief (or reflex if urgent-floor).
+- **Exception learning**: "not newsletters, obviously" → JudgmentEvent → policy updated.
+- Generalizes orders/v2 OrdersAuthor from event-rules to invariants.
+
+### 5.2 SELF-PROVISIONING WATCHERS — KAIROS builds its own senses
+A mandate auto-provisions its own per-toolkit watcher: polling query + state snapshot +
+diff (riding the adaptive sweep), or a Composio trigger where push exists. memUBot's
+service-creator local-rules-first doctrine applies: **watchers filter ~99% for $0**
+(string/state diffs), LLM judges only the gray zone. Observation becomes dynamic and
+mandate-driven instead of a fixed observer list.
+
+### 5.3 PROACTIVE CAMPAIGNS — multi-sub-agent workflows owned by a concern
+A concern/mandate can own an orchestrated fan-out (parallel background sub-agents — the
+manager + nested spawn exist) and a multi-day pursuit plan the sweep advances each cycle
+with checkpoints + budget. Promoted from P5 into the core build: the hero multichain
+("Thursday demo at risk → Gmail nudge + Linear check-in + Calendar hold in ONE package")
+is a small campaign.
+
+### 5.4 THE PREDICTIVE TRIAD — three explicit speeds
+- **Reflex** (seconds): push events (Composio Pusher) → judged → spoken heads-up when
+  it clears the floor ("your accountant just replied — looks urgent").
+- **Pulse** (adaptive sweep, 10–60 min): mandate invariant checks, chase-detection,
+  drift, "anything need demanding?"
+- **Horizon** (look-ahead): calendar/deadline scan → **meeting-prep oracle**: meeting in
+  ~60 min → auto-brief (external company → researched dossier via webTools; candidate →
+  background; known person → Life-Graph recap + last threads), spoken + glance card at a
+  breakpoint. Near-free to build: calendar observer + background sub-agent + webTools.
+
+### 5.5 AMBIENT APPRENTICE — learns your job by watching (ship end-to-end, user-locked)
+"Constantly learning even when the user isn't talking to it": mine the USER's own
+repeated workflows from the observation stream (focus/clipboard/browser/files), not just
+KAIROS's tool trajectories (AwmWorker extension). Same Friday invoice dance 3× →
+"I've watched you do this three times — want me to take it from here?" → yes → becomes a
+mandate + crystallized skill. Privacy: local-only processing; default = opt-in at
+onboarding (open knob). Detection is cost-ladder cheap: n-gram/sequence mining over the
+event stream locally, LLM only to NAME and confirm a candidate workflow.
+
+### 5.6 PERSONA PLAYBOOKS — "proactive" is role-relative
+Onboarding asks the role; loads default mandates + predictive behaviors as a STARTING
+PRIOR the You-Policy then personalizes. **Beta personas (delegated, decided): primary =
+solo/small-startup founder; secondary = founding sales/AE** (highest buy-propensity +
+the X/LinkedIn virality audience; exec polish bar deferred). Playbooks: founder = inbox
+guard, investor-update chaser, meeting prep, calendar defense; sales = lead-response
+SLA, follow-up chains, CRM hygiene, pre-call briefs.
+
+### 5.7 UNIT ECONOMICS AS ARCHITECTURE (user-locked posture)
+Plan $15/mo, target ≥$8–10 margin → engineer to ~$5–7/mo COGS (~$0.20/day) WITHOUT
+quality loss. **Cost ladder: free-first (local rules/state diffs filter ~99%) →
+cheap-second (mini-model sweeps ~$0.03/day) → smart-last (drafts/briefs/campaign steps
+only).** `usageMeter` enforces per-plane budgets. Pricing posture: **generous plan
+limits; overage → purchase extra; BETA = unlimited** (still engineered cheap). When a
+budget floor is hit: degrade gracefully — free watching continues, LLM work queues to
+the overnight/morning batch, urgency floor still breaks through.
+
+### 5.8 TIME-BACK LEDGER — headlined (user-locked)
+Verify outcomes (did the reply land? did the nudge get an answer?) → estimate minutes
+saved per completed act → weekly spoken review + demo close: "6 hours back this week:
+23 emails handled, 4 briefs prepped, 2 workflows learned." Feeds self-grading + the
+trust ladder with evidence. The brand promise made measurable.
+
+### 5.9 LEGIBILITY + CONTROL
+"What are you keeping an eye on?" → spoken mandate/concern list with status. Pause /
+snooze / scope by voice ("only during work hours", "stop watching that"). Cheap
+(introspection-tool pattern over the Canvas), disproportionate trust payoff.
+
+### 5.10 WOW DEMO (beyond the three wows — the user wants bolder)
+Ship wows 1 (mandate) + 3 (apprentice) end-to-end regardless. Demo FRAMINGS over the
+same capabilities (pick per channel):
+- **A. "The Morning Shift" (flagship):** 7am, empty desk, the orb ALONE on screen
+  visibly working — guide-comet flying between apps as it acts, drafts materializing,
+  calendar blocks moving. 9am the founder sits down; KAIROS SPEAKS the brief; receipts
+  + time-back card. Contains all three wows. "My Mac starts work before I do."
+- **B. "Hired in 120 seconds":** onboarding-as-interview, first day compressed to 60s
+  of stacking receipts. "I hired a chief of staff for $15."
+- **C. "Don't touch the laptop" (one-take, authenticity):** phone films the founder
+  speaking a mandate to the orb, laptop closes, coffee; reopen — work done, receipt up.
+
+### 5.11 Build-order amendments
+P1 spine now includes the **Mandate store + compiler** (Canvas kind:'mandate') and the
+watcher-provisioner skeleton. P2 includes campaigns (not P5) + warm-up autonomy + the
+pending store. Meeting-prep oracle = an early P2 win (visible value, trivially cheap).
+Apprentice = P3-adjacent (its miner is observational, parallel to the You-Policy
+reducer). Time-back ledger = P2 receipts + P7 weekly review. Beta = P0+P1+P2 + the
+oracle + a slice of P3 (apprentice if it lands in time).
+
+---
+
+## 6. THE PERSONAL MODEL — how the graphs, canvases, and v2 fit together (2026-06-10)
+
+§5 added the hands; this section wires §5 into the doc's existing memory/graph machinery
+so there is ONE integrated architecture, not two designs side by side.
+
+### 6.1 One personal model, three layers (all linkable, one graph underneath)
+
+```
+┌─ LIFE GRAPH ──────────────── WHO / WHAT (entities) ────────────────────────┐
+│ people · companies · projects · threads · recurring meetings               │
+│ identity mappings ("[Name] ↔ [email/ID]" — GAIA extraction ladder #1)      │
+│ valid-time stamps (beliefs expire, never conflict — Zep bi-temporal idea)  │
+└──────────────────────────────────△──────────────────────────────────────────┘
+            edges: about / involves │ scoped-to
+┌─ CONCERN CANVASES ────────── WHAT MATTERS NOW ──────────────────────────────┐
+│ concerns + MANDATES + campaigns — each a GAIA 6-section markdown canvas:    │
+│ Key Details / Current State / Activity Log / Timeline / Context / Learnings │
+│ states-as-labels (waiting-for-reply · blocked · needs-follow-up)           │
+│ due_date vs expires_at · references[] · vector-indexed · soft-archive      │
+└──────────────────────────────────△──────────────────────────────────────────┘
+            edges: expects / learned-from │ supersedes / resolved-by
+┌─ MEMORY GRAPH (Vellum-shape) ─ EVERYTHING REMEMBERED + HOW YOU WANT IT ─────┐
+│ typed nodes: episodic · semantic · PROCEDURAL (apprentice skills) ·        │
+│   PROSPECTIVE (= our EXPECTATIONS) · BEHAVIORAL (= the You-Policy) ·       │
+│   emotional · narrative                                                     │
+│ edges: caused-by/contradicts/depends-on/part-of/supersedes/resolved-by     │
+│ TRIGGERS: temporal · semantic(cos≥0.7) · event(ramp 7d→1.0 day-of→decay)   │
+│ decay (Ebbinghaus @retrieval) · reinforcement(×1.5 stability) ·            │
+│ supersession-inherits-durability · RRF hybrid + weight profiles            │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 6.2 The integration discoveries (what re-reading the deep dives resolved)
+
+1. **EXPECTATIONS = prospective nodes + event triggers. Already specced.** Core loop 1's
+   "expectation slot" is not a new store: "Patel replies by Thu" is a PROSPECTIVE memory
+   node with an event trigger whose salience ramp (0.05 → 1.0 day-of → exp follow-up
+   decay) IS the right-time-to-care function, and extraction auto-creates the trigger
+   even when the LLM forgets (Vellum extraction.ts:728). **Surprise has two concrete
+   forms:** (a) a trigger reaches day-of salience with NO matching signal on the linked
+   concern's canvas → the dog didn't bark → violation; (b) an incoming signal CONTRADICTS
+   a node (contradicts edge) → novelty/correction → learn. The sweep evaluates both.
+2. **The Concern Canvas is the concern record; signal-match is the see→learn hook.**
+   Watchers (§5.2) write matched signals into the canvas Key-Details/Timeline (GAIA
+   doctrine: MATCH AND UPDATE ONLY, never create; Key-Details-only context, 5 lines/
+   concern, memoized per event). Campaigns write code-enforced ▶/✓/✗ Timeline markers
+   so runs leave evidence even if the LLM forgets. Mandates store {invariant, SLA,
+   scope, exceptions, playbook, warm-up state} in Key Details/Context.
+3. **The You-Policy is behavioral nodes SCOPED TO Life-Graph entities.** "Linear tickets
+   terse" = behavioral node scoped to a project entity; "Patel gets casual tone" =
+   behavioral scoped to a person. Per-person personalization (§5.6) is therefore an EDGE
+   PATTERN, not a new store. JudgmentEvents reinforce/supersede behavioral nodes
+   (supersession inherits earned durability — a changed mind doesn't reset trust).
+4. **Life Graph gets a THIN EARLY SLICE (P4 → P1/P2).** The meeting-prep oracle, per-
+   person policies, and mandate scoping all need entity nodes + identity mappings — but
+   only that. Pull `{entity nodes, [Name]↔[ID] mappings, about/involves edges}` into the
+   spine; full cross-toolkit resolution/enrichment stays P4. GAIA's extraction ladder
+   (1. identity mappings → 2. contacts → 3. resources → 4. procedures → 5. preferences)
+   is the Memory Reducer's rubric — note procedures rank ABOVE preferences.
+5. **The Apprentice writes PROCEDURAL nodes (stability 60) + skills.** A mined user
+   workflow = a procedural-node candidate whose reinforcementCount literally counts the
+   "watched you do it N times"; ≥3 → propose; accepted → mandate + crystallized skill
+   (AwmWorker). The PROCEDURAL retrieval weight profile (sem .45/sig .25) exists for
+   exactly this recall pattern.
+6. **Learnings → behavioral candidates.** GAIA's completion-only `## Learnings`
+   ("Sarah responds in 2-3 days" good; "went well" bad) harvested across references[]
+   feeds the Memory Reducer as behavioral/semantic candidates — institutional memory
+   with a quality bar, free of supersession complexity.
+7. **The morning brief = Vellum's HEARTBEAT.md checklist (user-editable!) + GAIA digest
+   batching** (warnings push individually; FYIs pool into ONE digest; single item →
+   deep link, multiple → list). The heartbeat's key design holds for us too: the run
+   itself NEVER sends — the model decides mid-turn whether anything clears the
+   notification chokepoint; silence is the default outcome, and every skip/suppress is
+   persisted with a reason (auditable restraint).
+8. **Restraint composition stays as specced in the steal-lists** — now explicitly one
+   stack: GAIA two-key escalating backoff (1/3/7d→30d mute; per-concern strikes compose
+   with global karma) + quiet-hours-DEFER (no strike burned overnight) + single-token-
+   prefix health checks under a hard per-sweep LLM budget (= §5.7's cost ladder) +
+   Vellum deterministic post-LLM checks (dedupeKey 1h window, visibleInSourceNow
+   suppression, copy-quality block) + the preference-extractor so quiet hours/channels/
+   urgency floors are LEARNED, not config.
+
+### 6.3 One mandate, fully wired (the integration test in prose)
+"From now on, no email goes unanswered" → mandate canvas created (Key Details: SLA 24h,
+exceptions: newsletters; warm-up 0/3) → watcher provisioned (inbox-state diff, local-
+first) → each violating thread: entity node resolved/created for the sender (Life
+Graph), PROSPECTIVE node "reply needed on thread X" + event trigger created → campaign
+drafts the reply in the user's voice (behavioral nodes scoped to that sender shape the
+tone) → warm-up: first 3 → pending store + morning brief; after 3 accepts → autonomous
+sends → each act: ▶/✓ Timeline markers + activity_events + ledger minutes + JudgmentEvent
+→ reducer reinforces "auto-reply OK for this class", learns exceptions → trigger
+resolved-by edge closes the prospective node. Every layer of the model touched; nothing
+bolted on.
+
+### 6.4 Build-order integration (amends §5.11)
+- **P1 spine** = Concern Canvas store (6-section, states-as-labels, due/expires) +
+  mandate compiler + watcher-provisioner skeleton + **memory-graph core: node/edge/
+  trigger tables with behavioral + prospective types** + Life-Graph thin slice (entity
+  nodes + identity mappings). The reflection sweep evaluates triggers + canvases.
+- **P2** += campaigns + warm-up autonomy + pending store + oracle (reads entity node +
+  linked memories) + receipts; signal-match wiring watcher→canvas.
+- **P3** = Memory Reducer (extraction rubric = GAIA ladder; reconsolidation rules =
+  Vellum verbatim) + JudgmentEvents + decision-time injection (weight profiles).
+- **P4** = Life Graph FULL (cross-toolkit resolution, enrichment, bi-temporal).
+- Decay/reinforcement/supersession mechanics: adopt Vellum's numbers as defaults
+  (stability 14/proc 60, ×1.5 reinforce, fidelity ladder, Ebbinghaus-at-retrieval).
