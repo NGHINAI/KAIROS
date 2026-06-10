@@ -9,6 +9,12 @@ export type StreamingSpeakerDeps = {
   backend: Pick<SayBackend, 'speak' | 'stop'>
   voice?: string
   rate?: number
+  /** Speech-envelope signal: fires true when the FIRST phrase of an utterance starts
+   *  synthesizing, false when the speaker is fully idle again (drained or cancelled).
+   *  This is the SPEECH-level signal UI state wants — per-phrase tts_begin/tts_end
+   *  made the orb strobe at every sentence boundary. Synthesis-level (audio playback
+   *  in the renderer may lag); the SpeakingStateTracker overlays renderer truth. */
+  onSpeaking?: (speaking: boolean) => void
 }
 
 export class StreamingSpeaker {
@@ -16,8 +22,40 @@ export class StreamingSpeaker {
   private queue: string[] = []
   private draining = false
   private cancelled = false
+  private speaking: string | null = null   // the phrase currently mid-TTS
+  private envelopeActive = false           // speech-envelope state (for onSpeaking)
 
   constructor(private deps: StreamingSpeakerDeps) {}
+
+  private setEnvelope(active: boolean): void {
+    if (this.envelopeActive === active) return
+    this.envelopeActive = active
+    try { this.deps.onSpeaking?.(active) } catch { /* UI signal must never break speech */ }
+  }
+
+  /** Chars not yet finished speaking: pending buffer + queued phrases + the phrase
+   *  currently mid-TTS. The supersede path uses this to tell a nearly-finished tail
+   *  (let it drain) from a long in-flight reply (cancel = real interrupt). */
+  remaining(): number {
+    return this.buf.length
+      + this.queue.reduce((n, p) => n + p.length, 0)
+      + (this.speaking?.length ?? 0)
+  }
+
+  /** Wait (capped) for the queue to finish NATURALLY — no new feeds expected.
+   *  Returns true if fully idle within the cap; false means the caller should cancel. */
+  async drainQuietly(capMs: number): Promise<boolean> {
+    const t0 = Date.now()
+    while ((this.draining || this.queue.length > 0 || this.buf.trim()) && Date.now() - t0 < capMs) {
+      // Flush a punctuation-less tail so a final fragment ("got it") still gets spoken.
+      if (!this.draining && this.queue.length === 0 && this.buf.trim()) {
+        this.queue.push(this.buf.trim()); this.buf = ''
+        void this.maybeDrainQueue()
+      }
+      await new Promise((r) => setTimeout(r, 25))
+    }
+    return !this.draining && this.queue.length === 0 && !this.buf.trim()
+  }
 
   /** Start a fresh utterance — clears the cancelled latch from a prior barge-in.
    *  MUST be called before feed()/end() for each new reply, otherwise a single
@@ -51,7 +89,9 @@ export class StreamingSpeaker {
     this.cancelled = true
     this.queue = []
     this.buf = ''
+    this.speaking = null   // the mid-TTS phrase is being stopped — it's no longer pending
     try { this.deps.backend.stop() } catch { /* swallow */ }
+    this.setEnvelope(false)
   }
 
   /** Wait for the queue to fully drain (after end() is called). */
@@ -84,10 +124,20 @@ export class StreamingSpeaker {
     try {
       while (this.queue.length > 0 && !this.cancelled) {
         const phrase = this.queue.shift()!
-        await this.deps.backend.speak(phrase, { voice: this.deps.voice, rate: this.deps.rate })
+        this.speaking = phrase
+        this.setEnvelope(true)   // speech has audibly started (first phrase of this utterance)
+        try {
+          await this.deps.backend.speak(phrase, { voice: this.deps.voice, rate: this.deps.rate })
+        } finally {
+          this.speaking = null
+        }
       }
     } finally {
       this.draining = false
+      // Fully idle (nothing queued, no partial buffer waiting on a boundary) → envelope down.
+      // A pending buffer means more phrases are coming — keep the envelope up so the orb
+      // doesn't dip between sentences of one reply.
+      if (this.queue.length === 0 && !this.buf.trim()) this.setEnvelope(false)
     }
   }
 }

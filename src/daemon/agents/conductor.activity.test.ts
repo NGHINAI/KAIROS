@@ -9,10 +9,11 @@ afterEach(() => setToolNature(null))
 
 const classifySmart = { complete: async () => ({ text: '{"tier":"smart","reason":"x","confidence":0.9}' }) }
 const stub = { complete: async () => ({ text: "" }) }
+const front = { complete: async () => ({ text: "[[task]]" }) }   // fast-front routes to the planner
 const ctx = { build: async () => ({ system: "SYS", tools: [] as any[] }) }
 
 function conductorWith(recorder: { record: (e: any) => void }, runPlanner: PlannerRunner) {
-  return new Conductor({ classifyLlm: classifySmart, fastLlm: stub, smartLlm: stub, tools: [], contextBuilder: ctx as any, onEvent: () => {}, runPlanner, activity: recorder })
+  return new Conductor({ classifyLlm: classifySmart, fastLlm: front, smartLlm: stub, tools: [], contextBuilder: ctx as any, onEvent: () => {}, runPlanner, activity: recorder })
 }
 
 test("a write-tool turn is recorded as an 'action' with the effective tool + refs", async () => {

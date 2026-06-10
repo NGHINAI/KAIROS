@@ -37,7 +37,7 @@ test("REGRESSION: 'reply to that same email' receives the prior turn's threadId 
 
   const conductor = new Conductor({
     classifyLlm: classifySmart,
-    fastLlm: stubLlm(),
+    fastLlm: stubLlm("[[task]]"),
     smartLlm: stubLlm(),
     tools: [],
     contextBuilder: stubContext as any,
@@ -65,7 +65,7 @@ test("a smart turn triggers the off-hot-path rolling-summary update", async () =
   let summaryUpdated = false
   const runPlanner: PlannerRunner = async () => ({ finalOutput: "done", toolCalls: [] })
   const c = new Conductor({
-    classifyLlm: classifySmart, fastLlm: stubLlm(), smartLlm: stubLlm(), tools: [], contextBuilder: stubContext as any, onEvent: () => {}, runPlanner,
+    classifyLlm: classifySmart, fastLlm: stubLlm("[[task]]"), smartLlm: stubLlm(), tools: [], contextBuilder: stubContext as any, onEvent: () => {}, runPlanner,
     conversationMessages: {
       loadForReplay: (id, o) => msgStore.loadForReplay(id, o),
       appendTurn: (id, t, m) => msgStore.appendTurn(id, t, m),
@@ -85,7 +85,7 @@ test("rolling summary suppressed when KAIROS_CONV_SUMMARY=0", async () => {
     let updated = false
     const runPlanner: PlannerRunner = async () => ({ finalOutput: "done", toolCalls: [] })
     const c = new Conductor({
-      classifyLlm: classifySmart, fastLlm: stubLlm(), smartLlm: stubLlm(), tools: [], contextBuilder: stubContext as any, onEvent: () => {}, runPlanner,
+      classifyLlm: classifySmart, fastLlm: stubLlm("[[task]]"), smartLlm: stubLlm(), tools: [], contextBuilder: stubContext as any, onEvent: () => {}, runPlanner,
       conversationMessages: { loadForReplay: (id, o) => msgStore.loadForReplay(id, o), appendTurn: (id, t, m) => msgStore.appendTurn(id, t, m), updateRollingSummary: async () => { updated = true } },
     })
     await c.handle({ conversationId: "c4", utterance: "do it" })
@@ -109,7 +109,7 @@ test("replay is suppressed when KAIROS_CONV_REPLAY=0", async () => {
       captured = opts.history
       return { finalOutput: "ok", toolCalls: [] }
     }
-    const c = new Conductor({ classifyLlm: classifySmart, fastLlm: stubLlm(), smartLlm: stubLlm(), tools: [], contextBuilder: stubContext as any, onEvent: () => {}, runPlanner, conversationMessages: msgStore })
+    const c = new Conductor({ classifyLlm: classifySmart, fastLlm: stubLlm("[[task]]"), smartLlm: stubLlm(), tools: [], contextBuilder: stubContext as any, onEvent: () => {}, runPlanner, conversationMessages: msgStore })
     await c.handle({ conversationId: "c2", utterance: "send it" })
     await c.handle({ conversationId: "c2", utterance: "reply" })
     expect(captured ?? []).toEqual([])  // no replay history passed

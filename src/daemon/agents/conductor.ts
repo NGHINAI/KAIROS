@@ -12,7 +12,7 @@ import { fastMax } from "./tokenBudget"
 import { StreamSpeechController, type SpeakSink } from "./streamSpeechController"
 import { pickAck, pickFiller, describeAction } from "./fillerBank"
 import { isDestructiveCall } from "./loop/verifier"
-import { sanitizeSpoken } from "./spokenSanitizer"
+import { sanitizeSpoken, SpokenStreamFilter } from "./spokenSanitizer"
 import type { AgentEventHandler, ConductorOpts, Tier, ToolDef } from "./types"
 import type { LoopEvent, LoopMsg } from "./loop/types"
 
@@ -48,6 +48,15 @@ export interface ConductorDeps {
   classifyLlm: { complete: (body: any) => Promise<{ text: string }> }
   fastLlm:     { complete: (body: any) => Promise<{ text: string }> }
   smartLlm:    { complete: (body: any) => Promise<{ text: string }> }
+  /** Deep/thinking model for the [[think]] route (sync hard reasoning, time-capped).
+   *  Absent → [[think]] falls back to the planner. */
+  thinkLlm?:   { complete: (body: any) => Promise<{ text: string }> }
+  /** STREAMING deep-tier completer for [[think]] (OpenRouterAdapter.stream-shaped).
+   *  When present (and streamSink is wired), think answers stream sentence-by-sentence
+   *  to the speaker — the whole-answer cap becomes a FIRST-TOKEN deadline, so hard
+   *  questions get answered LIVE instead of converting to background. The body gets a
+   *  `signal` for cancellation. Absent → the blocking time-capped path. */
+  thinkStream?: (body: any) => AsyncIterable<{ kind: string; text?: string; message?: string }>
   tools: ToolDef[]
   contextBuilder: ContextBuilder
   onEvent: AgentEventHandler
@@ -104,51 +113,15 @@ export class Conductor {
 
     try {
       console.log(`[conductor] handle ENTER: utterance="${utterance.slice(0, 80)}"`)
-      if (signal?.aborted) { console.log('[conductor] aborted before classify'); emit({ kind: "agent_interrupted" }); return }
+      if (signal?.aborted) { console.log('[conductor] aborted before route'); emit({ kind: "agent_interrupted" }); return }
 
-      // 1. Classify — give the router recent context so short replies ("yes",
-      // "do it") route to the tier the pending action needs, not a blind "fast".
-      let recentContext: string | undefined
-      if (this.deps.conversationStore && conversationId) {
-        try {
-          const turns = await this.deps.conversationStore.recentTurns(conversationId, 2)
-          if (turns.length > 0) {
-            recentContext = turns.map((t) => `${t.role === "agent" ? "KAIROS" : "user"}: ${t.text}`).join("\n")
-          }
-        } catch { /* router context is best-effort */ }
-      }
-      const decision = await classifyIntent(utterance, { llm: this.deps.classifyLlm, recentContext })
-      console.log(`[conductor] classified: tier=${decision.tier} reason="${decision.reason}" confidence=${decision.confidence}`)
-      emit({ kind: "agent_intent", tier: decision.tier, reason: decision.reason })
-      if (signal?.aborted) { console.log('[conductor] aborted after classify'); emit({ kind: "agent_interrupted" }); return }
-
-      // 2. Build context for the chosen tier. Pass conversationId so the builder
-      // injects recent turns + relevant memory (without it, build() returns only
-      // the static prefix → the agent has no short-term memory of the conversation).
-      const ctx = await this.deps.contextBuilder.build({ utterance, tier: decision.tier, conversationId })
-      console.log(`[conductor] context built: system.length=${ctx.system.length} tools=${ctx.tools.length}`)
-      if (signal?.aborted) { console.log('[conductor] aborted after context'); emit({ kind: "agent_interrupted" }); return }
-
-      // 3. Route. Each handler now owns its own SPEAKING (fast: speak-at-end;
-      // smart: live streaming via the StreamSpeechController) so the smart tier
-      // can talk as it generates instead of dead-air-then-dump.
-      if (decision.tier === "fast") {
-        console.log('[conductor] -> handleFast')
-        await this.handleFast(utterance, ctx, emit, signal, conversationId)
-      } else if (decision.tier === "smart") {
-        console.log('[conductor] -> handleSmart')
-        await this.handleSmart(opts, ctx, emit)
-      } else if (decision.tier === "vision") {
-        // Vision/screen tasks need tools (screenshot, computer-use) → the planner,
-        // NOT the tool-less fast path (which would hallucinate about the screen).
-        console.log('[conductor] -> vision (route to smart/planner)')
-        await this.handleSmart(opts, ctx, emit)
-      } else if (decision.tier === "deep") {
-        // Deep = hard multi-step reasoning → the tool-capable planner.
-        console.log('[conductor] -> deep (route to smart/planner)')
-        await this.handleSmart(opts, ctx, emit)
+      // FAST-FRONT (default): the fast model IS the router — it answers chit-chat directly or
+      // routes via a [[task]]/[[think]] directive. The pre-classifier LLM call is out of the hot
+      // path. KAIROS_CLASSIC_ROUTER=1 restores the old classify→route flow.
+      if (process.env.KAIROS_CLASSIC_ROUTER === "1") {
+        await this.classicFlow(opts, emit)
       } else {
-        console.log(`[conductor] !!! unknown tier "${decision.tier}" — no handler fired`)
+        await this.frontFlow(opts, emit)
       }
 
       console.log('[conductor] handle EXIT (normal)')
@@ -188,6 +161,343 @@ export class Conductor {
     }
   }
 
+  /** LEGACY router: classify with a separate LLM call, then route by tier. Kept behind
+   *  KAIROS_CLASSIC_ROUTER=1 as the escape hatch for the fast-front collapse. */
+  private async classicFlow(opts: ConductorOpts, emit: AgentEventHandler): Promise<void> {
+    const { utterance, signal, conversationId } = opts
+    let recentContext: string | undefined
+    if (this.deps.conversationStore && conversationId) {
+      try {
+        const turns = await this.deps.conversationStore.recentTurns(conversationId, 2)
+        if (turns.length > 0) {
+          recentContext = turns.map((t) => `${t.role === "agent" ? "KAIROS" : "user"}: ${t.text}`).join("\n")
+        }
+      } catch { /* router context is best-effort */ }
+    }
+    const decision = await classifyIntent(utterance, { llm: this.deps.classifyLlm, recentContext })
+    console.log(`[conductor] classified: tier=${decision.tier} reason="${decision.reason}" confidence=${decision.confidence}`)
+    emit({ kind: "agent_intent", tier: decision.tier, reason: decision.reason })
+    if (signal?.aborted) { console.log('[conductor] aborted after classify'); emit({ kind: "agent_interrupted" }); return }
+
+    const ctx = await this.deps.contextBuilder.build({ utterance, tier: decision.tier, conversationId })
+    console.log(`[conductor] context built: system.length=${ctx.system.length} tools=${ctx.tools.length}`)
+    if (signal?.aborted) { console.log('[conductor] aborted after context'); emit({ kind: "agent_interrupted" }); return }
+
+    if (decision.tier === "fast") {
+      console.log('[conductor] -> handleFast')
+      await this.handleFast(utterance, ctx, emit, signal, conversationId)
+    } else {
+      // smart / vision / deep all need tools → the planner.
+      console.log(`[conductor] -> handleSmart (${decision.tier})`)
+      await this.handleSmart(opts, ctx, emit)
+    }
+  }
+
+  /** FAST-FRONT: one fast completion that either ANSWERS (chit-chat, acks, context-answerable)
+   *  or ROUTES by emitting a directive on its first line —
+   *    [[task]]  → the smart planner (tools), this turn
+   *    [[think]] → the deep/thinking model, synchronous, time-capped (→ background on timeout)
+   *  An optional short say-line after the directive is spoken immediately (latency mask).
+   *  The decision is biased toward routing: the front has NO tools, so it cannot act — at worst
+   *  a mis-route costs maskable latency, never a confidently-wrong "I did it". */
+  private async frontFlow(opts: ConductorOpts, emit: AgentEventHandler): Promise<void> {
+    const { utterance, signal, conversationId } = opts
+
+    const ctx = await this.deps.contextBuilder.build({ utterance, tier: "fast", conversationId })
+    if (signal?.aborted) { emit({ kind: "agent_interrupted" }); return }
+
+    // Recent turns as real messages so follow-ups ("yes", "the second one") route correctly.
+    const recent: Array<{ role: string; content: string }> = []
+    if (this.deps.conversationStore && conversationId) {
+      try {
+        const turns = await this.deps.conversationStore.recentTurns(conversationId, 4)
+        for (const t of turns) recent.push({ role: t.role === "agent" ? "assistant" : "user", content: t.text })
+      } catch { /* best-effort */ }
+    }
+
+    const resp = await this.deps.fastLlm.complete({
+      messages: [
+        { role: "system", content: ctx.system + FRONT_ADDENDUM },
+        ...recent,
+        { role: "user", content: utterance },
+      ],
+      max_tokens: fastMax(200),
+    })
+    if (signal?.aborted) { emit({ kind: "agent_interrupted" }); return }
+
+    const { route, say } = parseFrontDirective(resp.text ?? "")
+    console.log(`[conductor] front route=${route}${say ? ` say="${say.slice(0, 40)}"` : ""}`)
+
+    if (route === "task") {
+      emit({ kind: "agent_intent", tier: "smart", reason: "front: needs tools/actions" })
+      // ALWAYS speak something before the planner starts — a turn with no tool calls (e.g. a
+      // clarifying question) otherwise has dead air for its whole generation, and users re-ask
+      // into the silence, superseding the turn (the 00:33/00:34 silent-turn bug, 2026-06-10).
+      await this.speakInterim(ackOnly(say) ?? nextTaskAck(), signal)
+      const smartCtx = await this.deps.contextBuilder.build({ utterance, tier: "smart", conversationId })
+      if (signal?.aborted) { emit({ kind: "agent_interrupted" }); return }
+      await this.handleSmart(opts, smartCtx, emit)
+      return
+    }
+
+    if (route === "think") {
+      emit({ kind: "agent_intent", tier: "deep", reason: "front: hard reasoning" })
+      const smartCtx = await this.deps.contextBuilder.build({ utterance, tier: "smart", conversationId })
+      if (signal?.aborted) { emit({ kind: "agent_interrupted" }); return }
+      if (!this.deps.thinkLlm) {
+        // No dedicated thinking model wired → the planner is the next-best reasoner.
+        await this.speakInterim(ackOnly(say), signal)
+        await this.handleSmart(opts, smartCtx, emit)
+        return
+      }
+      // smartCtx carries the TOOLS (spawn_background_task for the timeout conversion /
+      // planner fallback); the SLIM fast system prompt is what the think model reads —
+      // think is tool-less, and a big prefill multiplies a reasoning model's silent
+      // thinking time (live: 12s+ of no first token on the full smart prompt vs ~3s slim).
+      await this.handleThink(opts, smartCtx, emit, say, ctx.system)
+      return
+    }
+
+    // answer_now — the front's own reply (tool-less by construction, so it can't claim actions).
+    emit({ kind: "agent_intent", tier: "fast", reason: "front: answered directly" })
+    const text = sanitizeReply(stripFrontDirectives(resp.text ?? "")) || "Sorry, I didn't catch that — could you say it again?"
+    emit({ kind: "agent_done", text })
+    if (this.deps.speakBackend && !signal?.aborted) {
+      try { await this.deps.speakBackend.speak(text) } catch (err) { console.log(`[conductor] front speak error: ${(err as Error).message}`) }
+    }
+    await this.persistPlainTurn(conversationId, utterance, text)
+  }
+
+  /** [[think]]: answer with the deep/thinking model. STREAMING (default when wired):
+   *  sentence-by-sentence to the speaker — the cap is a FIRST-TOKEN deadline, so once
+   *  the answer starts it runs to completion masked by its own audio. BLOCKING
+   *  (fallback): whole answer under a hard time cap. Either way, no answer in time →
+   *  convert to a background task ("I'll get back to you") rather than leave dead air. */
+  private async handleThink(
+    opts: ConductorOpts,
+    ctx: { system: string; tools: ToolDef[] },
+    emit: AgentEventHandler,
+    say: string | undefined,
+    slimSystem?: string,
+  ): Promise<void> {
+    const { utterance, signal, conversationId } = opts
+    emit({ kind: "agent_planning", tier: "deep" })
+
+    const capMs = Number(process.env.KAIROS_THINK_TIMEOUT_MS) || 12000
+
+    if (this.deps.thinkStream && this.deps.streamSink) {
+      // Streaming gets its OWN first-token deadline: once audio starts, answer length is
+      // free, so waiting longer for the first token is cheap (fillers cover it) and saves
+      // far more value than it costs — a converted-to-background think loses the live answer.
+      // 30s default: minimax-m3's first content token is HIGHLY variable (measured 3s and
+      // 24s on the same slim prompt) — 20s converted too many thinks that were almost ready.
+      const firstTokenMs = Number(process.env.KAIROS_THINK_FIRST_TOKEN_MS) || Math.max(capMs, 30000)
+      const outcome = await this.streamThink(opts, { system: slimSystem ?? ctx.system, tools: ctx.tools }, emit, say, firstTokenMs)
+      if (outcome !== "no_answer") return
+      if (signal?.aborted) { emit({ kind: "agent_interrupted" }); return }
+      return this.convertThinkToBackground(opts, ctx, emit)
+    }
+
+    // ── Blocking fallback (no streaming completer wired) ──
+    await this.speakInterim(ackOnly(say) ?? "Good question — give me a second to think.", signal)
+    const thinkPromise = this.deps.thinkLlm!.complete({
+      messages: [
+        { role: "system", content: ctx.system + THINK_MODE_ADDENDUM },
+        { role: "user", content: utterance },
+      ],
+      max_tokens: Number(process.env.KAIROS_THINK_MAX_TOKENS) || 1600,
+    })
+
+    // Mid-wait filler so a longer think never feels like dead air (only when the cap allows it).
+    const fillerTimer = capMs >= 9000
+      ? setTimeout(() => {
+          if (!signal?.aborted && this.deps.speakBackend) {
+            void this.deps.speakBackend.speak("Still thinking — one more moment.").catch(() => { /* */ })
+          }
+        }, 5000)
+      : null
+
+    let answer: string | null = null
+    try {
+      const r = await Promise.race([
+        thinkPromise,
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error("think timeout")), capMs)),
+      ])
+      answer = sanitizeReply(r.text) || null
+    } catch { answer = null }
+    finally { if (fillerTimer) clearTimeout(fillerTimer) }
+
+    if (signal?.aborted) { emit({ kind: "agent_interrupted" }); return }
+
+    if (answer) {
+      emit({ kind: "agent_done", text: answer })
+      if (this.deps.speakBackend && !signal?.aborted) {
+        try { await this.deps.speakBackend.speak(answer) } catch { /* */ }
+      }
+      await this.persistPlainTurn(conversationId, utterance, answer)
+      return
+    }
+
+    return this.convertThinkToBackground(opts, ctx, emit)
+  }
+
+  /** STREAMING think: fire the deep request first (the ack line then masks model
+   *  startup), pipe content deltas through the SpokenStreamFilter into the shared
+   *  streaming speaker, and persist/emit the full answer at the end. Reasoning models
+   *  think silently (reasoning tokens are excluded upstream), so the first CONTENT
+   *  delta is the "answer started" signal the deadline gates on. Once speech begins
+   *  the answer runs to completion under a generous hard wall (KAIROS_THINK_HARD_CAP_MS). */
+  private async streamThink(
+    opts: ConductorOpts,
+    ctx: { system: string; tools: ToolDef[] },
+    emit: AgentEventHandler,
+    say: string | undefined,
+    firstTokenMs: number,
+  ): Promise<"spoken" | "interrupted" | "no_answer"> {
+    const { utterance, signal, conversationId } = opts
+    const sink = this.deps.streamSink!
+    const hardCapMs = Number(process.env.KAIROS_THINK_HARD_CAP_MS) || 60000
+
+    // Local controller: a first-token timeout cancels the PROVIDER stream without
+    // aborting the whole turn (the background conversion still needs to run).
+    const local = new AbortController()
+    const onAbort = () => { try { local.abort() } catch { /* */ } }
+    if (signal?.aborted) onAbort()
+    else signal?.addEventListener?.("abort", onAbort, { once: true })
+
+    const filter = new SpokenStreamFilter()
+    let raw = ""
+    let began = false
+
+    // Lazy generators only fire the fetch on the first next() — prefetch it NOW so the
+    // model starts thinking while the ack line is still being spoken.
+    const iter = this.deps.thinkStream!({
+      messages: [
+        { role: "system", content: ctx.system + THINK_MODE_ADDENDUM },
+        { role: "user", content: utterance },
+      ],
+      max_tokens: Number(process.env.KAIROS_THINK_MAX_TOKENS) || 1600,
+      signal: local.signal,
+    })[Symbol.asyncIterator]()
+    let pending = iter.next()
+
+    const firstTokenTimer = setTimeout(() => { if (!began) local.abort() }, firstTokenMs)
+    const hardTimer = setTimeout(() => local.abort(), hardCapMs)
+    // Mid-wait fillers ONLY before speech begins — once the answer streams, the audio
+    // itself is the liveness signal. Two beats so a long think stays conversational.
+    const fillerTimers: Array<ReturnType<typeof setTimeout>> = []
+    if (firstTokenMs >= 9000) {
+      for (const [delay, line] of [
+        [5000, "Still thinking — one more moment."],
+        [13000, "Almost there."],
+        [22000, "This one's worth thinking through properly — bear with me."],
+      ] as const) {
+        if (delay < firstTokenMs - 1000) {
+          fillerTimers.push(setTimeout(() => {
+            if (!began && !signal?.aborted && this.deps.speakBackend) {
+              void this.deps.speakBackend.speak(line).catch(() => { /* */ })
+            }
+          }, delay))
+        }
+      }
+    }
+
+    await this.speakInterim(ackOnly(say) ?? "Good question — give me a second to think.", signal)
+
+    try {
+      while (true) {
+        const r = await pending
+        if (r.done) break
+        pending = iter.next()
+        if (signal?.aborted) break
+        const e = r.value
+        if (e.kind === "delta" && e.text) {
+          raw += e.text
+          const safe = filter.push(e.text)
+          if (safe) {
+            if (!began) { began = true; sink.begin() }
+            sink.feed(safe)
+            emit({ kind: "agent_delta", text: safe })
+          }
+        } else if (e.kind === "error") {
+          console.log(`[conductor] think stream error: ${e.message ?? "unknown"}`)
+          break
+        }
+      }
+    } catch { /* aborted/transport — resolved via `began` below */ }
+    finally {
+      clearTimeout(firstTokenTimer)
+      clearTimeout(hardTimer)
+      for (const t of fillerTimers) clearTimeout(t)
+      try { signal?.removeEventListener?.("abort", onAbort) } catch { /* */ }
+      try { iter.return?.() } catch { /* */ }
+    }
+
+    if (signal?.aborted) {
+      try { sink.cancel() } catch { /* */ }
+      emit({ kind: "agent_interrupted" })
+      return "interrupted"
+    }
+
+    if (!began) return "no_answer"   // never started answering — hand off to background
+
+    try { const tail = filter.flush(); if (tail) sink.feed(tail) } catch { /* */ }
+    try { await sink.end() } catch { /* */ }
+
+    const answer = sanitizeReply(raw) || "Sorry — I lost my train of thought there. Ask me again?"
+    emit({ kind: "agent_done", text: answer })
+    await this.persistPlainTurn(conversationId, utterance, answer)
+    return "spoken"
+  }
+
+  /** Think didn't produce an answer in time → hand it to the background lane and say so.
+   *  The goal is the user's OWN question verbatim — it gets echoed in the spoken report
+   *  ("Done with …"), so it must sound human, never like an internal prompt. */
+  private async convertThinkToBackground(
+    opts: ConductorOpts,
+    ctx: { system: string; tools: ToolDef[] },
+    emit: AgentEventHandler,
+  ): Promise<void> {
+    const { utterance, signal } = opts
+    const spawn = ctx.tools.find((t) => t.name === "spawn_background_task")
+    if (spawn) {
+      try { await spawn.execute({ goal: utterance }) } catch { /* */ }
+      const line = "This is taking me a moment — I'll work on it and get back to you."
+      emit({ kind: "agent_done", text: line })
+      if (this.deps.speakBackend && !signal?.aborted) { try { await this.deps.speakBackend.speak(line) } catch { /* */ } }
+    } else {
+      // No background lane available → planner is the last resort.
+      await this.handleSmart(opts, ctx, emit)
+    }
+  }
+
+  /** Persist a tool-less turn so the replay transcript stays continuous, and kick the
+   *  layered-history compaction (digests + rolling summary) OFF the hot path — fast
+   *  chit-chat turns age out of the raw window too, and without this a chatty
+   *  conversation never built its L1/L2 layers (only smart turns compacted). */
+  private async persistPlainTurn(conversationId: string | undefined, utterance: string, answer: string): Promise<void> {
+    if (!this.deps.conversationMessages || !conversationId) return
+    try {
+      await this.deps.conversationMessages.appendTurn(conversationId, `turn_${Date.now().toString(36)}`, [
+        { role: "user", content: utterance },
+        { role: "assistant", content: answer },
+      ])
+    } catch { /* persistence is best-effort */ }
+    if (process.env.KAIROS_CONV_SUMMARY !== "0" && this.deps.conversationMessages.updateRollingSummary) {
+      void this.deps.conversationMessages
+        .updateRollingSummary(conversationId, (text) => this.summarizeConversation(text))
+        .catch(() => { /* summary is best-effort */ })
+    }
+  }
+
+  /** Speak a short, fact-free interim line (the latency mask) — sanitized, never blocking errors. */
+  private async speakInterim(say: string | undefined, signal?: AbortSignal): Promise<void> {
+    if (!say || !this.deps.speakBackend || signal?.aborted) return
+    const line = sanitizeSpoken(say).slice(0, 120)
+    if (!line) return
+    try { await this.deps.speakBackend.speak(line) } catch { /* interim must never break the turn */ }
+  }
+
   private async handleFast(
     utterance: string,
     ctx: { system: string; tools: ToolDef[] },
@@ -213,9 +523,7 @@ export class Conductor {
     }
     // Persist the (tool-less) turn so the replay transcript stays continuous — a
     // "thank you / got it" between two action turns shouldn't leave a hole.
-    if (this.deps.conversationMessages && conversationId) {
-      try { await this.deps.conversationMessages.appendTurn(conversationId, `turn_${Date.now().toString(36)}`, [{ role: "user", content: utterance }, { role: "assistant", content: text }]) } catch { /* best-effort */ }
-    }
+    await this.persistPlainTurn(conversationId, utterance, text)
   }
 
   private async handleSmart(
@@ -396,6 +704,11 @@ export class Conductor {
   }
 }
 
+const THINK_MODE_ADDENDUM =
+  "\n\n## Think mode\nReason carefully, then answer the user directly and completely. " +
+  "You have NO tools — never claim to have looked anything up or done anything. " +
+  "Plain spoken prose only — conversational, focused, no headings or lists."
+
 const CONVERSATION_SUMMARY_PROMPT =
   "You are maintaining a running memory of a voice conversation so it can be remembered after the recent turns scroll off. " +
   "Given the existing summary (if any) plus the newer earlier turns, write an updated, compact summary. " +
@@ -470,6 +783,84 @@ function safeStringify(v: any): string { try { return JSON.stringify(v ?? {}) } 
 // shared with the background report + the live delta stream so all three can't drift.
 const sanitizeReply = sanitizeSpoken
 
+// ── Fast-front routing (the collapse: the fast model IS the router) ──────────────────
+// Appended to the fast system prompt. The grammar is tiny on purpose — a weak model
+// reliably handles "first line = one of two tokens", where free-form JSON would drift.
+const FRONT_ADDENDUM = `
+
+## Routing (you are the front of the assistant)
+You have NO tools and cannot look anything up, check anything, or take any action yourself.
+- If the message is small talk, a quick acknowledgment, an opinion, or fully answerable from the conversation above — just reply normally (1–2 short spoken sentences).
+- Otherwise route it by starting your reply with a directive as the FIRST thing:
+  [[task]] — anything involving the user's apps, data, or the outside world (email, calendar, messages, files, search, screen, "do X", "check Y"), or any multi-step work.
+  [[think]] — a genuinely hard reasoning question answerable by pure thought alone (analysis, tradeoffs, math, judgment) with no lookups needed. If the user EXPLICITLY asks for careful thought ("think it through", "think hard", "reason about"), always route [[think]] — honor the ask even if it seems easy.
+- HARD RULE: any question about the user's OWN current state — what's connected, what's on the calendar, unread email, files, tasks, recent activity, anything that changes over time — is NEVER answerable from your memory. You do not know it. Route [[task]] even if you believe you know the answer.
+- After the directive you may add ONE short spoken acknowledgment (max ~8 words). It must contain NO facts, NO opinions, and NO part of an answer — only an acknowledgment like "on it — checking now." or "good question — one sec."
+- NEVER claim to have done, sent, checked, or found anything. If unsure whether you can answer correctly right now, route to [[task]].
+
+Examples (follow these exactly):
+User: "hey, how's it going?" → Good, busy. What's up?
+User: "thanks, that's perfect" → Anytime.
+User: "what's on my calendar today?" → [[task]] checking your calendar now.
+User: "any new emails from Sam?" → [[task]] taking a look.
+User: "send Sam a quick thanks email" → [[task]] on it.
+User: "what apps are connected?" → [[task]] one sec.
+User: "remind me what we decided about the demo" → [[task]] let me pull that up.
+User: "yes, go ahead" (after you offered to do something) → [[task]]
+User: "research flights to Tokyo in the background" → [[task]] starting that now.
+User: "where's the export button in this app?" → [[task]] let me show you.
+User: "walk me through setting up a signature in Mail" → [[task]] sure — I'll guide you.
+User: "okay, it's open now" (after a step you asked for — an app opened, a page loaded) → [[task]] great — one sec.
+User: "done, what's next?" (mid-walkthrough) → [[task]] next step coming up.
+User: "teach me how to crop a photo in Photoshop" → [[task]] sure — I'll walk you through it.
+User: "turn the volume down to 20%" → [[task]] on it.
+User: "pause the music" / "skip this song" → [[task]] done.
+User: "open Spotify and play my Discover Weekly" → [[task]] one sec.
+User: "click the Subscribe button" / "click Accessibility in System Settings" → [[task]] clicking it now.
+User: "turn on Dark Mode" / "press send" → [[task]] on it.
+User: "think it through: should I lease or buy a car?" → [[think]] good question — give me a moment.
+User: "what's 18% of 2,450?" → [[think]]
+User: "which of these two job offers is better, all things considered?" → [[think]] let me think that through.
+User: "do you like jazz?" → Love it — there's nothing like late-period Coltrane. You?`
+
+const FRONT_DIRECTIVE_RE = /^\s*\[\[\s*(task|think)\s*\]\]\s*/i
+
+/** Parse the front model's reply: a leading [[task]]/[[think]] routes; anything else answers. */
+function parseFrontDirective(text: string): { route: "answer" | "task" | "think"; say?: string } {
+  const m = FRONT_DIRECTIVE_RE.exec(text ?? "")
+  if (!m) return { route: "answer" }
+  const say = (text.slice(m[0].length).split("\n")[0] ?? "").trim() || undefined
+  return { route: m[1]!.toLowerCase() as "task" | "think", say }
+}
+
+/** Scrub any stray/misplaced directive markup so it is never spoken. */
+function stripFrontDirectives(text: string): string {
+  return text.replace(/\[\[[^\]]*\]\]/g, " ").replace(/\s{2,}/g, " ").trim()
+}
+
+// Canned task acks for when the front gave no say-line — rotated so consecutive turns never
+// open identically (sounding scripted is worse than sounding brief).
+const TASK_ACKS = ["On it.", "Sure — one sec.", "Okay, let me handle that.", "Alright, doing it now.", "Let me take care of that."]
+let lastTaskAck = -1
+function nextTaskAck(): string {
+  let i = Math.floor(Math.random() * TASK_ACKS.length)
+  if (i === lastTaskAck) i = (i + 1) % TASK_ACKS.length
+  lastTaskAck = i
+  return TASK_ACKS[i]!
+}
+
+/** Defensive guard on the say-line: it must be a SHORT fact-free ack. A weak front model
+ *  sometimes starts ANSWERING after the directive ("Renting could save on upfront costs and…")
+ *  — speaking that would leak a half-answer before the real one. Anything that doesn't look
+ *  like a brief ack is dropped (caller substitutes a canned line or stays silent). */
+function ackOnly(say: string | undefined): string | undefined {
+  const s = (say ?? "").trim()
+  if (!s) return undefined
+  if (s.length > 60) return undefined                      // too long to be an ack — it's substance
+  if (/\b(because|costs?|saves?|better|worse|should|means|therefore)\b/i.test(s)) return undefined  // answer-y
+  return s
+}
+
 /** Default planner runner — drives the KAIROS Agent Loop (our owned, Codex-grade
  *  loop) on the streaming OpenRouter adapter with the SMART-tier model. Replaces
  *  the old @openai/agents run() so we get tool-error self-correction, max-turns,
@@ -486,6 +877,7 @@ async function defaultPlannerRunner(
 }> {
   const { OpenRouterAdapter } = await import("../wrapApi/adapters/openRouterAdapter")
   const { runAgentLoop } = await import("./loop/agentLoop")
+  const { buildProseDistiller } = await import("./loop/toolExecutor")
   const { buildCompactor, COMPACT_PROMPT } = await import("./loop/compactor")
   const { buildUpdatePlanTool } = await import("./loop/updatePlanTool")
   const { buildDestructiveVerifier } = await import("./loop/verifier")
@@ -504,14 +896,15 @@ async function defaultPlannerRunner(
     defaultModel: TIER_MODELS.smart(),
     defaultMaxTokens: Number(process.env.KAIROS_SMART_MAX_TOKENS) || 4096,
     disableThinking,
+    usageLabel: "planner_smart",
   })
   // Cheap model for compaction summaries.
-  const fast = new OpenRouterAdapter({ defaultModel: process.env.KAIROS_MEMORY_MODEL ?? TIER_MODELS.fast() })
+  const fast = new OpenRouterAdapter({ defaultModel: process.env.KAIROS_MEMORY_MODEL ?? TIER_MODELS.fast(), usageLabel: "planner_fast" })
   // SEPARATE model for the grounding verify gate (the anti-hallucination judge). It
   // tracks the smart model unless KAIROS_VERIFY_MODEL pins it (types.ts), so a
   // gemini-only user no longer fires silent gpt-4o verify calls. Same thinking-off
   // policy (it produces a JSON verdict, not reasoning prose).
-  const verify = new OpenRouterAdapter({ defaultModel: verifyModel(), disableThinking })
+  const verify = new OpenRouterAdapter({ defaultModel: verifyModel(), disableThinking, usageLabel: "verify" })
   // Observability: log the resolved models for THIS planner turn. Nothing logged
   // per-turn model usage before, which is why the phantom gpt-4o verify calls were
   // invisible. One line per smart/planner turn makes model routing auditable.
@@ -558,6 +951,9 @@ async function defaultPlannerRunner(
       onEvent: opts.onEvent,          // live streaming → the conductor speaks as it generates
       compact: (m, t) => compactor.maybeCompact(m, t),
       verify: (o) => verifier.verify({ utterance: input, finalText: o.finalText, toolCalls: o.toolCalls }),
+      // Cheap-LLM prose distiller for over-budget unstructured tool results (reuse the fast model).
+      distill: buildProseDistiller(async (p, s) =>
+        (await fast.complete({ messages: [{ role: "user", content: p }], max_tokens: 300, signal: s }) as any)?.text ?? ""),
     },
   )
 

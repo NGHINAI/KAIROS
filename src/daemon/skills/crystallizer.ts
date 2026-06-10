@@ -39,6 +39,18 @@ export type CrystallizerOptions = {
   router: ModelRouter
 }
 
+// A META/ROUTER "skill" — one that claims to handle ANY request or route to "the appropriate
+// tool/service" — is not a procedure, it's a description-level trap: the planner picks tools
+// by description, so a universal-sounding skill outbids real app tools and hijacks ordinary
+// turns (2026-06-10: auto-crystallized "agent-turn-smart" hijacked a calendar question).
+// Skills must be NARROW, concrete procedures; meta-skills are rejected at the source.
+const META_SKILL_RE =
+  /\b(rout(e|es|ing)|dispatch(es|ing)?|orchestrat\w*|delegat\w*|appropriate (tool|service|integration)|any (request|task|integrated service)|without specifying which|select(s|ing)? the (right|correct) tool|agent turn|smart turn|general[- ]purpose (agent|assistant|handler))\b/i
+
+export function isMetaSkill(name: string, description: string): boolean {
+  return META_SKILL_RE.test(`${name} ${description}`)
+}
+
 export class SkillCrystallizer {
   constructor(private opts: CrystallizerOptions) {}
 
@@ -76,6 +88,9 @@ Crystallize this into a SKILL.md JSON object.`
     }
     if (typeof parsed.name !== 'string' || typeof parsed.description !== 'string' || typeof parsed.body !== 'string') {
       throw new Error('SkillCrystallizer: missing required fields in LLM output (name/description/body)')
+    }
+    if (isMetaSkill(parsed.name, parsed.description)) {
+      throw new Error(`SkillCrystallizer: rejected meta/router skill "${parsed.name}" — skills must be narrow concrete procedures, never universal routers`)
     }
 
     // Enforce KAIROS metadata extensions

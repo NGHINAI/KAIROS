@@ -80,7 +80,7 @@ test("updateRollingSummary folds older turns into a summary; loadForReplay prepe
   }
   // Keep the most recent 2 turns verbatim; summarize everything older.
   const summarize = async (text: string) => `SUMMARY_OF[${text.length}chars]`
-  await store.updateRollingSummary("c1", summarize, { keepRecent: 2 })
+  await store.updateRollingSummary("c1", summarize, { keepRecent: 2, l1Turns: 0 })
 
   const replay = await store.loadForReplay("c1", { maxTurns: 2 })
   const joined = JSON.stringify(replay)
@@ -93,10 +93,10 @@ test("updateRollingSummary is incremental — only NEW older turns are folded ea
   const seen: string[] = []
   const summarize = async (text: string) => { seen.push(text); return "S" }
   for (let i = 0; i < 4; i++) await store.appendTurn("c1", `t${i}`, [{ role: "user", content: `u${i}` }, { role: "assistant", content: "a" }])
-  await store.updateRollingSummary("c1", summarize, { keepRecent: 2 })  // folds t0,t1
+  await store.updateRollingSummary("c1", summarize, { keepRecent: 2, l1Turns: 0 })  // folds t0,t1
   const firstCallLen = seen.length
   for (let i = 4; i < 6; i++) await store.appendTurn("c1", `t${i}`, [{ role: "user", content: `u${i}` }, { role: "assistant", content: "a" }])
-  await store.updateRollingSummary("c1", summarize, { keepRecent: 2 })  // folds t2,t3 (NOT t0,t1 again)
+  await store.updateRollingSummary("c1", summarize, { keepRecent: 2, l1Turns: 0 })  // folds t2,t3 (NOT t0,t1 again)
   expect(seen.length).toBeGreaterThan(firstCallLen)
   // The second fold must reference the new turns (u2/u3), not re-process u0/u1 from scratch.
   expect(seen[seen.length - 1]).toContain("u2")
@@ -106,6 +106,6 @@ test("updateRollingSummary is a no-op when there are no turns older than the win
   let called = 0
   const summarize = async () => { called++; return "S" }
   await store.appendTurn("c1", "t0", [{ role: "user", content: "only one" }, { role: "assistant", content: "ok" }])
-  await store.updateRollingSummary("c1", summarize, { keepRecent: 8 })
+  await store.updateRollingSummary("c1", summarize, { keepRecent: 8, l1Turns: 0 })
   expect(called).toBe(0)
 })

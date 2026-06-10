@@ -104,3 +104,14 @@ describe('SkillCrystallizer', () => {
     expect(skill.metadata?.['kairos:autonomy_tier']).toBe('YELLOW')
   })
 })
+
+import { isMetaSkill } from './crystallizer'
+import { test as btest, expect as bexpect } from 'bun:test'
+
+btest('isMetaSkill rejects router/meta skills, keeps narrow procedures', () => {
+  bexpect(isMetaSkill('agent-turn-smart', 'Routes user requests to the appropriate connected tool or service')).toBe(true)
+  bexpect(isMetaSkill('universal-handler', 'Handles any request without specifying which tool to use')).toBe(true)
+  bexpect(isMetaSkill('task-dispatcher', 'Dispatches tasks to sub-agents')).toBe(true)
+  bexpect(isMetaSkill('weekly-report', 'Draft the weekly report by pulling Linear issues and summarizing them')).toBe(false)
+  bexpect(isMetaSkill('inbox-cleanup', 'Archive promotional emails older than 30 days in Gmail')).toBe(false)
+})

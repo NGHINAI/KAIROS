@@ -22,7 +22,8 @@ export interface ApprovalGateDeps {
   voiceWindowMs?: number
   /** Hard cap on how long an approval may stay parked before auto-DENYING — so a
    *  never-answered, never-cancelled approval can't hang a sub-agent (and its
-   *  concurrency slot) forever. Default 10 min. */
+   *  concurrency slot) forever. Default 24h: the user can "remind me anytime" — a
+   *  parked to-do should survive the day until they get to it, not auto-deny in 10 min. */
   maxParkMs?: number
   setTimer?: (fn: () => void, ms: number) => any
   clearTimer?: (h: any) => void
@@ -85,7 +86,7 @@ export class ApprovalGate {
       if (signal?.aborted) { resolvePromise({ approved: false }); return }
       const onAbort = () => { this.finalize(req.id, false) }
       try { signal?.addEventListener?.("abort", onAbort, { once: true }) } catch { /* */ }
-      const maxTimer = setT(() => { this.finalize(req.id, false) }, this.deps.maxParkMs ?? 10 * 60_000)
+      const maxTimer = setT(() => { this.finalize(req.id, false) }, this.deps.maxParkMs ?? 24 * 60 * 60_000)
       this.pending.set(req.id, {
         req,
         order: ++this.seq,

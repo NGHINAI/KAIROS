@@ -45,8 +45,22 @@ export class Tier1Classifier {
   }
 
   private formatEvents(events: WorldEvent[]): string {
-    const lines = events.map(e => `[${new Date(e.ts).toISOString().slice(11, 19)}] ${e.source}/${e.kind} ${JSON.stringify(e.payload).slice(0, 120)}`)
-    return `Recent events (${events.length}):\n${lines.join('\n')}\n\nVerdict?`
+    // FULL context for the window — give the gate EVERYTHING that happened in the recent
+    // window, not an arbitrary last-N. KAIROS catches up on the whole period like a chief
+    // of staff reviewing what's happened, so it can reason across it rather than only the
+    // latest blip. Default 60 min = the LONGEST adaptive sweep gap (the pipeline already
+    // passes only since-last-sweep events; this is a safety bound, and it must never be
+    // tighter than the sweep gap or it would silently drop part of a quiet-hour window).
+    // The per-event slice + WorkingMemory's maxEvents ring bound the prompt size.
+    const windowMs = Number(process.env.KAIROS_CLASSIFY_WINDOW_MS) || 60 * 60_000
+    const cutoff = Date.now() - windowMs
+    const recent = events.filter(e => e.ts >= cutoff)
+    const lines = recent.map(e => `[${new Date(e.ts).toISOString().slice(11, 19)}] ${e.source}/${e.kind} ${JSON.stringify(e.payload).slice(0, 80)}`)
+    const mins = Math.round(windowMs / 60_000)
+    const head = recent.length < events.length
+      ? `Events in the last ${mins} min (${recent.length} of ${events.length}):`
+      : `Events in the last ${mins} min (${recent.length}):`
+    return `${head}\n${lines.join('\n')}\n\nVerdict?`
   }
 
   private normalize(text: string): Tier1Verdict {

@@ -103,6 +103,10 @@ export type OpenRouterAdapterDeps = {
    *  on pure non-thinking models (the param is ignored). Leave false for the DEEP tier,
    *  which we WANT to reason. */
   disableThinking?: boolean
+  /** Spend-attribution label for the daemon-wide usage ledger (e.g. 'voice_fast',
+   *  'planner_smart', 'subagent'). Every call reports to the global usage hook
+   *  (record-only metering — never gates/blocks the call). */
+  usageLabel?: string
 }
 
 export class OpenRouterAdapter {
@@ -113,6 +117,7 @@ export class OpenRouterAdapter {
   private appName: string
   private fetchImpl: typeof fetch
   private disableThinking: boolean
+  private usageLabel: string
 
   constructor(deps: OpenRouterAdapterDeps = {}) {
     this.apiKey = deps.apiKey ?? process.env.OPENROUTER_API_KEY ?? ''
@@ -122,6 +127,7 @@ export class OpenRouterAdapter {
     this.appName = deps.appName ?? 'KAIROS'
     this.fetchImpl = (deps.fetchImpl ?? fetch) as typeof fetch
     this.disableThinking = deps.disableThinking ?? false
+    this.usageLabel = deps.usageLabel ?? 'agent'
   }
 
   /** One-shot non-streaming completion (compat with LLMAdapter shape). */
@@ -202,6 +208,32 @@ export class OpenRouterAdapter {
     let tokensOut: number | undefined
     const toolCallAcc: Record<number, { id?: string; name?: string; args: string }> = {}
 
+    // Usage metering — fires ONCE per call (incl. aborted/partial streams) into the
+    // daemon-wide ledger hook. Record-only: it never gates a call, and a missing hook
+    // or a hook error is a no-op. When the provider omitted usage (some streams do,
+    // and aborted streams always do), fall back to a chars/4 estimate so the ledger
+    // is never blind to a call that consumed tokens.
+    const t0 = Date.now()
+    let metered = false
+    const meter = () => {
+      if (metered) return
+      metered = true
+      try {
+        const hook = (globalThis as any).__kairosLlmUsage
+        if (typeof hook !== 'function') return
+        const estIn = Math.round(JSON.stringify(reqBody.messages ?? []).length / 4)
+        const estOut = Math.round(rawContent.length / 4)
+        hook({
+          label: this.usageLabel,
+          model: String(reqBody.model),
+          tokensIn: tokensIn ?? estIn,
+          tokensOut: tokensOut ?? estOut,
+          estimated: tokensIn == null,
+          latencyMs: Date.now() - t0,
+        })
+      } catch { /* metering must never break a call */ }
+    }
+
     try {
       while (true) {
         const { value, done } = await reader.read()
@@ -249,6 +281,7 @@ export class OpenRouterAdapter {
       }
     } finally {
       try { reader.releaseLock() } catch { /* swallow */ }
+      meter()  // runs on clean completion AND on abort/throw — one record either way
     }
 
     // Flush the held-back tail of clean text (and drop any unclosed think-block).

@@ -30,6 +30,11 @@ export type TaskType =
   | 'skill_crystallize' // mid: LLM-compose candidate SKILL.md from trajectory cluster
   | 'skill_curate'       // ultra-cheap: Phase 2 Curator decides keep/patch/consolidate/archive
   | 'orders_compose'      // mid: speech → DSL rule for STANDING_ORDERS v2
+  // ── Voice/agent-path metering labels (record-only — the voice path is metered
+  //    but never budget-blocked; a spend cap must never mute the assistant). ──
+  | 'voice_fast' | 'voice_smart' | 'voice_deep' | 'voice_classify'
+  | 'planner_smart' | 'planner_fast' | 'verify' | 'subagent' | 'memory' | 'agent'
+  | 'voice_tts' | 'voice_stt'
 
 export type Tier = 'ultra_cheap' | 'mid' | 'heavy'
 

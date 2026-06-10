@@ -177,3 +177,44 @@ test("errored write that was RETRIED successfully is NOT flagged (recovered)", a
   })
   expect(r.ok).toBe(true) // recovered → not a phantom
 })
+
+test("PROMISSORY final ('one moment', nothing done) is flagged → self-correct round", async () => {
+  const v = buildDestructiveVerifier({ llm: { complete: async () => ({ text: JSON.stringify({ ok: true }) }) } as any })
+  const r = await v.verify({
+    utterance: "what's on my calendar today?",
+    finalText: "I can check your calendar. One moment.",
+    toolCalls: [{ name: "kairos_skill_agent_turn_smart", args: {}, result: { ok: true, output: "# prompt text" } }],
+  })
+  expect(r.ok).toBe(false)
+  expect(r.concern).toMatch(/promise|do the task/i)
+})
+
+test("a promise IS legitimate when the work was handed off to the background lane", async () => {
+  const v = buildDestructiveVerifier({ llm: { complete: async () => ({ text: JSON.stringify({ ok: true }) }) } as any })
+  const r = await v.verify({
+    utterance: "research flights for me",
+    finalText: "I'm on it — I'll let you know what I find.",
+    toolCalls: [{ name: "spawn_background_task", args: { goal: "research flights" }, result: "Started in the background" }],
+  })
+  expect(r.ok).toBe(true)
+})
+
+test("a long substantive answer containing 'let me check' mid-prose is NOT flagged", async () => {
+  const v = buildDestructiveVerifier({ llm: { complete: async () => ({ text: JSON.stringify({ ok: true }) }) } as any })
+  const r = await v.verify({
+    utterance: "summarize my inbox",
+    finalText: "You have 12 unread. The urgent one is from Sam about tomorrow's meeting — he asked to move it to 3pm. There are also two invoices due Friday. Let me check whether you want me to archive the rest, or should I leave them?",
+    toolCalls: [{ name: "execute_tool", args: { tool_name: "GMAIL_FETCH_EMAILS" }, result: { messages: [{ id: "1" }] } }],
+  })
+  expect(r.ok).toBe(true)
+})
+
+test("zero-tool PROMISE final ('I'm going to create it') is flagged; offer-questions are not", async () => {
+  const v = buildDestructiveVerifier({ llm: { complete: async () => ({ text: JSON.stringify({ ok: true }) }) } as any })
+  const promise = await v.verify({ utterance: "schedule it", finalText: "Found the email. I'm going to create a calendar event for tomorrow at 3pm.", toolCalls: [] })
+  expect(promise.ok).toBe(false)
+  const offer = await v.verify({ utterance: "inbox?", finalText: "You have 12 unread; the urgent one is from Sam. Want me to archive the rest?", toolCalls: [] })
+  expect(offer.ok).toBe(true)
+  const chat = await v.verify({ utterance: "hi", finalText: "Hey! Good to hear from you.", toolCalls: [] })
+  expect(chat.ok).toBe(true)
+})

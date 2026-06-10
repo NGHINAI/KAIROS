@@ -52,7 +52,15 @@ export class WhisperStt implements SttBackend {
       const detail = await resp.text().catch(() => "")
       throw new Error(`[stt:${this.name}] HTTP ${resp.status}: ${detail.slice(0, 200)}`)
     }
-    const json = (await resp.json()) as { text?: string }
+    const json = (await resp.json()) as { text?: string; duration?: number }
+    // Usage metering (record-only): Whisper responses may carry duration (verbose
+    // formats); fall back to PCM/WAV math (s16le mono → bytes / (sampleRate · 2)).
+    try {
+      const bytes = (audio.data as any)?.byteLength ?? 0
+      const sr = audio.sampleRate ?? STT_SAMPLE_RATE
+      const seconds = typeof json.duration === "number" ? json.duration : bytes > 0 ? bytes / (sr * 2) : 0
+      ;(globalThis as any).__kairosVoiceUsage?.({ kind: "stt", provider: this.name, seconds })
+    } catch { /* metering must never break a transcription */ }
     return {
       text: String(json.text ?? "").trim(),
       isFinal: true,

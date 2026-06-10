@@ -59,3 +59,59 @@ test('stream() strips inline <think> reasoning from spoken content (tag split ac
   expect(spoken).toContain('Done.')
   expect(doneText).toBe(spoken) // done text == the clean spoken text
 })
+
+test('every call reports ONCE to the global usage hook with exact provider tokens', async () => {
+  const sse = [
+    `data: {"choices":[{"delta":{"content":"Hi there."}}]}\n`,
+    `data: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":321,"completion_tokens":12}}\n`,
+    `data: [DONE]\n`,
+  ].join('\n')
+  const mockFetch = async (): Promise<Response> =>
+    new Response(sse, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+  const calls: any[] = []
+  ;(globalThis as any).__kairosLlmUsage = (u: any) => calls.push(u)
+  try {
+    const adapter = new OpenRouterAdapter({ apiKey: 'sk-test', defaultModel: 'openai/gpt-4o-mini', usageLabel: 'voice_fast', fetchImpl: mockFetch as any })
+    await adapter.complete({ messages: [{ role: 'user', content: 'hi' }] })
+    expect(calls.length).toBe(1)
+    expect(calls[0].label).toBe('voice_fast')
+    expect(calls[0].model).toBe('openai/gpt-4o-mini')
+    expect(calls[0].tokensIn).toBe(321)
+    expect(calls[0].tokensOut).toBe(12)
+    expect(calls[0].estimated).toBe(false)
+  } finally { delete (globalThis as any).__kairosLlmUsage }
+})
+
+test('a stream without provider usage still meters with a chars/4 estimate', async () => {
+  const sse = [
+    `data: {"choices":[{"delta":{"content":"Twelve chars"}}]}\n`,
+    `data: [DONE]\n`,
+  ].join('\n')
+  const mockFetch = async (): Promise<Response> =>
+    new Response(sse, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+  const calls: any[] = []
+  ;(globalThis as any).__kairosLlmUsage = (u: any) => calls.push(u)
+  try {
+    const adapter = new OpenRouterAdapter({ apiKey: 'sk-test', defaultModel: 'x', fetchImpl: mockFetch as any })
+    await adapter.complete({ messages: [{ role: 'user', content: 'hello world question' }] })
+    expect(calls.length).toBe(1)
+    expect(calls[0].estimated).toBe(true)
+    expect(calls[0].tokensIn).toBeGreaterThan(0)
+    expect(calls[0].tokensOut).toBe(3)   // "Twelve chars" = 12 chars / 4
+  } finally { delete (globalThis as any).__kairosLlmUsage }
+})
+
+test('a broken usage hook never breaks the completion', async () => {
+  const sse = [
+    `data: {"choices":[{"delta":{"content":"Fine."}}]}\n`,
+    `data: [DONE]\n`,
+  ].join('\n')
+  const mockFetch = async (): Promise<Response> =>
+    new Response(sse, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+  ;(globalThis as any).__kairosLlmUsage = () => { throw new Error('ledger on fire') }
+  try {
+    const adapter = new OpenRouterAdapter({ apiKey: 'sk-test', defaultModel: 'x', fetchImpl: mockFetch as any })
+    const r = await adapter.complete({ messages: [{ role: 'user', content: 'hi' }] })
+    expect(r.text).toBe('Fine.')
+  } finally { delete (globalThis as any).__kairosLlmUsage }
+})

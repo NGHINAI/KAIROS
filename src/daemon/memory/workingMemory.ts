@@ -16,8 +16,13 @@ export class WorkingMemory {
   private maxEvents: number
 
   constructor(bus: EventBus, opts?: WorkingMemoryOptions) {
-    this.windowMs = opts?.windowMs ?? 10 * 60_000
-    this.maxEvents = opts?.maxEvents ?? 500
+    // Window must cover the LONGEST possible perception-sweep gap (adaptive cadence
+    // stretches to 60 min when quiet) so each sweep sees the FULL period since the last
+    // one — and maxEvents is a generous safety ring (observers emit on-change, so a busy
+    // hour is typically a few hundred events; 2000 means we never silently drop part of
+    // the window, which would defeat the "review everything" sweep).
+    this.windowMs = opts?.windowMs ?? 60 * 60_000
+    this.maxEvents = opts?.maxEvents ?? 2000
     bus.subscribe('*', e => this.ingest(e))
   }
 

@@ -49,7 +49,7 @@ test("Conductor smart-path: emits agent_activity (lane A tree) + agent_delta/age
   }
   const conductor = new Conductor({
     classifyLlm: { complete: async () => ({ text: JSON.stringify({ tier: "smart", reason: "x", confidence: 0.9 }) }) } as any,
-    fastLlm: { complete: async () => ({ text: "" }) } as any,
+    fastLlm: { complete: async () => ({ text: "[[task]]" }) } as any,
     smartLlm: { complete: async () => ({ text: "" }) } as any,
     tools: [],
     contextBuilder: { build: async () => ({ system: "", tools: [] }) } as any,
@@ -75,7 +75,7 @@ test("Conductor smart-path: a self_correct loop event surfaces as a caption + ac
   }
   const conductor = new Conductor({
     classifyLlm: { complete: async () => ({ text: JSON.stringify({ tier: "smart", reason: "x", confidence: 0.9 }) }) } as any,
-    fastLlm: { complete: async () => ({ text: "" }) } as any,
+    fastLlm: { complete: async () => ({ text: "[[task]]" }) } as any,
     smartLlm: { complete: async () => ({ text: "" }) } as any,
     tools: [],
     contextBuilder: { build: async () => ({ system: "", tools: [] }) } as any,
@@ -101,7 +101,7 @@ test("Conductor smart-path: emits agent_planning + agent_done", async () => {
 
   const conductor = new Conductor({
     classifyLlm: { complete: async () => ({ text: JSON.stringify({ tier: "smart", reason: "multi-step", confidence: 0.9 }) }) } as any,
-    fastLlm: { complete: async () => ({ text: "Checking..." }) } as any,
+    fastLlm: { complete: async () => ({ text: "[[task]]" }) } as any,
     smartLlm: { complete: async () => ({ text: "" }) } as any,
     tools: [{ name: "gmail_list", description: "", parameters: {}, execute: async () => ({ count: 5 }) }],
     contextBuilder: { build: async () => ({ system: "", tools: [] }) } as any,
@@ -139,7 +139,7 @@ test("Conductor never speaks raw tool-call markup if the model leaks it (smart p
   const leak = '<tool_call_begin>functions.execute_tool {"tool_name":"GMAIL_LIST_MESSAGES","args":{"max_results":5}}<tool_call_end><tool_calls_section_end>'
   const conductor = new Conductor({
     classifyLlm: { complete: async () => ({ text: JSON.stringify({ tier: "smart", reason: "x", confidence: 0.9 }) }) } as any,
-    fastLlm: { complete: async () => ({ text: "" }) } as any,
+    fastLlm: { complete: async () => ({ text: "[[task]]" }) } as any,
     smartLlm: { complete: async () => ({ text: "" }) } as any,
     tools: [],
     contextBuilder: { build: async () => ({ system: "", tools: [] }) } as any,
@@ -154,7 +154,8 @@ test("Conductor never speaks raw tool-call markup if the model leaks it (smart p
   expect(spoken.join(" ")).not.toMatch(/<tool_call|functions\./)              // and never spoken
 })
 
-test("Conductor feeds recent conversation to the router so short replies resolve in context", async () => {
+test("CLASSIC router: feeds recent conversation to the classifier so short replies resolve in context", async () => {
+  process.env.KAIROS_CLASSIC_ROUTER = "1"
   let classifyMsgs = ""
   const conductor = new Conductor({
     classifyLlm: { complete: async (b: any) => { classifyMsgs = JSON.stringify(b.messages); return { text: JSON.stringify({ tier: "fast", reason: "x", confidence: 0.9 }) } } } as any,
@@ -165,11 +166,15 @@ test("Conductor feeds recent conversation to the router so short replies resolve
     onEvent: () => {},
     conversationStore: { recentTurns: async () => [{ role: "agent", text: "The delete failed — want me to retry?" }, { role: "user", text: "Yes" }] } as any,
   })
-  await conductor.handle({ conversationId: "t", utterance: "Yes" })
-  expect(classifyMsgs).toContain("delete failed")  // router saw the prior turn
+  try {
+    await conductor.handle({ conversationId: "t", utterance: "Yes" })
+    expect(classifyMsgs).toContain("delete failed")  // router saw the prior turn
+  } finally { delete process.env.KAIROS_CLASSIC_ROUTER }
 })
 
-test("Conductor routes deep + vision through the tool-capable smart path (not tool-less fast)", async () => {
+test("CLASSIC router: routes deep + vision through the tool-capable smart path (not tool-less fast)", async () => {
+  process.env.KAIROS_CLASSIC_ROUTER = "1"
+  try {
   for (const tier of ["deep", "vision"]) {
     const events: any[] = []
     let plannerCalled = false
@@ -186,17 +191,18 @@ test("Conductor routes deep + vision through the tool-capable smart path (not to
     await conductor.handle({ conversationId: "t", utterance: "what's on my screen?" })
     expect(plannerCalled).toBe(true)  // went through the planner, not handleFast
   }
+  } finally { delete process.env.KAIROS_CLASSIC_ROUTER }
 })
 
 test("Conductor.handle respects abort signal mid-execution", async () => {
   const events: any[] = []
   const ctrl = new AbortController()
   const conductor = new Conductor({
-    classifyLlm: { complete: async () => {
-      await new Promise((r) => setTimeout(r, 50))
-      return { text: JSON.stringify({ tier: "fast", reason: "chat", confidence: 0.9 }) }
+    classifyLlm: { complete: async () => ({ text: JSON.stringify({ tier: "fast", reason: "chat", confidence: 0.9 }) }) } as any,
+    fastLlm: { complete: async () => {
+      await new Promise((r) => setTimeout(r, 50))   // abort fires mid-front-completion
+      return { text: "ok" }
     }} as any,
-    fastLlm: { complete: async () => ({ text: "ok" }) } as any,
     smartLlm: { complete: async () => ({ text: "" }) } as any,
     tools: [],
     contextBuilder: { build: async () => ({ system: "", tools: [] }) } as any,

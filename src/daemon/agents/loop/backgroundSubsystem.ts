@@ -23,8 +23,10 @@ import { sanitizeSpoken } from "../spokenSanitizer"
 import { buildCompactor, COMPACT_PROMPT } from "./compactor"
 import { buildDestructiveVerifier } from "./verifier"
 import { runAgentLoop } from "./agentLoop"
+import { buildProseDistiller } from "./toolExecutor"
 import { join } from "node:path"
 import { verifyModel } from "../types"
+import { FAILURE_ECHO_RE } from "../contextBuilder"
 import type { ToolDef } from "../types"
 import type { LoopEvent, LoopLlm, LoopMsg } from "./types"
 
@@ -53,6 +55,9 @@ export interface BackgroundSubsystemDeps {
   inbox: (req: ApprovalRequest) => void
   /** Append a finished sub-agent trajectory for skill evolution mining. */
   appendTraj?: (runId: string, entry: any) => void
+  /** Durable memory write for harvested LEARNINGS (the sub-agent's final "Learning: …"
+   *  line) — wired to the episodic store so next time's recall/context benefits. */
+  learnings?: { record: (input: { source: string; text: string }) => Promise<unknown> }
   /** R8: a hint about similar PAST successful sub-agent runs, injected into the
    *  sub-agent's system prompt so it reuses what worked (Hermes AWM reuse half). */
   priorRunsHint?: (goal: string) => string | Promise<string>
@@ -73,25 +78,33 @@ export interface BackgroundSubsystem {
  *  runs unattended, has system tools, and that its final message is the spoken report. */
 const BACKGROUND_ADDENDUM = `
 
-## Background mode (you are an autonomous sub-agent)
-You are running as a BACKGROUND sub-agent. The user is NOT watching this live — they're talking to the foreground KAIROS. Work the task to completion on your own:
+## Background mode (you are an autonomous sub-agent — no human is reading this turn)
+You are running as a BACKGROUND sub-agent. The user is NOT watching — they're talking to the foreground KAIROS. Work the task to COMPLETION on your own:
 - You have the user's memory, skills, and all the app tools (search_tools / execute_tool) the foreground has, PLUS file + shell tools (read_file, list_dir, write_file, run_shell). read_file/list_dir/write_file are confined to your own private working directory.
 - Destructive or irreversible EXTERNAL actions (send, delete, pay, connect a service) and any non-read-only shell command are paused for the user's approval automatically — just call the tool. Read-only shell (ls, cat, grep, git log…) and writes to your private workdir run without interruption. If an action is declined you'll be told and should adapt.
-- Be decisive and thorough. Do NOT ask clarifying questions mid-run — the user can't see you. Make a reasonable assumption and note it in your final report.
-- Your FINAL message is what the user hears when you finish. Make it a crisp 1–3 sentence summary of what you actually did (and anything you couldn't).`
+- Do NOT ask clarifying questions, present plans for approval, or seek confirmation — there is no one to answer. Do NOT produce conversational filler ("Sure, I'll…", "Let me know if…"). Plan with update_plan, then EXECUTE.
+- Be decisive: make the most reasonable assumption and note it in your final report. If you hit a decision you genuinely cannot make (missing credentials, two equally plausible recipients), STOP and put the precise question in your final report — the user will answer it next time they talk to KAIROS.
+- Verify before you claim: re-read what you produced/changed; if a step failed, try ONE alternative, then report what actually happened — never paper over a failure.
+- Your FINAL message is spoken aloud to the user. Make it a crisp 1–3 sentence summary of what you ACTUALLY did, with the concrete result up front (counts, names, dates — "Found three flights; cheapest is the 9am ANA at $812"). Plain speech — no markdown, no headings, no IDs.
+- If (and only if) you discovered a REUSABLE lesson about how to get this kind of task done — a tool quirk, an input format that worked, a faster route — add ONE extra LAST line starting exactly with "Learning:" followed by the lesson in one sentence. That line is saved to memory for future tasks and is NOT spoken. Never put excuses or failure narration there; omit the line if there's no real lesson.`
 
 export function buildBackgroundSubsystem(deps: BackgroundSubsystemDeps): BackgroundSubsystem {
   // Late binding: runAgent references the manager (for nested spawn), but the manager
   // is constructed FROM runAgent. A holder breaks the cycle.
   let manager: BackgroundAgentManager
   let runSeq = 0
+  // Session-scoped dedupe so a recurring task can't pile the same lesson into memory
+  // every run (the consolidator would still cope, but why make it).
+  const harvestedLearnings = new Set<string>()
 
   // ── The approval gate: ask out loud now, fall back to the inbox if unanswered ──
   const approvalGate = new ApprovalGate({
     ask: (req) => {
       deps.broadcast({ event: "approval_request", id: req.id, summary: req.summary, toolName: req.toolName })
       void deps
-        .speak(`Quick approval — I want to ${req.summary}. Say "yes" to go ahead, or "no" to skip.`)
+        // Route the ask through the spoken guard too — never voice markdown or an internal slug
+        // that leaked into req.summary.
+        .speak(sanitizeSpoken(`Quick approval — I want to ${req.summary}. Say "yes" to go ahead, or "no" to skip.`))
         .catch(() => { /* speaking the ask must never throw into the gate */ })
     },
     inbox: (req) => {
@@ -208,6 +221,10 @@ export function buildBackgroundSubsystem(deps: BackgroundSubsystemDeps): Backgro
         onEvent: opts.onEvent,
         compact: (m, t) => compactor.maybeCompact(m, t),
         verify: (o) => verifier.verify({ utterance: goal, finalText: o.finalText, toolCalls: o.toolCalls }),
+        // Cheap-LLM prose distiller for over-budget unstructured results (web pages, long docs).
+        // Sub-agents read these most (research tasks); reuse the fast model already built above.
+        distill: buildProseDistiller(async (p, s) =>
+          (await (fastLlm as any).complete({ messages: [{ role: "user", content: p }], max_tokens: 300, signal: s }))?.text ?? ""),
       },
     )
 
@@ -216,6 +233,7 @@ export function buildBackgroundSubsystem(deps: BackgroundSubsystemDeps): Backgro
     // Trajectory → skill evolution mining (best-effort; never breaks the run). The
     // daemon feeds this to the SAME AWM TrajWriter the foreground uses, so the
     // self-evolving-skills pipeline crystallizes recurring sub-agent workflows too.
+    // Records the FULL final text (incl. any Learning line) — mining wants it all.
     try {
       deps.appendTraj?.(subRunId, {
         goal,
@@ -227,12 +245,44 @@ export function buildBackgroundSubsystem(deps: BackgroundSubsystemDeps): Backgro
       })
     } catch { /* */ }
 
-    return { finalText }
+    // LEARNINGS HARVEST: peel off the "Learning: …" line — store it durably, don't
+    // speak it. Next time a similar task runs, recall/context injection surfaces it
+    // ("Kayak needed the city code") and the agent starts smarter.
+    const { spoken, learning } = extractLearning(finalText)
+    if (learning && deps.learnings && !harvestedLearnings.has(learning.toLowerCase())) {
+      harvestedLearnings.add(learning.toLowerCase())
+      try { await deps.learnings.record({ source: "learning", text: learning }) }
+      catch { /* memory write must never break the lane */ }
+    }
+
+    return { finalText: spoken }
   }
+
+  // Sparse spoken progress: the user asked for OCCASIONAL background updates, not chatter —
+  // they may be doing other work. At most ONE spoken mid-run update per task, and only once
+  // the task has been running a while (it would finish quickly otherwise and the final report
+  // covers it). KAIROS_BG_SPOKEN_UPDATES=0 disables; KAIROS_BG_UPDATE_AFTER_MS tunes the wait.
+  const updateAfterMs = Number(process.env.KAIROS_BG_UPDATE_AFTER_MS ?? 60_000)
+  const taskMeta = new Map<string, { t0: number; goal: string; spoke: boolean }>()
 
   manager = new BackgroundAgentManager({
     runAgent,
-    onEvent: (e) => deps.broadcast({ event: e.kind, ...e }),
+    onEvent: (e) => {
+      deps.broadcast({ event: e.kind, ...e })
+      if (process.env.KAIROS_BG_SPOKEN_UPDATES === "0") return
+      if (e.kind === "task_spawned") {
+        taskMeta.set(e.id, { t0: Date.now(), goal: e.goal, spoke: false })
+      } else if (e.kind === "task_progress") {
+        const m = taskMeta.get(e.id)
+        if (m && !m.spoke && e.note && Date.now() - m.t0 >= updateAfterMs) {
+          m.spoke = true
+          const g = m.goal.length > 60 ? m.goal.slice(0, 60) + "…" : m.goal
+          void deps.speak(sanitizeSpoken(`Quick update on "${g}" — ${e.note}.`)).catch(() => { /* */ })
+        }
+      } else if (e.kind === "task_done" || e.kind === "task_failed" || e.kind === "task_cancelled") {
+        taskMeta.delete(e.id)
+      }
+    },
     onActivity: (a) => deps.broadcast({ event: "agent_activity", activity: a }),
     onReport: (id, goal, summary) => {
       deps.broadcast({ event: "task_report", id, goal, summary })
@@ -248,12 +298,44 @@ export function buildBackgroundSubsystem(deps: BackgroundSubsystemDeps): Backgro
   return { manager, approvalGate, foregroundTools }
 }
 
+const LEARNING_LINE_RE = /^\s*(?:one\s+)?learning(?:\s+for\s+next\s+time)?\s*[:\-—]\s*(.+)$/i
+
+/** Peel a trailing "Learning: …" line off a sub-agent's final report. Returns the
+ *  spoken text (report minus the line) and the validated learning (or undefined).
+ *  Guards: a learning must be substantive (8–240 chars) and must NOT be a failure
+ *  echo — "I couldn't access X" stored as a lesson is exactly the self-poisoning
+ *  loop the memory layer just got cured of. */
+export function extractLearning(finalText: string): { spoken: string; learning?: string } {
+  const lines = String(finalText ?? "").split("\n")
+  let learning: string | undefined
+  const kept: string[] = []
+  for (const line of lines) {
+    const m = LEARNING_LINE_RE.exec(line)
+    if (m && !learning) {
+      const candidate = m[1]!.replace(/\s+/g, " ").trim()
+      if (candidate.length >= 8 && candidate.length <= 240 && !FAILURE_ECHO_RE.test(candidate)) {
+        learning = candidate
+        continue                       // valid → strip from the spoken report
+      }
+      // Invalid candidate (too short/long or a failure echo): drop the line from
+      // speech anyway — "Learning: I couldn't get in" must be neither stored nor voiced.
+      continue
+    }
+    kept.push(line)
+  }
+  const spoken = kept.join("\n").trim()
+  // A report that was ONLY a learning line would otherwise go silent/empty — keep the
+  // original so downstream fallbacks (reportLine, spawnAndWait) see real text.
+  return { spoken: spoken || String(finalText ?? "").trim(), learning }
+}
+
 /** The spoken "I'm done" line. Short goal echo + the agent's own summary. The summary
  *  is the sub-agent's raw final text (DEEP model — a reasoning model, e.g. minimax-m3),
  *  so it MUST be sanitized before TTS — never voice a leaked <think> block or tool
  *  markup in the report (2026-06-08 TTS-leak audit). */
 function reportLine(goal: string, summary: string): string {
-  const g = goal.length > 60 ? goal.slice(0, 60) + "…" : goal
+  const cleanGoal = sanitizeSpoken(goal).trim() || "that"   // goal too — never voice a slug/markdown
+  const g = cleanGoal.length > 60 ? cleanGoal.slice(0, 60) + "…" : cleanGoal
   const s = sanitizeSpoken(summary).trim() || "It's finished."
   return `Done with "${g}". ${s}`
 }

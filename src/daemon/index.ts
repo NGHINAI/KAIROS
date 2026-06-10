@@ -37,6 +37,7 @@ import { bootstrapVoice } from './voice/bootstrap'
 import { StreamingSpeaker } from './voice/streamingSpeaker'
 import { ConversationMessageStore } from './voice/conversationMessageStore'
 import { ActivityStore } from './activity/activityStore'
+import { coalesceFragment } from './voice/utteranceCoalesce'
 import { startWrapApi, type WrapApiServer } from './wrapApi/server'
 import { LLMAdapter } from './wrapApi/adapters/llmAdapter'
 import { VoiceAdapter } from './wrapApi/adapters/voiceAdapter'
@@ -64,6 +65,9 @@ import { Embedder } from './memory/embeddings'
 import { WorkingMemory } from './memory/workingMemory'
 import { EpisodicMemory } from './memory/episodicMemory'
 import { EpisodicStore } from './memory/episodicMemory'
+import { voiceTurnObservation } from './memory/voiceObservation'
+import { supersedeSpeech } from './voice/drainGrace'
+import { SpeakingStateTracker } from './voice/speakingState'
 import { SemanticMemory } from './memory/semanticMemory'
 import { SemanticStore } from './memory/semanticMemory'
 import { LocalEmbedder } from './memory/vector/embedder'
@@ -167,11 +171,18 @@ import { skillsAsTools } from './agents/skillToolAdapter'
 import { intentsAsTools } from './agents/intentToolBridge'
 import { ToolRetriever, type ToolDoc } from './agents/toolRetriever'
 import { buildToolDispatchTools } from './agents/toolDispatch'
+import { buildRecallTool } from './agents/recallTool'
+import { buildWebTools } from './agents/webTools'
+import { GuideBridge } from './agents/guideBridge'
+import { buildGuideTools } from './agents/guideTools'
+import { buildControlTools } from './agents/controlTools'
 import { ToolUsageTracker } from './agents/toolUsageTracker'
 import { TurnLogger } from './agents/turnLogger'
 import { ComposioToolCache, buildComposioSearchTool } from './agents/composioToolProvider'
 import { SelfHealConnect } from './agents/selfHealConnect'
 import type { SystemBlock } from './llm/types'
+import { CostTracker } from './llm/costTracker'
+import { buildLlmUsageHook, buildVoiceUsageHook } from './llm/usageMeter'
 
 const VERSION = '0.2.0'
 
@@ -188,7 +199,7 @@ const VERSION = '0.2.0'
 function buildAgentLlmCompleter(
   tier: Tier,
 ): { complete: (body: any) => Promise<{ text: string }> } {
-  return buildLlmCompleterForModel(TIER_MODELS[tier]())
+  return buildLlmCompleterForModel(TIER_MODELS[tier](), `voice_${tier}`)
 }
 
 /**
@@ -204,12 +215,13 @@ function memoryModel(): string {
   return process.env.KAIROS_MEMORY_MODEL ?? process.env.KAIROS_FAST_MODEL ?? 'openai/gpt-4o-mini'
 }
 function buildMemoryLlmCompleter(): { complete: (body: any) => Promise<{ text: string }> } {
-  return buildLlmCompleterForModel(memoryModel())
+  return buildLlmCompleterForModel(memoryModel(), 'memory')
 }
 
-/** Shared OpenRouter completer for an exact model id ({messages}→{text}). */
-function buildLlmCompleterForModel(model: string): { complete: (body: any) => Promise<{ text: string }> } {
-  const adapter = new OpenRouterAdapter({ defaultModel: model })
+/** Shared OpenRouter completer for an exact model id ({messages}→{text}).
+ *  usageLabel attributes the spend in the ledger (record-only metering). */
+function buildLlmCompleterForModel(model: string, usageLabel = 'agent'): { complete: (body: any) => Promise<{ text: string }> } {
+  const adapter = new OpenRouterAdapter({ defaultModel: model, usageLabel })
   return {
     async complete(body: any): Promise<{ text: string }> {
       return adapter.complete({
@@ -300,6 +312,18 @@ async function main(): Promise<void> {
   // tool + the HUD recall feed. Constructed early so it's in scope for all three.
   const activityStore = new ActivityStore(db)
   log(`Database initialized at ${dbPath}`)
+
+  // ── Daemon-wide usage metering (record-only) ────────────────────────────────
+  // Every OpenRouterAdapter call (conductor tiers, planner, verify gate, compaction,
+  // distill, sub-agents) + every STT/TTS call reports into llm_call_log via these
+  // hooks — the voice/agent path used to bypass the ledger entirely, leaving spend
+  // tracking blind to the daemon's biggest spender. METERED but never budget-BLOCKED:
+  // enforcement stays with the proactive ModelRouter only; a spend cap must never
+  // mute the assistant mid-sentence. Installed right after the DB so nothing runs
+  // unmetered, voice or not.
+  const usageLedger = new CostTracker(db, Number(process.env.KAIROS_MONTHLY_BUDGET_USD) || 50)
+  ;(globalThis as any).__kairosLlmUsage = buildLlmUsageHook(usageLedger, (m) => log(m, 'warn'))
+  ;(globalThis as any).__kairosVoiceUsage = buildVoiceUsageHook(usageLedger, (m) => log(m, 'warn'))
 
   // 5. Handle tasks from previous runs
   //    - One-shot tasks that were running → mark interrupted (don't auto-resume)
@@ -544,7 +568,18 @@ async function main(): Promise<void> {
     if (config.memory.enabled) {
       initMemorySchema(db)
       const embedder = new Embedder()
-      const working = new WorkingMemory(bus, { windowMs: 10 * 60_000, maxEvents: 500 })
+      // 30-min ring so the 30-min perception poll sees the FULL window of events (was
+      // 10 min — a 30-min poll would have lost two-thirds of the context). maxEvents
+      // still bounds the prompt (drops OLDEST first on overflow); both env-tunable so a
+      // busy window can opt into truly-all-events per launch.
+      const working = new WorkingMemory(bus, {
+        // 60 min: must cover the LONGEST adaptive sweep gap (quiet stretches to 60 min)
+        // so a sweep never finds part of its window already evicted.
+        windowMs: Number(process.env.KAIROS_WORKING_MEMORY_WINDOW_MS) || 60 * 60_000,
+        // 2000: a busy window must NEVER be silently truncated — the sweep's whole
+        // point is reviewing the FULL period (observers emit on-change; ~hundreds typical).
+        maxEvents: Number(process.env.KAIROS_WORKING_MEMORY_MAX_EVENTS) || 2000,
+      })
       const episodic = new EpisodicMemory(db)
       const semantic = new SemanticMemory(db)
       const dreamer = new Dreamer(db, episodic, semantic, router, { embedder: (t: string) => embedder.embed(t) })
@@ -757,7 +792,18 @@ async function main(): Promise<void> {
                   manageConnections: true,
                 })
                 await sessionManager.init()
-                log(`[composio] session ready (${sessionManager.getSessionId()}, ${initialToolkits.length} toolkits)`)
+                // Self-heal: toolkits Composio rejected at create (half-connected, no auth config)
+                // were dropped so the session could boot — mark them expired so they stop being
+                // requested on every boot. The user can re-connect them properly any time.
+                for (const slug of sessionManager.droppedToolkits) {
+                  try { connectionStore.markStatus(composioUserId, slug, 'expired') } catch { /* */ }
+                  log(`[composio] dropped half-connected toolkit "${slug}" (marked expired) — other connectors unaffected`, 'warn')
+                }
+                log(`[composio] session ready (${sessionManager.getSessionId()}, ${sessionManager.getToolkits().length} toolkits)`)
+                // Live connected-toolkits getter for the context builder ("Connected apps: …" in
+                // every turn's prompt). Reads the SESSION's current set, so a mid-session
+                // connect_service (addToolkit) is reflected on the very next turn.
+                ;(globalThis as any).__kairosConnectedToolkits = () => { try { return sessionManager.getToolkits() } catch { return [] } }
 
                 await mcpHost.addServer({
                   id: 'composio',
@@ -1877,6 +1923,12 @@ async function main(): Promise<void> {
             return directives.length ? "- How to respond right now: " + directives.join(" ") : ""
           } catch { return '' }
         },
+        // LIVE connected-toolkit list → "Connected apps: Gmail (gmail), Notion (notion)…" in
+        // every turn. The model instantly knows what's connected, what to call each app in
+        // search_tools queries, and that anything else needs connecting first.
+        connectedApps: async () => {
+          try { return ((globalThis as any).__kairosConnectedToolkits?.() ?? []) as string[] } catch { return [] }
+        },
         kairosSkills: async () => {
           // Prefer AWM (agentskills.io) registry — that's what the SkillDispatcher
           // resolves against. Fall back to the legacy manifest-based registry.
@@ -1969,6 +2021,49 @@ async function main(): Promise<void> {
             try { out.push(...buildBackgroundTools({ manager: bgManager })) }
             catch (e) { log('[actionTools] background tools failed: ' + String(e), 'warn') }
           }
+          // JIT memory recall: the per-turn delta injects memory keyed on the UTTERANCE;
+          // recall_memory lets the planner pull memory MID-TASK with its own query
+          // (stored preferences, past decisions, harvested learnings).
+          const memInj = (globalThis as any).__kairosMemoryInjector
+          if (memInj) {
+            try { out.push(buildRecallTool({ injector: memInj })) }
+            catch (e) { log('[actionTools] recall_memory failed: ' + String(e), 'warn') }
+          }
+          // Web access (free, keyless): web_search + read_webpage. Always available —
+          // the 2026-06-10 "research flights" session had NO research capability and
+          // the planner hallucinated instead. KAIROS_WEB_SEARCH=0 disables.
+          if (process.env.KAIROS_WEB_SEARCH !== '0') {
+            try { out.push(...buildWebTools()) }
+            catch (e) { log('[actionTools] web tools failed: ' + String(e), 'warn') }
+          }
+          // Full computer control: run_applescript + run_shell (system volume, media,
+          // scriptable apps, anything a Mac CLI can do). Destructive commands hard-
+          // refused; everything else runs without a prompt. KAIROS_COMPUTER_CONTROL=0 off.
+          if (process.env.KAIROS_COMPUTER_CONTROL !== '0') {
+            try { out.push(...buildControlTools()) }
+            catch (e) { log('[actionTools] control tools failed: ' + String(e), 'warn') }
+          }
+          // Guide Mode: guide_user points at on-screen elements via the HUD overlay
+          // (the orb morphs into a guide); open_app launches the app first when needed
+          // (argv-only `open -a` — no shell, no injection surface).
+          const guideB = (globalThis as any).__kairosGuideBridge
+          if (guideB) {
+            try {
+              out.push(...buildGuideTools({
+                bridge: guideB,
+                openApp: async (name: string) => {
+                  try {
+                    const proc = Bun.spawn(['open', '-a', name], { stdout: 'ignore', stderr: 'pipe' })
+                    const code = await proc.exited
+                    if (code === 0) return { ok: true }
+                    const err = await new Response(proc.stderr).text().catch(() => '')
+                    return { ok: false, error: err.trim().slice(0, 120) || `exit ${code}` }
+                  } catch (e) { return { ok: false, error: (e as Error).message } }
+                },
+              }))
+            }
+            catch (e) { log('[actionTools] guide tools failed: ' + String(e), 'warn') }
+          }
           const seen = new Set<string>()
           return out.filter((t: any) => t?.name && !seen.has(t.name) && (seen.add(t.name), true))
         },
@@ -2004,10 +2099,27 @@ async function main(): Promise<void> {
     // own provider voice config (KAIROS_TTS_VOICE) — do NOT pass the Apple
     // `say` voice name here or it leaks into the provider as a bogus model id
     // (e.g. Deepgram rejected 'Zoe (Premium)' as an invalid model value).
+    // ONE authoritative "KAIROS is audibly speaking" signal for the HUD orb:
+    // renderer playback acks (ground truth) overlaid on the speaker's synthesis
+    // envelope (fallback). Broadcasts `agent_speaking {speaking}` on change only —
+    // the per-phrase tts_begin/tts_end events made the orb strobe every sentence.
+    const speakingState = new SpeakingStateTracker({
+      broadcast: (e) => { try { wrapApi.broadcast(e as any) } catch { /* */ } },
+    })
+
+    // GUIDE MODE bridge: guide_user tool ⇄ HUD overlay (orb morphs into an on-screen
+    // pointer). Requests go out as guide_request events; the HUD answers with a
+    // guide_result command; turn end retracts the guide (guide_end).
+    const guideBridge = new GuideBridge({
+      broadcast: (e) => { try { wrapApi.broadcast(e as any) } catch { /* */ } },
+    })
+    ;(globalThis as any).__kairosGuideBridge = guideBridge
+
     const streamingSpeaker = new StreamingSpeaker({
       backend: voiceBundle.sayBackend,
       voice: voiceBundle.streamingTts ? undefined : (process.env.KAIROS_VOICE_NAME ?? 'Zoe (Premium)'),
       rate: voiceBundle.streamingTts ? undefined : Number(process.env.KAIROS_VOICE_RATE ?? 180),
+      onSpeaking: (s) => speakingState.reportSynthesis(s),
     })
 
     // E.2.5 — Dynamic Composio + self-healing connect
@@ -2181,7 +2293,7 @@ async function main(): Promise<void> {
     // and answer "how's my task going?" in human language.
     const backgroundSub = buildBackgroundSubsystem({
       buildContext: (goal: string, o?: { conversationId?: string }) => contextBuilder.build({ utterance: goal, tier: 'smart', conversationId: o?.conversationId }),
-      makeLlm: (model: string) => new OpenRouterAdapter({ defaultModel: model }) as any,
+      makeLlm: (model: string) => new OpenRouterAdapter({ defaultModel: model, usageLabel: 'subagent' }) as any,
       deepModel: () => TIER_MODELS.deep(),
       fastModel: () => process.env.KAIROS_MEMORY_MODEL ?? TIER_MODELS.fast(),
       agentsDir: join(config.sandboxDir, 'state', 'agents'),
@@ -2210,6 +2322,15 @@ async function main(): Promise<void> {
         streamingSpeaker.begin(); streamingSpeaker.feed(t); await streamingSpeaker.end()
       },
       broadcast: (e: any) => { try { wrapApi.broadcast(e) } catch { /* */ } },
+      // Learnings harvest: the sub-agent's final "Learning: …" line lands in the L2
+      // episodic store (source 'learning') → recalled by the context delta and the
+      // recall_memory tool next time a similar task runs.
+      learnings: {
+        record: async (input: { source: string; text: string }) => {
+          const store = (globalThis as any).__kairosEpisodicStore
+          if (store?.record) return store.record(input)
+        },
+      },
       inbox: (req) => {
         const ib = (globalThis as any).__kairosInbox
         try {
@@ -2312,6 +2433,15 @@ async function main(): Promise<void> {
       classifyLlm: buildAgentLlmCompleter('fast'),
       fastLlm:     buildAgentLlmCompleter('fast'),
       smartLlm:    buildAgentLlmCompleter('smart'),
+      thinkLlm:    buildAgentLlmCompleter('deep'),   // [[think]] fallback — blocking, time-capped
+      // STREAMING think (the default path): deep answers stream sentence-by-sentence
+      // to the speaker — the cap becomes a first-token deadline, so hard questions get
+      // answered LIVE instead of converting to background. Reasoning stays internal
+      // (the adapter excludes it from content), so deltas ARE the answer.
+      thinkStream: (() => {
+        const deepAdapter = new OpenRouterAdapter({ defaultModel: TIER_MODELS.deep(), usageLabel: 'voice_deep' })
+        return (body: any) => deepAdapter.stream(body)
+      })(),
       tools: [...introspectionTools, composioSearchTool, ...composioCache.asTools()],
       contextBuilder,
       turnLogger,
@@ -2382,17 +2512,36 @@ async function main(): Promise<void> {
     })
 
     let activeConductorController: AbortController | undefined
+    let lastUtterance: { text: string; at: number } | undefined
+    const COALESCE_MS = Number(process.env.KAIROS_UTTERANCE_COALESCE_MS) || 800
 
     const handleUtterance = async (utterance: string, conversationId: string): Promise<void> => {
+      // Coalesce STT fragments of ONE breath (diagnosis #4-truncation d): if the previous
+      // turn is STILL in flight and this utterance arrived within ~a breath, the
+      // end-of-utterance detector almost certainly split one utterance ("Okay." +
+      // "Can you?" 751ms apart). Fold the prior text in and answer ONCE — otherwise the
+      // second fragment supersedes + truncates the first's reply. A turn that already
+      // FINISHED clears activeConductorController, so a genuinely new utterance never
+      // coalesces. Tunable / disable with KAIROS_UTTERANCE_COALESCE_MS=0.
+      const now = Date.now()
+      const priorLive = !!activeConductorController && !activeConductorController.signal.aborted
+      const coalesced = coalesceFragment(lastUtterance, utterance, now, { coalesceMs: COALESCE_MS, priorLive })
+      if (coalesced !== utterance) log(`[voice] coalesced STT fragment (${now - (lastUtterance?.at ?? now)}ms gap) → "${coalesced.slice(0, 100)}"`)
+      utterance = coalesced
+      lastUtterance = { text: utterance, at: now }
+
       log(`[voice] handleUtterance ENTER: "${utterance.slice(0, 120)}" (cid=${conversationId})`)
       // Sub-agents spawned during this turn inherit the conversation for context parity.
       try { backgroundSub.manager.setActiveConversation(conversationId) } catch { /* */ }
-      // Supersede any in-flight turn: abort its controller AND stop the shared
-      // speaker so its drain loop exits before the new turn's begin() resets state.
-      // Without the stop(), the old (aborted) turn keeps draining the StreamingSpeaker
-      // and races the new turn over one shared backend → stuck/silent after a barge-in.
+      // Supersede any in-flight turn: abort its controller, then settle the shared
+      // speaker BEFORE the new turn's begin() resets state (an old drain loop racing
+      // the new turn over one backend → stuck/silent after a barge-in).
+      // DRAIN-GRACE (#4-b): a short, nearly-finished reply tail gets to FINISH its
+      // sentence (capped) instead of being cut mid-word; a long in-flight reply is a
+      // real interrupt and is cancelled immediately, as before.
       activeConductorController?.abort()
-      try { streamingSpeaker.cancel() } catch {}
+      const settled = await supersedeSpeech(streamingSpeaker)
+      if (settled === 'drained') log('[voice] supersede: let the prior reply tail finish (drain-grace)')
       const controller = new AbortController()
       activeConductorController = controller
 
@@ -2554,15 +2703,16 @@ async function main(): Promise<void> {
         // Record into L2 episodic memory EVEN IF the reply failed — what the user
         // SAID is worth remembering regardless of whether KAIROS could answer (e.g.
         // an LLM outage shouldn't lose the user's statement). Runs once per turn.
+        // voiceTurnObservation drops a failure-narrative REPLY at write time (the
+        // recorder-side half of the self-poisoning guard).
         try {
           const epStore = (globalThis as any).__kairosEpisodicStore
           if (epStore?.record) {
-            const text = lastAgentReply.trim()
-              ? `User said: "${utterance}". KAIROS replied: "${lastAgentReply}".`
-              : `User said: "${utterance}".`
-            await epStore.record({ source: 'voice', text })
+            await epStore.record({ source: 'voice', text: voiceTurnObservation(utterance, lastAgentReply) })
           }
         } catch (e) { log(`[voice] episodic record failed: ${(e as Error).message}`) }
+        // Guide Mode: a guide never outlives its turn — retract so the orb re-forms.
+        try { guideBridge.endIfActive() } catch { /* */ }
         // Only clear if we're still the active turn (a newer turn may have replaced us).
         if (activeConductorController === controller) activeConductorController = undefined
       }
@@ -2587,6 +2737,38 @@ async function main(): Promise<void> {
       if (cmd?.cmd === 'test_inject_utterance' && typeof cmd.text === 'string') {
         const cid = String(cmd.conversationId ?? 'test-' + Date.now())
         void handleUtterance(cmd.text, cid)
+        return
+      }
+
+      // Renderer playback truth: the Electron renderer reports when Web Audio is
+      // ACTUALLY playing (on change + keepalive). Drives the orb's speaking state
+      // and re-anchors the barge-in debounce to real audio end (tts_end only means
+      // "chunks finished downloading" — playback lags it by the buffer depth).
+      if (cmd?.cmd === 'tts_playback' && typeof cmd.playing === 'boolean') {
+        speakingState.reportPlayback(cmd.playing)
+        if (!cmd.playing) lastTtsEndAt = Date.now()
+        return
+      }
+
+      // Guide Mode: the HUD answers a guide_request (found the element + pointing,
+      // or not found + why) — resolves the agent's awaiting guide_user call.
+      if (cmd?.cmd === 'guide_result' && typeof cmd.id === 'string') {
+        guideBridge.resolve(cmd.id, { found: !!cmd.found, label: cmd.label, reason: cmd.reason })
+        return
+      }
+
+      // Click actuation: the HUD answers a control_request (pressed the element, or
+      // couldn't) — resolves the agent's awaiting click_element call.
+      if (cmd?.cmd === 'control_result' && typeof cmd.id === 'string') {
+        guideBridge.resolveControl(cmd.id, { ok: !!cmd.ok, label: cmd.label, reason: cmd.reason })
+        return
+      }
+
+      // Live voice level from the renderer's playback analyser (~15Hz while audible) —
+      // rebroadcast for the HUD orb's lobes. Chunk-arrival RMS was wrong: chunks
+      // download seconds ahead of playback, leaving the orb static mid-speech.
+      if (cmd?.cmd === 'tts_level' && typeof cmd.level === 'number') {
+        try { wrapApi.broadcast({ event: 'tts_level', level: Math.max(0, Math.min(1, cmd.level)) }) } catch { /* */ }
         return
       }
 

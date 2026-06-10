@@ -20,9 +20,23 @@ export type ComposioSessionManagerOptions = {
   manageConnections?: boolean    // default true
 }
 
+/** Pull the toolkit slugs out of Composio's ToolRouter 4300 rejection message
+ *  ("The following toolkits require auth configs but none exist and cannot be auto-created:
+ *  twitter. Please specify them in auth_configs."). */
+export function parseRejectedToolkits(msg: string): string[] {
+  const m = /cannot be auto-created:\s*([a-z0-9_,\- ]+)/i.exec(msg)
+  if (!m) return []
+  return m[1]!.split(/[,\s]+/).map((s) => s.trim().replace(/\.+$/, "")).filter(Boolean)
+}
+
 export class ComposioSessionManager {
   private session: any = null
   private currentToolkits: Set<ToolkitSlug>
+  /** Toolkits DROPPED during init because Composio rejected them (half-connected / missing
+   *  auth config). The boot site should mark these expired in the connection store so they
+   *  self-heal — one bad toolkit must never take down ALL connectors (2026-06-10: a stale
+   *  half-connected `twitter` row killed Gmail+Calendar on every boot). */
+  readonly droppedToolkits: ToolkitSlug[] = []
 
   constructor(private opts: ComposioSessionManagerOptions) {
     this.currentToolkits = new Set(opts.toolkits)
@@ -38,7 +52,17 @@ export class ComposioSessionManager {
         // resume failed (session might have expired) — fall through to fresh create
       }
     }
-    this.session = await this.opts.sdk.create(this.opts.userId, this.buildCreateOpts())
+    try {
+      this.session = await this.opts.sdk.create(this.opts.userId, this.buildCreateOpts())
+    } catch (err) {
+      // RESILIENCE: if the create was rejected because SPECIFIC toolkits lack auth configs,
+      // drop exactly those and retry once with the rest — degraded beats dead.
+      const bad = parseRejectedToolkits(String((err as Error)?.message ?? err))
+        .filter((s) => this.currentToolkits.has(s))
+      if (bad.length === 0) throw err
+      for (const s of bad) { this.currentToolkits.delete(s); this.droppedToolkits.push(s) }
+      this.session = await this.opts.sdk.create(this.opts.userId, this.buildCreateOpts())
+    }
   }
 
   /** Always returns the exact opts shape we pass to composio.create(). */

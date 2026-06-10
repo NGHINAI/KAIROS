@@ -33,6 +33,13 @@ CREATE TABLE IF NOT EXISTS conversation_summaries (
   covered_turns INTEGER NOT NULL,   -- how many of the OLDEST turns this summary already folds in
   updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS conversation_turn_digests (
+  conversation_id TEXT NOT NULL,
+  turn_id TEXT NOT NULL,
+  digest TEXT NOT NULL,             -- one deterministic line: ask → reply → tools/handles
+  at INTEGER NOT NULL,
+  PRIMARY KEY (conversation_id, turn_id)
+);
 `
 
 export interface ReplayOpts {
@@ -40,10 +47,42 @@ export interface ReplayOpts {
   maxTurns?: number
   /** Drop oldest WHOLE turns until total content is under this many chars. Default 12000. */
   maxChars?: number
+  /** Tool results in turns OLDER than the most recent N keep only their HANDLES (ids/urls/
+   *  status) — the bulky body is masked. Old raw results are mostly noise that degrades the
+   *  model's attention (observation masking ≈ same quality, ~half the tokens), but the ids
+   *  must survive — they're what "reply to that same email" chains on. Default 2. */
+  keepRawTurns?: number
 }
 
 const DEFAULT_MAX_TURNS = Number(process.env.KAIROS_REPLAY_MAX_TURNS) || 8
 const DEFAULT_MAX_CHARS = Number(process.env.KAIROS_REPLAY_MAX_CHARS) || 12000
+const DEFAULT_KEEP_RAW_TURNS = Number(process.env.KAIROS_REPLAY_KEEP_RAW_TURNS ?? 2)
+// L1 layer: how many RECENT-BUT-OLDER turns keep a per-turn one-line digest before
+// dissolving into the L2 rolling summary. The layered pyramid is:
+//   L0 raw turns (8) → L1 one-line digests (24) → L2 one rolling summary (everything older)
+const DEFAULT_L1_TURNS = Number(process.env.KAIROS_HISTORY_L1_TURNS ?? 24)
+const L1_BLOCK_MAX_CHARS = 3000   // the whole injected digest block stays bounded
+const MASK_MIN_CHARS = 220   // results smaller than this aren't worth masking
+
+// Key/value pairs whose KEY looks like a stable handle (id / url / key / number / handle).
+const HANDLE_PAIR_RE = /"([A-Za-z0-9_]*(?:id|Id|ID|url|Url|link|Link|key|Key|number|handle|Handle)[A-Za-z0-9_]*)"\s*:\s*"([^"]{1,160})"/g
+
+/** Compress an old tool result to its actionable essence: handles + success flag. */
+export function maskToolResult(content: string): string {
+  if (content.length < MASK_MIN_CHARS) return content
+  const handles: string[] = []
+  const seen = new Set<string>()
+  let m: RegExpExecArray | null
+  HANDLE_PAIR_RE.lastIndex = 0
+  while ((m = HANDLE_PAIR_RE.exec(content)) !== null && handles.length < 8) {
+    const pair = `${m[1]}=${m[2]}`
+    if (!seen.has(pair)) { seen.add(pair); handles.push(pair) }
+  }
+  const ok = /"successful"\s*:\s*true|"success"\s*:\s*true/.test(content) ? " | ok" :
+             /"successful"\s*:\s*false|"error"\s*:/.test(content) ? " | FAILED" : ""
+  const head = content.slice(0, 120).replace(/\s+/g, " ")
+  return `[older result, body elided] ${head}…${ok}${handles.length ? `\nhandles: ${handles.join(", ")}` : ""}`
+}
 
 type Row = {
   turn_id: string
@@ -52,6 +91,55 @@ type Row = {
   tool_calls: string | null
   tool_call_id: string | null
   at: number
+}
+
+function clipLine(s: string, n: number): string {
+  const t = s.replace(/\s+/g, " ").trim()
+  return t.length > n ? t.slice(0, n - 1) + "…" : t
+}
+
+/** Deterministic one-line digest of a whole turn — what the user asked, what KAIROS
+ *  answered, which tool did it, and the handles it produced. NO LLM: free, instant,
+ *  and incapable of inventing an id. This is the L1 layer of the history pyramid —
+ *  per-turn distinctions survive long after the raw turn scrolls out of the window
+ *  ("what did I ask you twenty minutes ago?" stays answerable). */
+export function buildTurnDigest(rows: Row[]): string {
+  const user = rows.find((r) => r.role === "user")?.content ?? ""
+  const reply = [...rows].reverse().find((r) => r.role === "assistant" && r.content)?.content ?? ""
+
+  // Effective tool names (execute_tool unwrapped to the real action).
+  const toolNames: string[] = []
+  for (const r of rows) {
+    if (r.role !== "assistant" || !r.tool_calls) continue
+    for (const c of safeParse(r.tool_calls) ?? []) {
+      let name = c?.function?.name ?? ""
+      if (name === "execute_tool") {
+        const args = safeParse(c?.function?.arguments ?? "")
+        name = args?.tool_name ?? name
+      }
+      if (name && name !== "update_plan" && !toolNames.includes(name)) toolNames.push(name)
+    }
+  }
+
+  // Handles from the turn's tool results — the ids a later turn might chain on.
+  const handles: string[] = []
+  const seen = new Set<string>()
+  for (const r of rows) {
+    if (r.role !== "tool" || !r.content) continue
+    HANDLE_PAIR_RE.lastIndex = 0
+    let m: RegExpExecArray | null
+    while ((m = HANDLE_PAIR_RE.exec(r.content)) !== null && handles.length < 3) {
+      const pair = `${m[1]}=${m[2]}`
+      if (!seen.has(pair)) { seen.add(pair); handles.push(pair) }
+    }
+  }
+
+  let line = `user: "${clipLine(user, 90)}"`
+  if (reply) line += ` → KAIROS: "${clipLine(reply, 110)}"`
+  const via = toolNames.slice(0, 3).map((n) => n.replace(/_/g, " ").toLowerCase()).join(", ")
+  const extras = [via ? `via ${via}` : "", handles.join(", ")].filter(Boolean).join("; ")
+  if (extras) line += ` (${extras})`
+  return line.slice(0, 320)
 }
 
 export class ConversationMessageStore {
@@ -119,15 +207,39 @@ export class ConversationMessageStore {
       keptTurns = keptTurns.slice(1)
     }
 
+    // Observation masking: in turns older than the most recent keepRawTurns, tool results
+    // keep only their handles (ids/urls/status) — old bodies are attention noise.
+    const keepRaw = Math.max(0, opts.keepRawTurns ?? DEFAULT_KEEP_RAW_TURNS)
+    const rawSet = new Set(keptTurns.slice(keptTurns.length - keepRaw))
+
     const out: LoopMsg[] = []
     for (const tid of keptTurns) {
-      for (const r of byTurn.get(tid)!) out.push(rowToMsg(r))
+      for (const r of byTurn.get(tid)!) {
+        const msg = rowToMsg(r)
+        if (!rawSet.has(tid) && (msg as any).role === "tool" && typeof (msg as any).content === "string") {
+          ;(msg as any).content = maskToolResult((msg as any).content)
+        }
+        out.push(msg)
+      }
     }
     const view = pairSafe(out)
 
-    // Prepend the rolling summary of OLDER turns (those that fell out of the recent
-    // window) so the conversation is remembered in full: recent verbatim + older
-    // summarized. Injected as a system message ahead of the recent messages.
+    // L1 — per-turn digests for turns that aged out of the raw window but haven't
+    // dissolved into the rolling summary yet (one line each, oldest first). This is
+    // the middle of the pyramid: turn-level distinctions + handles, a fraction of
+    // the tokens of raw turns.
+    const keptSet = new Set(keptTurns)
+    const digestRows = this.db
+      .query(`SELECT turn_id, digest FROM conversation_turn_digests WHERE conversation_id = ? ORDER BY rowid ASC`)
+      .all(conversationId) as Array<{ turn_id: string; digest: string }>
+    const digestLines = digestRows.filter((d) => !keptSet.has(d.turn_id)).map((d) => `- ${d.digest}`)
+    if (digestLines.length > 0) {
+      const block = digestLines.join("\n").slice(0, L1_BLOCK_MAX_CHARS)
+      view.unshift({ role: "system", content: `Earlier turns in this conversation (one line each, oldest first):\n${block}` })
+    }
+
+    // L2 — the rolling summary of everything older still. Unshifted LAST so the final
+    // order reads oldest-context-first: [summary, digests, …recent raw messages].
     const summary = this.getSummary(conversationId)
     if (summary) view.unshift({ role: "system", content: `Earlier in this conversation (summary of older turns):\n${summary}` })
     return view
@@ -147,19 +259,57 @@ export class ConversationMessageStore {
     return rows.map(r => r.turn_id)
   }
 
-  /** Off-the-hot-path: fold turns that have aged out of the recent `keepRecent`
-   *  window into the rolling summary. INCREMENTAL — only turns not already covered are
-   *  summarized, with the existing summary carried forward, so cost stays bounded as
-   *  the conversation grows. `summarize` is the caller's cheap-model digest fn. */
+  /** Off-the-hot-path history compaction — maintains the LAYERED pyramid:
+   *    L0: the most recent `keepRecent` turns stay raw (loadForReplay's window).
+   *    L1: turns aged out of L0 get a deterministic ONE-LINE digest each (no LLM),
+   *        kept for the most recent `l1Turns` aged-out turns.
+   *    L2: turns older than L0+L1 fold into the single rolling summary (cheap-model),
+   *        and their digests are deleted — each fact lives in exactly one layer.
+   *  INCREMENTAL — only newly-aged-out turns are processed, with the existing summary
+   *  carried forward, so cost stays bounded as the conversation grows. */
   async updateRollingSummary(
     conversationId: string,
     summarize: (text: string) => Promise<string>,
-    opts: { keepRecent?: number } = {},
+    opts: { keepRecent?: number; l1Turns?: number } = {},
   ): Promise<void> {
     const keepRecent = opts.keepRecent ?? DEFAULT_MAX_TURNS
+    const l1Turns = Math.max(0, opts.l1Turns ?? DEFAULT_L1_TURNS)
     const turnIds = this.turnIdsInOrder(conversationId)
-    const summaryBoundary = turnIds.length - keepRecent  // turns [0, summaryBoundary) belong in the summary
-    if (summaryBoundary <= 0) return                     // nothing older than the window yet
+    const l0Boundary = turnIds.length - keepRecent       // turns [0, l0Boundary) are out of the raw window
+    if (l0Boundary <= 0) return                          // nothing older than the window yet
+
+    const rows = this.db
+      .query(`SELECT turn_id, role, content, tool_calls, tool_call_id, at FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC`)
+      .all(conversationId) as Row[]
+    const byTurn = new Map<string, Row[]>()
+    for (const r of rows) {
+      if (!byTurn.has(r.turn_id)) byTurn.set(r.turn_id, [])
+      byTurn.get(r.turn_id)!.push(r)
+    }
+
+    // ── L1: digest aged-out turns that don't have one yet (bounded per call). ──
+    if (l1Turns > 0) {
+      const l1Zone = turnIds.slice(Math.max(0, l0Boundary - l1Turns), l0Boundary)
+      const have = new Set(
+        (this.db.query(`SELECT turn_id FROM conversation_turn_digests WHERE conversation_id = ?`).all(conversationId) as Array<{ turn_id: string }>)
+          .map((r) => r.turn_id),
+      )
+      const ins = this.db.prepare(
+        `INSERT OR IGNORE INTO conversation_turn_digests (conversation_id, turn_id, digest, at) VALUES (?, ?, ?, ?)`,
+      )
+      let made = 0
+      for (const tid of l1Zone) {
+        if (have.has(tid) || made >= 20) continue        // cap per invocation; the next call catches up
+        const turnRows = byTurn.get(tid)
+        if (!turnRows?.length) continue
+        ins.run(conversationId, tid, buildTurnDigest(turnRows), turnRows[0]!.at)
+        made++
+      }
+    }
+
+    // ── L2: fold turns older than L0+L1 into the rolling summary. ──
+    const summaryBoundary = l0Boundary - l1Turns         // turns [0, summaryBoundary) belong in the summary
+    if (summaryBoundary <= 0) return
 
     const existing = this.db
       .query(`SELECT summary, covered_turns FROM conversation_summaries WHERE conversation_id = ?`)
@@ -168,10 +318,8 @@ export class ConversationMessageStore {
     if (summaryBoundary <= covered) return               // already summarized up to the boundary
 
     // Render only the NEWLY-aged-out turns [covered, summaryBoundary).
-    const foldTurnIds = new Set(turnIds.slice(covered, summaryBoundary))
-    const rows = this.db
-      .query(`SELECT turn_id, role, content, tool_calls, tool_call_id, at FROM conversation_messages WHERE conversation_id = ? ORDER BY id ASC`)
-      .all(conversationId) as Row[]
+    const foldList = turnIds.slice(covered, summaryBoundary)
+    const foldTurnIds = new Set(foldList)
     const foldText = rows
       .filter(r => foldTurnIds.has(r.turn_id))
       .map(r => `${r.role}: ${r.content ?? (r.tool_calls ? "[called tools]" : "")}`)
@@ -191,6 +339,10 @@ export class ConversationMessageStore {
        ON CONFLICT(conversation_id) DO UPDATE SET summary = excluded.summary, covered_turns = excluded.covered_turns, updated_at = excluded.updated_at`,
       [conversationId, summary, summaryBoundary, Date.now()],
     )
+
+    // A fact lives in exactly one layer: digests for folded turns are now redundant.
+    const del = this.db.prepare(`DELETE FROM conversation_turn_digests WHERE conversation_id = ? AND turn_id = ?`)
+    for (const tid of foldList) del.run(conversationId, tid)
   }
 }
 

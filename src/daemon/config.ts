@@ -81,7 +81,11 @@ const DEFAULTS: Config = {
     // Observes world-state events (git, files, etc.) and classifies them via LLM.
     // Disable or slow the poll to cut background calls. Env-driven.
     enabled: process.env.KAIROS_PERCEPTION_ENABLED !== 'false',
-    pipelinePollMs: envInt('KAIROS_PERCEPTION_POLL_MS', 30_000),
+    // Every 30 MINUTES, KAIROS reviews ALL events from the last 30 min as ONE batch —
+    // a periodic "catch up on what happened" pass (like a chief of staff reviewing the
+    // window), not a 30s twitch. Genuinely urgent real-time events still interrupt
+    // immediately via the trigger/UrgencyFloor path (independent of this poll).
+    pipelinePollMs: envInt('KAIROS_PERCEPTION_POLL_MS', 30 * 60_000),
   },
   orders: { enabled: true, filePath: join(process.env.HOME ?? '', '.kairos', 'STANDING_ORDERS.md') },
   agency: {

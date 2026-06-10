@@ -42,7 +42,13 @@ const LOCAL_TOOLS = new Set([
   "run_subtask", "spawn_background_task", "background_tasks",
   // KAIROS's own read-only discovery tools (not third-party toolkits) — harmless, must
   // never be approval-gated (the sub-agent searches constantly).
-  "search_tools", "find_integration",
+  "search_tools", "find_integration", "recall_memory", "web_search", "read_webpage",
+  // guide_user only POINTS at the screen (the user does the clicking) — read-only.
+  // open_app launches a macOS app by name (argv-only `open -a`) — benign, reversible.
+  // run_applescript / run_shell self-guard (destructive patterns hard-refused inside
+  // the tool); the user opted into a hands-on assistant with no per-action prompts,
+  // so they're not approval-gated. click_element actuates a single AX press.
+  "guide_user", "open_app", "run_applescript", "run_shell", "click_element",
 ])
 
 /** The real action name — unwrapping execute_tool's wrapped tool_name. */
@@ -82,6 +88,14 @@ function callErrored(c: VerifyToolCall): boolean {
   return false
 }
 
+// A short final that PROMISES instead of answering ("one moment", "I'll check", "I'm going to
+// create it") — the turn would end with the user waiting for something that will never come.
+// Exported: the memory layer reuses this to keep KAIROS's own promissory replies OUT of
+// long-term memory (recalled promises teach the model to re-promise instead of working —
+// the 2026-06-10 flight-research parroting loop).
+export const PROMISSORY_RE =
+  /\b(one (moment|sec(ond)?)|just a (moment|sec(ond)?)|hold on|give me a (moment|sec(ond)?)|let me (check|look|see|pull|get)|i('?ll| will) (now )?(check|look|take a look|get back to you|pull|find out|create|send|schedule|add|set|put|make|book|draft|do (that|it))|i('?m| am) (going to|about to)|i('?ve| have) (just |already )?(started|begun)|i('?m| am) (now )?(researching|working on|looking into)|checking now|looking (into|at) (it|that|this|your|the)\b|starting (that|this|it) now)\b/i
+
 export interface VerifyResult {
   ok: boolean
   concern?: string
@@ -115,6 +129,24 @@ export function buildDestructiveVerifier(deps: VerifierDeps) {
       const calls = opts.toolCalls ?? []
       const severity: "read" | "write" = calls.some((c) => isDestructive(c)) ? "write" : "read"
       const finalText = String(opts.finalText ?? "")
+
+      // FREE deterministic pre-check: the agent ended the turn with a PROMISE ("one moment",
+      // "I'll check…") instead of a result. That's only legitimate when the work was actually
+      // handed off to the background lane. Otherwise force a self-correct round so it DOES the
+      // work now instead of hanging up on a promise (2026-06-10: "I can check your calendar.
+      // One moment." — turn over, nothing checked).
+      const handedOff = calls.some((c) => c.name === "spawn_background_task" || c.name === "run_subtask")
+      // An answer that ENDS with a question is an offer awaiting the user's call ("…want me to
+      // archive the rest?") — a valid end-state, not an abandoned promise. Don't flag those.
+      const endsAsQuestion = finalText.trim().endsWith("?")
+      if (!handedOff && !endsAsQuestion && finalText.length < 240 && PROMISSORY_RE.test(finalText)) {
+        return {
+          ok: false,
+          severity,
+          concern:
+            "you ended with a promise instead of the result — actually do the task NOW (call the tools you need) and answer with what you found, or state plainly what's blocking you",
+        }
+      }
 
       // A run that touched only confined scratch/plan tools (or no tools) makes no
       // external/factual claim worth grounding → ok, no LLM call.

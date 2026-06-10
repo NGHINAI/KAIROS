@@ -91,3 +91,32 @@ describe('ComposioSessionManager', () => {
     expect(behavior.updated).toBeUndefined()
   })
 })
+
+describe('init resilience — half-connected toolkit must not kill all connectors', () => {
+  const REJECTION = '400 {"error":{"message":"The following toolkits require auth configs but none exist and cannot be auto-created: twitter. Please specify them in auth_configs.","code":4300}}'
+
+  it('drops the rejected toolkit, retries once, and reports it via droppedToolkits', async () => {
+    let calls = 0
+    let lastOpts: any
+    const sdk = {
+      create: async (_u: string, opts: any) => {
+        calls++
+        lastOpts = opts
+        if (opts.toolkits.includes('twitter')) throw new Error(REJECTION)
+        return { id: 's1', session_id: 's1', mcp: { url: 'https://x/mcp', headers: {} } }
+      },
+    }
+    const m = new ComposioSessionManager({ sdk, userId: 'local', toolkits: ['gmail', 'googlecalendar', 'twitter'] })
+    await m.init()
+    expect(calls).toBe(2)                                    // failed once, retried without the offender
+    expect(lastOpts.toolkits.sort()).toEqual(['gmail', 'googlecalendar'])
+    expect(m.droppedToolkits).toEqual(['twitter'])
+    expect(m.getSessionId()).toBe('s1')                      // the OTHER connectors survived
+  })
+
+  it('rethrows when the failure is not a parseable toolkit rejection', async () => {
+    const sdk = { create: async () => { throw new Error('network down') } }
+    const m = new ComposioSessionManager({ sdk, userId: 'local', toolkits: ['gmail'] })
+    await expect(m.init()).rejects.toThrow('network down')
+  })
+})

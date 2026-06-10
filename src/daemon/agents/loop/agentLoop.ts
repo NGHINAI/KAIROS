@@ -7,6 +7,7 @@
 
 import type { ToolDef } from "../types"
 import { executeToolCall } from "./toolExecutor"
+import { isDestructiveCall } from "./verifier"
 import { toolsToSchemas, type AgentLoopResult, type LoopEvent, type LoopLlm, type LoopMsg, type ToolCall } from "./types"
 
 export interface AgentLoopDeps {
@@ -20,6 +21,10 @@ export interface AgentLoopDeps {
   emptyFallback?: string
   /** Optional context compaction hook, run after each tool round. */
   compact?: (messages: LoopMsg[], tokensIn: number) => Promise<LoopMsg[]>
+  /** Optional cheap-LLM prose distiller for over-budget UNSTRUCTURED tool results (web pages,
+   *  long docs). Structured results are always shaped deterministically; this only ever phrases
+   *  prose, and the executor validates it can't invent a number/id. See buildProseDistiller. */
+  distill?: (text: string) => Promise<string>
   /** Injectable sleep (tests pass a no-op). Default backs off real time. */
   sleep?: (ms: number) => Promise<void>
   /** After this many consecutive ALL-failed tool rounds, inject a re-plan note so
@@ -64,6 +69,7 @@ export async function runAgentLoop(initial: LoopMsg[], deps: AgentLoopDeps): Pro
   const replanAfter = deps.replanAfter ?? (Number(process.env.KAIROS_REPLAN_AFTER) || 2)
   const stallAfter = deps.stallAfter ?? (Number(process.env.KAIROS_STALL_AFTER) || 2)
   let consecutiveFailedRounds = 0
+  let badSlugNudged = false
   let lastPlan: Array<{ step: string; status: string }> | undefined
   let prevSignature = ""
   let identicalRounds = 1
@@ -129,7 +135,7 @@ export async function runAgentLoop(initial: LoopMsg[], deps: AgentLoopDeps): Pro
         let args: any = {}
         try { args = c.argsJson ? JSON.parse(c.argsJson) : {} } catch { /* executor reports the parse error */ }
         emit({ kind: "tool_call_start", id: c.id, name: c.name, args })
-        const res = await executeToolCall(c, deps.tools, { signal: deps.signal })
+        const res = await executeToolCall(c, deps.tools, { signal: deps.signal, distill: deps.distill })
         if (res.ok) emit({ kind: "tool_call_done", id: c.id, name: c.name, result: res.result })
         else emit({ kind: "tool_call_failed", id: c.id, name: c.name, error: res.content })
         // R4: surface the plan to the UI / check-ins / trajectory the moment it changes.
@@ -210,6 +216,60 @@ export async function runAgentLoop(initial: LoopMsg[], deps: AgentLoopDeps): Pro
 
     // Final answer (or forced answer on the last turn).
     const draft = text.trim()
+
+    // RECOVERABLE-FAILURE nudge: the model is about to give up right after its LAST action
+    // FAILED — without following the recovery the error itself spelled out. Weak models quit
+    // after one failure (2026-06-10: guessed slug "NOTION_GET_PAGE_CONTENT"; then passed a page
+    // NAME where a UUID id was required — both errors said exactly how to fix it). Force ONE
+    // recovery attempt. Read-safe: skipped entirely if any successful WRITE already ran, so it
+    // can never re-execute an irreversible action.
+    if (!badSlugNudged && !lastTurn) {
+      const real = toolCalls.filter((c) => c.name !== "update_plan")
+      const last = real[real.length - 1]
+      const failedish = (c: typeof last) => {
+        if (!c) return false
+        if (c.error != null) return true
+        const r: any = c.result
+        if (r && typeof r === "object") {
+          if (r.successful === false) return true
+          const e = r.error
+          if (typeof e === "string" && e.trim()) return true
+          if (e && typeof e === "object" && (e.message || e.error)) return true
+        }
+        return false
+      }
+      // Also: ENDING A TASK TURN WITH ZERO TOOL ATTEMPTS and no question back to the user.
+      // The classic failure: memory recalled an OLD failure ("the tool requires a specific
+      // format…") and the model parrots it instead of trying — phrasings vary endlessly, so
+      // don't pattern-match the excuse; challenge the *shape*. Legit zero-tool answers (from
+      // the conversation's own prior results) just restate and pass on the second round;
+      // clarifying questions are exempt via the "?" check.
+      const zeroToolFinal = real.length === 0 && draft.length > 0 && !draft.trim().endsWith("?")
+      if (failedish(last) || zeroToolFinal) {
+        const wrote = toolCalls.some((c) => {
+          if (c.error) return false
+          try { return isDestructiveCall({ name: c.name, args: c.args }) } catch { return false }
+        })
+        if (!wrote) {
+          badSlugNudged = true
+          // role:"user", not "system": gemini-class models largely ignore mid-conversation
+          // system messages — as a user-role note the instruction actually lands.
+          msgs.push({
+            role: "user",
+            content:
+              "[automatic check — not the user speaking] " +
+              (zeroToolFinal
+                ? "You made NO tool attempt this turn. If the conversation above already contains everything needed for your answer, simply restate it and it will stand. Otherwise — and for ANYTHING live (a page, email, calendar, file) — use your tools NOW: search the app for the item BY NAME, take the real id from the result, and do the task. A remembered past failure is not an attempt."
+                : "Your last tool call FAILED and its error says exactly how to fix it. Do NOT answer me yet. " +
+                  "If the tool name was wrong: call search_tools with a plain description and use the EXACT name it returns. " +
+                  "If an argument was wrong (e.g. an id must be a UUID): first search the app for the item BY NAME, take the real id from the result, then retry the call with it. " +
+                  "Do the corrected call now."),
+          })
+          continue
+        }
+      }
+    }
+
     const finalText = draft || deps.emptyFallback || EMPTY_FALLBACK
 
     // ── Grounded verify gate (text-only correction; NEVER re-executes) ─────────
@@ -221,7 +281,10 @@ export async function runAgentLoop(initial: LoopMsg[], deps: AgentLoopDeps): Pro
     // the final/forced one. The streamed (optimistic) text, if any, is superseded by
     // this return value (the conductor speaks the corrected text; on a write turn the
     // claim was held back, on a read turn a short follow-up corrects it).
-    if (deps.verify && draft && toolCalls.length > 0) {
+    // Runs on EVERY turn with a draft — even zero-tool turns: the verifier's deterministic
+    // promissory check catches "I'm going to create it…" finals where nothing was done at all
+    // (its LLM grounding pass still only fires when external tools actually ran).
+    if (deps.verify && draft) {
       let v: { ok: boolean; concern?: string; correction?: string } | null = null
       try { v = await deps.verify({ finalText, toolCalls }) } catch { v = null }
       if (v && v.ok === false) {

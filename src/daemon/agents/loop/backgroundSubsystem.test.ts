@@ -1,6 +1,6 @@
 // src/daemon/agents/loop/backgroundSubsystem.test.ts
 import { test, expect } from "bun:test"
-import { buildBackgroundSubsystem } from "./backgroundSubsystem"
+import { buildBackgroundSubsystem, extractLearning } from "./backgroundSubsystem"
 import type { ToolDef } from "../types"
 
 const tick = () => new Promise((r) => setTimeout(r, 0))
@@ -218,4 +218,133 @@ test("a DESTRUCTIVE tool call APPROVED → it runs", async () => {
   sub.approvalGate.resolveLatest(true)
   expect(await waitDone(sub.manager, id)).toBe("done")
   expect(sent).toBe(true)
+})
+
+test("background task speaks AT MOST ONE sparse mid-run update (then only the final report)", async () => {
+  process.env.KAIROS_BG_UPDATE_AFTER_MS = "0"   // no wait in tests; default is 60s
+  try {
+    const { deps, spoken } = baseDeps({
+      makeLlm: () => scriptedLlm([
+        // turn 1 + 2: two plan updates → two task_progress events
+        [{ kind: "tool_use", id: "c1", name: "update_plan", args_json: '{"plan":[{"step":"digging into flight prices","status":"in_progress"}]}' }, { kind: "done" }],
+        [{ kind: "tool_use", id: "c2", name: "update_plan", args_json: '{"plan":[{"step":"digging into flight prices","status":"completed"},{"step":"comparing airlines","status":"in_progress"}]}' }, { kind: "done" }],
+        [{ kind: "delta", text: "Found three good options." }, { kind: "done" }],
+      ]),
+    })
+    const sub = buildBackgroundSubsystem(deps as any)
+    const { id } = sub.manager.spawn("research flights to SF")
+    await waitDone(sub.manager, id!)
+    await tick(); await tick()
+    const updates = spoken.filter((s) => s.startsWith("Quick update"))
+    expect(updates.length).toBe(1)                                  // sparse: ONE update, not chatter
+    expect(updates[0]).toContain("research flights to SF")
+    expect(updates[0]).toMatch(/digging into flight prices/)        // the milestone note, humanized
+    expect(spoken.some((s) => s.startsWith("Done with"))).toBe(true) // final report still spoken
+  } finally { delete process.env.KAIROS_BG_UPDATE_AFTER_MS }
+})
+
+test("KAIROS_BG_SPOKEN_UPDATES=0 disables mid-run updates entirely", async () => {
+  process.env.KAIROS_BG_UPDATE_AFTER_MS = "0"
+  process.env.KAIROS_BG_SPOKEN_UPDATES = "0"
+  try {
+    const { deps, spoken } = baseDeps({
+      makeLlm: () => scriptedLlm([
+        [{ kind: "tool_use", id: "c1", name: "update_plan", args_json: '{"plan":[{"step":"working","status":"in_progress"}]}' }, { kind: "done" }],
+        [{ kind: "delta", text: "Done." }, { kind: "done" }],
+      ]),
+    })
+    const sub = buildBackgroundSubsystem(deps as any)
+    const { id } = sub.manager.spawn("some goal")
+    await waitDone(sub.manager, id!)
+    await tick()
+    expect(spoken.filter((s) => s.startsWith("Quick update")).length).toBe(0)
+  } finally { delete process.env.KAIROS_BG_UPDATE_AFTER_MS; delete process.env.KAIROS_BG_SPOKEN_UPDATES }
+})
+
+// ── Learnings harvest ─────────────────────────────────────────────────────────────
+
+test("extractLearning peels a valid Learning line off the spoken report", () => {
+  const { spoken, learning } = extractLearning(
+    "Booked the 9am ANA flight at $812.\nLearning: Kayak needed the city code, not the airport name.",
+  )
+  expect(spoken).toBe("Booked the 9am ANA flight at $812.")
+  expect(learning).toBe("Kayak needed the city code, not the airport name.")
+})
+
+test("extractLearning accepts the 'One learning for next time:' phrasing too", () => {
+  const { learning } = extractLearning("Done.\nOne learning for next time — use the v2 endpoint for bulk reads.")
+  expect(learning).toBe("use the v2 endpoint for bulk reads.")
+})
+
+test("a failure-echo learning is neither stored nor spoken", () => {
+  const { spoken, learning } = extractLearning(
+    "I finished what I could.\nLearning: I was unable to access the Notion page.",
+  )
+  expect(learning).toBeUndefined()
+  expect(spoken).toBe("I finished what I could.")
+})
+
+test("a report with no learning line passes through unchanged", () => {
+  const { spoken, learning } = extractLearning("All set — three events created.")
+  expect(spoken).toBe("All set — three events created.")
+  expect(learning).toBeUndefined()
+})
+
+test("a learning-only report keeps its text for the spoken fallback", () => {
+  const { spoken, learning } = extractLearning("Learning: the export needs ISO dates.")
+  expect(learning).toBe("the export needs ISO dates.")
+  expect(spoken).toContain("the export needs ISO dates")  // never return empty speech
+})
+
+test("a finished run stores its learning in memory and keeps it out of the spoken report", async () => {
+  const recorded: any[] = []
+  const { deps, spoken } = baseDeps({
+    makeLlm: () => scriptedLlm([[
+      { kind: "delta", text: "Sorted 14 emails into folders.\nLearning: Gmail batch-modify caps at 50 ids per call." },
+      { kind: "done" },
+    ]]),
+    learnings: { record: async (input: any) => { recorded.push(input) } },
+  })
+  const sub = buildBackgroundSubsystem(deps as any)
+  const { id } = sub.manager.spawn("sort my inbox")
+  await waitDone(sub.manager, id)
+  await tick()
+  expect(recorded).toEqual([{ source: "learning", text: "Gmail batch-modify caps at 50 ids per call." }])
+  const report = spoken.find((s) => s.includes("Sorted 14 emails"))
+  expect(report).toBeDefined()
+  expect(report!).not.toContain("Learning:")
+  expect(report!).not.toContain("batch-modify")
+})
+
+test("the same learning is recorded only once per session (dedupe)", async () => {
+  const recorded: any[] = []
+  const { deps } = baseDeps({
+    makeLlm: () => scriptedLlm([[
+      { kind: "delta", text: "Done.\nLearning: Gmail batch-modify caps at 50 ids per call." },
+      { kind: "done" },
+    ]]),
+    learnings: { record: async (input: any) => { recorded.push(input) } },
+  })
+  const sub = buildBackgroundSubsystem(deps as any)
+  const a = sub.manager.spawn("sort my inbox")
+  await waitDone(sub.manager, a.id)
+  const b = sub.manager.spawn("sort my inbox again")
+  await waitDone(sub.manager, b.id)
+  await tick()
+  expect(recorded.length).toBe(1)
+})
+
+test("a learnings-store failure never breaks the run or the report", async () => {
+  const { deps, spoken } = baseDeps({
+    makeLlm: () => scriptedLlm([[
+      { kind: "delta", text: "Finished the research.\nLearning: site search beats the API here." },
+      { kind: "done" },
+    ]]),
+    learnings: { record: async () => { throw new Error("db locked") } },
+  })
+  const sub = buildBackgroundSubsystem(deps as any)
+  const { id } = sub.manager.spawn("research")
+  expect(await waitDone(sub.manager, id)).toBe("done")
+  await tick()
+  expect(spoken.some((s) => s.includes("Finished the research"))).toBe(true)
 })

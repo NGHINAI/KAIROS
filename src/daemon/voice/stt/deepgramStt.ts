@@ -66,6 +66,15 @@ export class DeepgramStt implements SttBackend {
     }
     const json: any = await resp.json()
     const alt = json?.results?.channels?.[0]?.alternatives?.[0]
+    // Usage metering (record-only): Deepgram reports the exact audio duration in
+    // metadata; fall back to PCM math (s16le mono → bytes / (sampleRate · 2)).
+    try {
+      const bytes = (audio.data as any)?.byteLength ?? 0
+      const seconds = typeof json?.metadata?.duration === "number"
+        ? json.metadata.duration
+        : bytes > 0 ? bytes / (sr * 2) : 0
+      ;(globalThis as any).__kairosVoiceUsage?.({ kind: "stt", provider: "deepgram", seconds })
+    } catch { /* metering must never break a transcription */ }
     return {
       text: String(alt?.transcript ?? "").trim(),
       confidence: typeof alt?.confidence === "number" ? alt.confidence : undefined,

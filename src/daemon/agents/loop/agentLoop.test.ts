@@ -276,14 +276,90 @@ test("verify gate: a grounded claim passes through untouched", async () => {
   expect(verifyCalls).toBe(1)
 })
 
-test("verify gate: NOT consulted on a pure-chat turn (no tools ran)", async () => {
+test("verify gate IS consulted on a zero-tool turn (catches promise-finals where nothing ran)", async () => {
+  // The verifier's deterministic promissory check is the reason: "I'm going to create it…"
+  // with zero tool calls must trigger a self-correct round. A verify that returns ok keeps
+  // pure chat ("hey there") flowing through untouched.
   const llm = fakeLlm([[delta("hey there"), done()]])
-  let verifyCalls = 0
+  let seenToolCalls: any = null
   const res = await runAgentLoop([{ role: "user", content: "hi" }], {
     llm: llm as any,
     tools,
-    verify: async () => { verifyCalls++; return { ok: false } },
+    verify: async (o) => { seenToolCalls = o.toolCalls; return { ok: true } },
   })
   expect(res.finalText).toBe("hey there")
-  expect(verifyCalls).toBe(0) // nothing was done → nothing to ground
+  expect(seenToolCalls).toEqual([])   // consulted, with an empty ledger
+})
+
+test("bad-slug failure → model tries to give up → loop FORCES the search_tools recovery", async () => {
+  // turn1: guessed slug fails · turn2: model tries to quit → nudge · turn3: search_tools · turn4: real answer
+  const llm = fakeLlm([
+    [toolUse("c1", "execute_tool", '{"tool_name":"NOTION_GET_PAGE_CONTENT"}'), done()],
+    [delta("I couldn't get the page content."), done()],
+    [toolUse("c2", "search_tools", '{"query":"notion read page content"}'), done()],
+    [delta("The page covers the Q3 launch plan."), done()],
+  ])
+  const tools: any[] = [
+    { name: "execute_tool", description: "", parameters: {}, execute: async () => { throw new Error("Unable to retrieve tool with slug NOTION_GET_PAGE_CONTENT") } },
+    { name: "search_tools", description: "", parameters: {}, execute: async () => ({ tools: [{ name: "NOTION_FETCH_BLOCK_CONTENTS" }] }) },
+  ]
+  const res = await runAgentLoop([{ role: "user", content: "what's in the page?" }], { llm: llm as any, tools })
+  expect(res.toolCalls.some((c) => c.name === "search_tools")).toBe(true)   // recovery forced
+  expect(res.finalText).toBe("The page covers the Q3 launch plan.")          // real answer, not the give-up
+})
+
+test("the nudge NEVER fires if a successful write already ran (no re-execution risk)", async () => {
+  const llm = fakeLlm([
+    [toolUse("c1", "execute_tool", '{"tool_name":"GMAIL_SEND_EMAIL","args":{}}'), done()],
+    [toolUse("c2", "execute_tool", '{"tool_name":"NOTION_BAD_SLUG"}'), done()],
+    [delta("Sent the email, but couldn't update Notion."), done()],
+  ])
+  const tools: any[] = [{
+    name: "execute_tool", description: "", parameters: {},
+    execute: async (a: any) => {
+      if (a.tool_name === "GMAIL_SEND_EMAIL") return { successful: true, data: { id: "m1" } }
+      throw new Error("Unable to retrieve tool with slug NOTION_BAD_SLUG")
+    },
+  }]
+  const { setToolNature } = await import("./verifier")
+  setToolNature(new Map([["GMAIL_SEND_EMAIL", "write"]]))
+  try {
+    const res = await runAgentLoop([{ role: "user", content: "send + update" }], { llm: llm as any, tools })
+    expect(res.finalText).toContain("Sent the email")   // accepted as-is — no forced extra rounds after a write
+  } finally { setToolNature(null) }
+})
+
+test("bad-ARG failure (envelope error, ok call) also forces a recovery round", async () => {
+  // execute_tool SUCCEEDS as a call but the result envelope carries the API error
+  // ("Invalid page_id format") — the model tries to quit → forced recovery → answers.
+  const llm = fakeLlm([
+    [toolUse("c1", "execute_tool", '{"tool_name":"NOTION_GET_PAGE_MARKDOWN","args":{"page_id":"CERTUS-AI"}}'), done()],
+    [delta("I'm having trouble retrieving the page."), done()],
+    [toolUse("c2", "execute_tool", '{"tool_name":"NOTION_SEARCH_NOTION_PAGE","args":{"query":"CERTUS-AI"}}'), done()],
+    [delta("The page covers the launch plan."), done()],
+  ])
+  let calls = 0
+  const tools: any[] = [{
+    name: "execute_tool", description: "", parameters: {},
+    execute: async () => {
+      calls++
+      if (calls === 1) return { data: { message: "Invalid page_id format: must be a valid UUID" }, error: "Invalid page_id format", successful: false }
+      return { successful: true, data: { results: [{ id: "225dcd3a-b64b-80ce-b7c5-c742a80d80b8", title: "CERTUS-AI" }] } }
+    },
+  }]
+  const res = await runAgentLoop([{ role: "user", content: "what's in the page?" }], { llm: llm as any, tools })
+  expect(calls).toBe(2)                                          // the recovery actually ran
+  expect(res.finalText).toBe("The page covers the launch plan.") // real answer, not the give-up
+})
+
+test("claimed INABILITY with zero attempts this turn is rejected — forced to actually try", async () => {
+  const llm = fakeLlm([
+    [delta("I'm having trouble retrieving that page — the tool needs a specific format."), done()],  // gives up from memory
+    [toolUse("c1", "execute_tool", '{"tool_name":"NOTION_SEARCH_NOTION_PAGE","args":{"query":"CERTUS-AI"}}'), done()],
+    [delta("Found it — the page lists the launch checklist."), done()],
+  ])
+  const tools: any[] = [{ name: "execute_tool", description: "", parameters: {}, execute: async () => ({ successful: true, data: { results: [{ id: "u1", title: "CERTUS-AI" }] } }) }]
+  const res = await runAgentLoop([{ role: "user", content: "what's in the CERTUS-AI page?" }], { llm: llm as any, tools })
+  expect(res.toolCalls.length).toBe(1)                                  // it was made to try
+  expect(res.finalText).toBe("Found it — the page lists the launch checklist.")
 })

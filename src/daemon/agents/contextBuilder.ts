@@ -2,6 +2,7 @@
 // Layered system-prompt assembly with session-level prefix caching (Hermes pattern).
 
 import type { ToolDef, Tier } from "./types"
+import { PROMISSORY_RE } from "./loop/verifier"
 
 interface MemoryHit { source: "L2" | "L3" | "L4"; text: string; ts?: number }
 
@@ -34,6 +35,10 @@ export interface ContextBuilderDeps {
      *  activity). Re-evaluated EVERY turn — never cached — so KAIROS adapts within
      *  a session. Optional. */
     liveContext?:          () => Promise<string>
+    /** The toolkit slugs CURRENTLY connected (live — reflects mid-session connects).
+     *  Injected fresh every turn so the model always knows exactly which apps exist,
+     *  what to call them in search_tools queries, and what ISN'T connected. Optional. */
+    connectedApps?:        () => Promise<string[]>
   }
   memoryInjector?:    { inject: (query: string, opts?: any) => Promise<MemoryHit[]> }
   conversationStore?: { recentTurns: (id: string, n: number) => Promise<Array<{ role: string; text: string; at: number }>> }
@@ -101,6 +106,7 @@ export class ContextBuilder {
       "- Bad: \"Issue one, ID abc-123, title Login bug, status open. Issue two, ID def-456, title...\"",
       "- Good: \"You've got three open issues — the login bug looks like the urgent one. Want me to run through them?\"",
       "If there's one clear answer, just say it in a sentence. Talk like you're telling a colleague, not reading a database.",
+      "NEVER read a document, page, email body, note, or any long content out loud — that's unbearable as speech. Give a one-sentence gist (\"it's a project brief about the Q3 launch\") and offer the next step (\"want me to summarize it, or do something with it?\"). Same for presenting choices: name them in a few words each, never recite their contents or ids.",
     ]
 
     const memoryNote =
@@ -113,6 +119,7 @@ export class ContextBuilder {
       "- Finding tools: you have search_tools and execute_tool. Call search_tools with a plain description of what you need, then execute_tool with the tool name it returns. If search_tools finds nothing, the app likely isn't connected — offer to connect it.",
       "- For recall — past decisions, dates, people, the user's preferences — answer from what you actually know about them; if it isn't there, say you're not sure rather than stating a guess as fact.",
       "- CHAIN STEPS CAREFULLY: when a step returns an id, handle, or value you'll need next (a message id, an issue id, a file path, a thread id), carry that EXACT value into the follow-up call — never a placeholder, guess, or made-up id. Read each tool result before deciding the next step. (e.g. to delete \"the latest email\": first read it to get its real id, then delete by THAT id.)",
+      "- NEVER ask the user for an internal id (page id, issue id, event id, parent id, UUID) — users don't know them and shouldn't have to. Every app has search/list tools: when you need an item you don't have an id for (a parent page, a target issue, a contact), FIND IT YOURSELF by name first (e.g. search the app for \"Certus AI\"), then use the exact id from the result. If a tool demands a parent/target id, that's your cue to search — not to ask. Only if several results genuinely match, ask the user to pick BY NAME (\"the CERTUS-AI page or the Mike-Brief one?\") — never recite ids.",
       "- Never feed a tool a GUESSED value — a phone number, email, name, date, or amount the user didn't give you. If a required detail is missing, ask for that one thing first; don't make one up.",
       "- For a genuinely multi-step task, plan briefly with the update_plan tool and tick steps off as you go. Skip the plan for simple one-step requests — don't make single-step plans.",
       "- OFFLOAD HEAVY WORK: if a task will take a while or run many steps and would otherwise make the user wait in silence (organize my inbox, research a topic, draft a long document, process many items), use spawn_background_task to run it as a background sub-agent and keep talking. The sub-agent has the same tools, skills, and memory you do, and reports back when it's done. Also use it whenever the user explicitly says \"in the background\" or \"keep talking while you do it.\" Right after you start it, say one short sentence confirming it's running in the background.",
@@ -174,13 +181,22 @@ export class ContextBuilder {
       opts.conversationId
         ? (this.deps.conversationStore?.recentTurns(opts.conversationId, 3) ?? Promise.resolve([]))
         : Promise.resolve([]),
+      // PRE-RETRIEVAL GATE: greetings/acks recall nothing useful — skip the lookup entirely
+      // (free latency win, and irrelevant memory in the window measurably hurts reasoning).
       // include_l4: skills are already surfaced as tools in the session prefix,
       // so we keep L4 OUT of the per-turn memory delta to avoid duplication and
       // token bloat. L2 (episodic) + L3 (semantic facts) are the per-turn recall.
       // Keyed on the UTTERANCE/GOAL — works with or without a conversationId.
-      this.deps.memoryInjector?.inject(opts.utterance, { max_l2: 3, max_l3: 5, include_l4: false }) ?? Promise.resolve([]),
+      needsMemoryRecall(opts.utterance)
+        ? (this.deps.memoryInjector?.inject(opts.utterance, { max_l2: 3, max_l3: 5, include_l4: false }) ?? Promise.resolve([]))
+        : Promise.resolve([]),
     ])
-    return { recentTurns: recent, memoryHits: hits, utterance: opts.utterance }
+    // SELF-POISONING GUARD: KAIROS's own failure narratives get memorized from past replies
+    // ("KAIROS replied: I'm having trouble retrieving…") and then FTS-recalled by the very
+    // question they failed on — the model parrots its own past failure instead of trying
+    // (learned helplessness, 2026-06-10: 8 such rows made the Notion read permanently
+    // "impossible"). A past failure is never a fact about the world — drop those hits.
+    return { recentTurns: recent, memoryHits: hits.filter((h) => !isSelfEchoMemory(h.text)), utterance: opts.utterance }
   }
 
   async build(opts: { utterance: string; tier: Tier; conversationId?: string }): Promise<{ system: string; tools: ToolDef[] }> {
@@ -191,21 +207,59 @@ export class ContextBuilder {
     // persona hints (in-focus, prefer-terse) AND goal-keyed memory adapt every turn.
     // This runs WITH OR WITHOUT a conversationId so a background sub-agent gets the
     // same fresh memory layer the foreground does (it just lacks recentTurns).
-    const [delta, live] = await Promise.all([
+    const [delta, live, apps] = await Promise.all([
       this.buildTurnDelta({ utterance: opts.utterance, conversationId: opts.conversationId }),
       this.deps.loaders.liveContext?.() ?? Promise.resolve(""),
+      this.deps.loaders.connectedApps?.() ?? Promise.resolve(undefined as string[] | undefined),
     ])
     const deltaText = renderDelta(delta)
     // Current date/time, injected FRESH every turn (never cached — it changes, and a
     // stale/absent date makes "tomorrow"/"next week" resolve to a guessed date. That's
     // exactly how a "what's on my calendar tomorrow" query ended up asking Google for
     // Jan 2025). The model computes any ISO timestamps a tool needs from this.
-    const nowBlock = currentDateTimeLine() + (live ? "\n" + live : "")
+    const nowBlock = currentDateTimeLine()
+      + (apps !== undefined ? "\n" + connectedAppsLine(apps) : "")
+      + (live ? "\n" + live : "")
     return {
       system: base + "\n\n## Right now\n" + nowBlock + (deltaText ? "\n\n## Current context\n" + deltaText : ""),
       tools: prefix.tools,
     }
   }
+}
+
+// Pretty names for common toolkit slugs (cosmetic only — capability is always dynamic).
+const APP_NAMES: Record<string, string> = {
+  gmail: "Gmail", googlecalendar: "Google Calendar", googledrive: "Google Drive",
+  googledocs: "Google Docs", googlesheets: "Google Sheets", github: "GitHub",
+  linear: "Linear", slack: "Slack", notion: "Notion", whatsapp: "WhatsApp",
+  outlook: "Outlook", twitter: "X (Twitter)", youtube: "YouTube",
+}
+const prettyApp = (slug: string) => APP_NAMES[slug.toLowerCase()] ?? (slug.charAt(0).toUpperCase() + slug.slice(1))
+
+/** The live connected-apps line — tells the model exactly which integrations exist (so "is X
+ *  connected?" answers instantly and search_tools queries use the right app name), and that
+ *  anything else is NOT connected (so it offers to connect instead of flailing). */
+export function connectedAppsLine(slugs: string[]): string {
+  // The public web is ALWAYS reachable (web_search/read_webpage are built in) —
+  // without saying so here, "only these integrations" taught the model that
+  // research requests were impossible, and it hallucinated instead (2026-06-10
+  // flight-research session).
+  const webLine =
+    " Separately, you can ALWAYS search the public web with web_search and read pages with read_webpage " +
+    "(prices, flights, news, businesses, facts) — no connection needed."
+  if (slugs.length === 0) {
+    return (
+      "Connected apps: none yet. No external app is connected — if the user asks for email, calendar, tasks, or docs, offer to connect the app first." +
+      webLine
+    )
+  }
+  const list = slugs.map((s) => `${prettyApp(s)} (${s.toLowerCase()})`).join(", ")
+  return (
+    `Connected apps (the ONLY integrations available right now): ${list}. ` +
+    `Anything not listed is NOT connected — offer to connect it rather than searching for its tools. ` +
+    `Use these app names in search_tools queries (e.g. "notion create page", "gmail send email").` +
+    webLine
+  )
 }
 
 /** A spoken-and-tool-safe statement of the current local date & time. Recomputed
@@ -235,15 +289,76 @@ function currentDateTimeLine(): string {
   )
 }
 
+// ── Per-turn context quality controls ────────────────────────────────────────────
+// The window is a budget: every irrelevant or oversized block lowers the model's
+// effective reasoning (context rot). These keep the per-turn delta high-signal.
+
+/** Greetings / acks / pure-courtesy turns recall nothing useful from memory. Deterministic
+ *  (no LLM, ~0ms): short utterances made of conversational filler skip retrieval. */
+export function needsMemoryRecall(utterance: string): boolean {
+  let u = utterance.trim().toLowerCase().replace(/[.!?,]+$/g, "")
+  if (!u) return false
+  // Compound filler ("hey, how's it going") — strip a leading greeting/ack token first.
+  u = u.replace(/^(hi|hey|hello|yo|oh|ok(ay)?|ah|so)[,!]?\s+/, "")
+  const FILLER = /^(hi|hey|hello|yo|sup|what'?s up|good (morning|afternoon|evening|night)|how('?s| is) it going|how are you( doing)?|ok(ay)?|cool|nice|great|thanks?|thank you|thx|got it|sounds good|perfect|yes|yep|yeah|sure|no|nope|nah|bye|goodbye|see you|later|never ?mind|stop|cancel|hold on|one sec(ond)?)( (kairos|man|dude|buddy|there))?$/
+  if (FILLER.test(u)) return false
+  // Very short non-question fragments ("ok cool", "hey there") — still filler.
+  if (u.split(/\s+/).length <= 2 && !u.includes("?") && FILLER.test(u.split(/\s+/)[0] ?? "")) return false
+  return true
+}
+
+// A memory hit that is an echo of KAIROS'S OWN past failure/inability — never inject these
+// as "relevant memory" (they read as facts and teach the model the task is impossible).
+export const FAILURE_ECHO_RE =
+  /\b(having trouble|trouble (getting|retrieving|accessing)|can'?t access|unable to (get|retrieve|access|find)|issue with (the )?(tool|retriev\w*)|requires a specific|not available right now|still having issues|i'?ll keep working on it|wasn'?t able to (finish|get|retrieve)|couldn'?t (get|retrieve|access|find)|don'?t have access|don'?t have (a|an|the|any) [\w` ]{0,24}tool|can'?t (directly )?(help|guide|show|point|click|press|look up|search|research|do that)|(can'?t|cannot|unable to) (click|press|tap|do that for you)|clicking isn'?t (available|active|working)|not able to (help|guide|show|click|look|search)|isn'?t (cooperating|working|responding|available)|not (cooperating|working|responding) right now)\b/i
+
+// THE GENERAL SELF-ECHO GUARD. A recalled copy of KAIROS's own past reply poisons two ways:
+//   • failure echoes  → learned helplessness ("the task is impossible") — the Notion incident;
+//   • PROMISE echoes  → response mimicry: asked the same question again, the model imitates its
+//     own past "I've started looking into it…" and skips the tools entirely — the flight-research
+//     parroting loop (2026-06-10, six live rows). A past promise is never a fact about the world.
+// Substantive replies ("your next meeting is at 3pm") remain valuable memory and still pass.
+export function isSelfEchoMemory(text: string): boolean {
+  if (FAILURE_ECHO_RE.test(text)) return true
+  if (/KAIROS replied:/i.test(text) && PROMISSORY_RE.test(text)) return true
+  return false
+}
+
+const HIT_MAX_CHARS = 300        // one memory hit never dominates the delta
+const TURN_MAX_CHARS = 400       // one recent turn never dominates the delta
+const DELTA_BUDGET_CHARS = 2600  // the whole per-turn delta stays a small fraction of the window
+
+function clip(s: string, max: number): string {
+  return s.length <= max ? s : s.slice(0, max - 1) + "…"
+}
+
+/** "3d ago" / "2h ago" age annotation — recency is a relevance signal the model can use.
+ *  Exported for the recall_memory tool so JIT recall renders ages identically. */
+export function age(ts?: number): string {
+  if (!ts || !Number.isFinite(ts)) return ""
+  const ms = Date.now() - ts
+  if (ms < 0 || ms > 365 * 86400_000) return ""
+  const d = Math.floor(ms / 86400_000)
+  if (d >= 1) return ` · ${d}d ago`
+  const h = Math.floor(ms / 3600_000)
+  return h >= 1 ? ` · ${h}h ago` : " · just now"
+}
+
 function renderDelta(d: TurnDelta): string {
   const lines: string[] = []
+  let budget = DELTA_BUDGET_CHARS
+  const push = (line: string): boolean => {
+    if (line.length > budget) return false
+    lines.push(line); budget -= line.length
+    return true
+  }
   if (d.recentTurns.length > 0) {
-    lines.push("### Recent conversation")
-    for (const t of d.recentTurns) lines.push(`${t.role}: ${t.text}`)
+    push("### Recent conversation")
+    for (const t of d.recentTurns) { if (!push(clip(`${t.role}: ${t.text}`, TURN_MAX_CHARS))) break }
   }
   if (d.memoryHits.length > 0) {
-    lines.push("\n### Relevant memory")
-    for (const h of d.memoryHits) lines.push(`[${h.source}] ${h.text}`)
+    push("\n### Relevant memory (recalled for this request — may be stale; live data still needs a tool)")
+    for (const h of d.memoryHits) { if (!push(clip(`[${h.source}${age(h.ts)}] ${h.text}`, HIT_MAX_CHARS))) break }
   }
   return lines.join("\n")
 }

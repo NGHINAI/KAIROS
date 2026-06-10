@@ -66,6 +66,9 @@ export class DeepgramTts implements TtsBackend {
       throw new Error(`[tts:deepgram] HTTP ${resp.status}${detail ? ` — ${detail}` : ""}`)
     }
 
+    // Usage metering (record-only): chars synthesized → the daemon-wide ledger hook.
+    try { (globalThis as any).__kairosVoiceUsage?.({ kind: "tts", provider: "deepgram", chars: safe.length }) } catch { /* */ }
+
     const reader = resp.body.getReader()
     try {
       while (true) {

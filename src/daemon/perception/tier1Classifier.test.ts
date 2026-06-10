@@ -59,4 +59,28 @@ describe('Tier1Classifier', () => {
     const verdict = await t1.classify([makeEvent('s', 'k', {})])
     expect(verdict).toBe('ROUTINE')
   })
+
+  it('includes the FULL recent window — all events, not an arbitrary last-N (per-event slice bounds size)', async () => {
+    let captured = ''
+    const router = { complete: async (req: any) => { captured = req.prompt; return { text: 'SILENT', provider: 'g', model: 'm', cost_cents: 0, latency_ms: 1, fallback_count: 0, input_tokens: 1, output_tokens: 1 } } } as unknown as ModelRouter
+    const now = Date.now()
+    // 100 events spread across the last ~16 min (all inside the 60-min window).
+    const recent = Array.from({ length: 100 }, (_, i) => ({ id: i, ts: now - i * 10_000, source: 'focus-app', kind: 'app_changed', payload: { app: `App${i}`, blob: 'x'.repeat(300) } as Record<string, unknown> }))
+    await new Tier1Classifier(router).classify(recent)
+    // ALL 100 are included (the old code capped at 40) — full context for the window.
+    expect(captured.split('\n').filter(l => l.startsWith('[')).length).toBe(100)
+    expect(captured).toContain('Events in the last 60 min (100)')
+    expect(captured).not.toContain('of 100')                                  // not truncated
+  })
+
+  it('drops events older than the window (safety bound = the longest sweep gap, 60 min)', async () => {
+    let captured = ''
+    const router = { complete: async (req: any) => { captured = req.prompt; return { text: 'SILENT', provider: 'g', model: 'm', cost_cents: 0, latency_ms: 1, fallback_count: 0, input_tokens: 1, output_tokens: 1 } } } as unknown as ModelRouter
+    const now = Date.now()
+    const fresh = { id: 1, ts: now - 60_000, source: 'focus-app', kind: 'app_changed', payload: { app: 'Fresh' } as Record<string, unknown> }       // 1 min ago
+    const stale = { id: 2, ts: now - 90 * 60_000, source: 'focus-app', kind: 'app_changed', payload: { app: 'Stale' } as Record<string, unknown> }   // 90 min ago
+    await new Tier1Classifier(router).classify([stale, fresh])
+    expect(captured).toContain('Fresh')
+    expect(captured).not.toContain('Stale')                                   // outside the 60-min window
+  })
 })
