@@ -27,20 +27,11 @@ These aren't a hedge — they're what lets you go *harder* on the villain voice 
 
 ---
 
-## 3. The name
+## 3. The name (LOCKED: IDLE)
 
-KAIROS can stay the **engine/codename** internally. For a full-villain *consumer* brand — a presence that watches you and runs your life — you want a short, sayable name that reads like a *being*, with a charming-ominous double meaning. Shortlist:
+**The name is IDLE** — and the name *is* the pitch: you go idle; it does everything. A real word, instantly understandable, easy to say and spell, quietly ironic, and ownable. KAIROS stays the engine/codename internally; the consumer face is IDLE. Run a quick trademark + @handle + domain check before committing publicly.
 
-| Name | Why it works | Watch-out |
-|---|---|---|
-| **Mara** ⭐ (rec) | Sounds like a friendly assistant. Also a mythological night-spirit — the "mare" in *night·mare*, the thing that sits on your chest while you sleep. Perfect "always watching" duality. Short, human, ownable. | Check trademark; a few minor apps use it. |
-| **Otto** | "Auto" baked in; warm, butler-like, a "person" who runs your life. Very consumer-friendly. | Leans cute, less villain; some name collisions. |
-| **Vesper** | Evening / the watch before night; elegant-villain (Bond-coded). Feels premium. | Three syllables; Bond association. |
-| **Nox** | Latin for night. Tiny, sharp, ominous. | Collisions (Nox emulator); a bit cold. |
-
-**Recommendation: Mara.** It's the only one that *is the bit* — a name that sounds helpful and means "the thing watching you sleep." "Mara. Always watching. Good." writes itself. (Engine stays KAIROS; product face = Mara.) Quick trademark + handle check before committing.
-
-> The rest of this doc uses **[NAME]** — swap in Mara if you approve.
+> The rest of this doc was drafted with a placeholder **[NAME]** — read it as **IDLE** throughout.
 
 ---
 
@@ -139,7 +130,7 @@ This is the part that has to be real, because the whole bet is "proactive, it do
 
 ## 9. Open decisions
 
-1. **Approve the name** (rec: Mara) — then run a 10-min trademark + @handle + domain check.
+1. **Approve the name** (rec: IDLE) — then run a 10-min trademark + @handle + domain check.
 2. **Pick the demo account + the exact 4 morning tasks** for the film.
 3. **The one genuine self-grown skill** to feature in the grow beat — which repeated flow?
 4. **Founder on camera?** The do-nothing day works best with a real lazy protagonist (Cluely-style). Are you in?
