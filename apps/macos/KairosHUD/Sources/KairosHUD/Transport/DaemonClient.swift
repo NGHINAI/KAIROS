@@ -67,51 +67,154 @@ final class DaemonClient {
         task?.send(.string(json)) { _ in }
     }
 
-    /// Answer a control_request (a click): ok (the element was pressed) or not + why.
-    func sendControlResult(id: String, ok: Bool, label: String?, reason: String?) {
-        var obj: [String: Any] = ["cmd": "control_result", "id": id, "ok": ok]
-        if let label { obj["label"] = label }
+    /// Answer a screen_request: the element inventory (or why it couldn't be read).
+    func sendScreenResult(id: String, ok: Bool, summary: String?, reason: String?) {
+        var obj: [String: Any] = ["cmd": "screen_result", "id": id, "found": ok]
+        if let summary { obj["summary"] = summary }
         if let reason { obj["reason"] = reason }
         guard let data = try? JSONSerialization.data(withJSONObject: obj),
               let json = String(data: data, encoding: .utf8) else { return }
-        task?.send(.string(json)) { _ in }
+        // A swallowed send error here cost a night: answers silently vanished while
+        // the daemon concluded "the HUD isn't running". Log it — always.
+        task?.send(.string(json)) { error in
+            if let error {
+                FileHandle.standardError.write("screen_result SEND FAILED: \(error.localizedDescription)\n".data(using: .utf8)!)
+            }
+        }
     }
 
+    /// CONNECTION GENERATION: each connect() mints a new generation; callbacks from
+    /// an OLDER socket (its receive failure, its keepalive send error) are ignored.
+    /// Without this, a stale task's pending failure callback fired AFTER a reconnect
+    /// and cancelled the NEW task — the HUD oscillated through zombie reconnects
+    /// forever after a daemon restart (live 2026-06-11).
+    private var connGeneration = 0
+
     func connect() {
+        connGeneration += 1
+        let gen = connGeneration
+        FileHandle.standardError.write("ws connecting to \(url) (gen \(gen))\n".data(using: .utf8)!)
+        lastInboundAt = Date()   // fresh grace window for the new connection
         let t = session.webSocketTask(with: url)
         task = t
         t.resume()
-        receive()
+        receive(gen)
+        startKeepalive()
+        startWatchdog()
     }
 
-    private func receive() {
+    /// The HUD is almost receive-only, and Bun's WS server drops clients that SEND
+    /// nothing within its idle window — silently (URLSessionWebSocketTask never
+    /// notices a half-open socket without traffic). A 20s keepalive command keeps the
+    /// connection alive AND detects death: a failed send forces a reconnect.
+    ///
+    /// OFF-MAIN by design: these used to be main-thread Timers, and a wedged main
+    /// thread (the Metal nextDrawable starvation during screen lock, 2026-06-11)
+    /// silently killed the heartbeat AND the watchdog together — the daemon kept
+    /// delivering into a socket nobody serviced. DispatchSourceTimers on a private
+    /// queue keep the link (and the diagnosis logs) alive through ANY main stall.
+    private let wsQueue = DispatchQueue(label: "kairos.ws.heartbeat")
+    private var keepaliveTimer: DispatchSourceTimer?
+    private func startKeepalive() {
+        keepaliveTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: wsQueue)
+        timer.schedule(deadline: .now() + 20, repeating: 20)
+        timer.setEventHandler { [weak self] in
+            guard let self, let t = self.task else { return }
+            let gen = self.connGeneration
+            t.send(.string("{\"cmd\":\"hud_keepalive\"}")) { [weak self] error in
+                if error != nil { DispatchQueue.main.async { self?.scheduleReconnect(from: gen) } }
+            }
+        }
+        timer.resume()
+        keepaliveTimer = timer
+    }
+
+    private func receive(_ gen: Int) {
         task?.receive { [weak self] result in
             guard let self else { return }
+            // A callback from a socket that has already been REPLACED must not touch
+            // state — especially not trigger a reconnect that kills its successor.
+            guard gen == self.connGeneration else { return }
             switch result {
-            case .failure:
-                self.scheduleReconnect()
+            case .failure(let error):
+                FileHandle.standardError.write("ws receive failed: \(error.localizedDescription) — reconnecting\n".data(using: .utf8)!)
+                self.scheduleReconnect(from: gen)
             case .success(let message):
                 switch message {
                 case .string(let s): self.handle(s)
                 case .data(let d): if let s = String(data: d, encoding: .utf8) { self.handle(s) }
                 @unknown default: break
                 }
-                self.receive()
+                self.receive(gen)
             }
         }
     }
 
-    private func scheduleReconnect() {
-        task = nil
-        if reconnectScheduled { return }
-        reconnectScheduled = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            self?.reconnectScheduled = false
-            self?.connect()
+    private func scheduleReconnect(from gen: Int? = nil) {
+        // Called from BOTH the URLSession delegate queue (receive failure) and main
+        // (keepalive send failure) — serialize all state transitions on main, cancel
+        // the dead task explicitly, and log so silent non-reconnects are impossible
+        // to miss (they cost hours: the HUD sat "connected" to a dead daemon).
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            // Stale complainant: the socket that failed has already been replaced by
+            // a newer connection — leave the new one alone.
+            if let gen, gen != self.connGeneration { return }
+            self.task?.cancel(with: .goingAway, reason: nil)
+            self.task = nil
+            if self.reconnectScheduled { return }
+            self.reconnectScheduled = true
+            FileHandle.standardError.write("ws reconnect scheduled\n".data(using: .utf8)!)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                guard let self else { return }
+                self.reconnectScheduled = false
+                self.connect()
+            }
         }
     }
 
+    /// Last-resort recovery: whatever callback failed to fire, a nil task never stays
+    /// nil, and a SILENT task never stays connected. The daemon ACKs every 20s
+    /// keepalive per-socket, so >50s without ANY inbound message means a zombie
+    /// handshake / half-open socket (live failure: TCP connected during daemon boot,
+    /// upgrade never completed, sends buffered silently — no error ever fired).
+    private var watchdogTimer: DispatchSourceTimer?
+    private var lastInboundAt = Date()
+    private func startWatchdog() {
+        guard watchdogTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: wsQueue)
+        timer.schedule(deadline: .now() + 10, repeating: 10)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            if self.task == nil {
+                if !self.reconnectScheduled {
+                    FileHandle.standardError.write("ws watchdog: no connection — reconnecting\n".data(using: .utf8)!)
+                    DispatchQueue.main.async { self.connect() }
+                }
+                return
+            }
+            if Date().timeIntervalSince(self.lastInboundAt) > 50 {
+                // UNCONDITIONAL teardown — no reconnectScheduled gating, no generation
+                // checks. The polite path wedged for 70+s across a daemon restart
+                // (six silent ticks, zero reconnects) while the scheduled-flag state
+                // machine waited on a callback that never came. The watchdog is the
+                // last resort: it must never defer to state that may itself be stuck.
+                FileHandle.standardError.write("ws watchdog: silent socket (no inbound >50s) — forcing a fresh connection\n".data(using: .utf8)!)
+                DispatchQueue.main.async {
+                    self.task?.cancel(with: .goingAway, reason: nil)
+                    self.task = nil
+                    self.reconnectScheduled = false
+                    self.connect()
+                }
+            }
+        }
+        timer.resume()
+        watchdogTimer = timer
+    }
+
     private func handle(_ text: String) {
+        lastInboundAt = Date()   // ANY inbound message proves the socket is alive
         guard let data = text.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let event = obj["event"] as? String else { return }
@@ -198,19 +301,42 @@ final class DaemonClient {
             activity?.finish()
         // Guide Mode: resolve the element via the AX tree, fly the comet there, answer back.
         case "guide_request":
-            if ProcessInfo.processInfo.environment["KAIROS_AX_DEBUG"] != nil {
-                FileHandle.standardError.write("DC guide_request guide=\(guide != nil) find=\(payload["find"] as? String ?? "?")\n".data(using: .utf8)!)
-            }
+            FileHandle.standardError.write("guide_request find=\(payload["find"] as? String ?? "-") element=\((payload["element"] as? NSNumber)?.stringValue ?? "-") app=\(payload["app"] as? String ?? "frontmost")\n".data(using: .utf8)!)
             guide?.handle(id: payload["id"] as? String ?? "",
-                          find: payload["find"] as? String ?? "",
+                          find: payload["find"] as? String,
+                          element: (payload["element"] as? NSNumber)?.intValue,
                           app: payload["app"] as? String)
-        case "control_request":
-            if ProcessInfo.processInfo.environment["KAIROS_AX_DEBUG"] != nil {
-                FileHandle.standardError.write("DC control_request guide=\(guide != nil) find=\(payload["find"] as? String ?? "?")\n".data(using: .utf8)!)
-            }
-            guide?.handleClick(id: payload["id"] as? String ?? "",
+        // read_screen: AX element inventory — read-only, no visual change.
+        case "screen_request":
+            FileHandle.standardError.write("screen_request app=\(payload["app"] as? String ?? "frontmost")\n".data(using: .utf8)!)
+            guide?.handleScreen(id: payload["id"] as? String ?? "",
+                                app: payload["app"] as? String)
+        // wait_for_screen: poll until the step's effect appears (walkthrough auto-advance).
+        case "watch_request":
+            FileHandle.standardError.write("watch_request until=\(payload["find"] as? String ?? "?") app=\(payload["app"] as? String ?? "frontmost")\n".data(using: .utf8)!)
+            guide?.handleWatch(id: payload["id"] as? String ?? "",
                                find: payload["find"] as? String ?? "",
-                               app: payload["app"] as? String)
+                               app: payload["app"] as? String,
+                               timeoutMs: payload["timeoutMs"] as? Double ?? 45_000)
+        // ACT MODE (computer use): press/type on an element — comet points, then acts.
+        case "act_request":
+            FileHandle.standardError.write("act_request action=\(payload["action"] as? String ?? "press") find=\(payload["find"] as? String ?? "-") element=\((payload["element"] as? NSNumber)?.stringValue ?? "-") app=\(payload["app"] as? String ?? "frontmost")\n".data(using: .utf8)!)
+            guide?.handleAct(id: payload["id"] as? String ?? "",
+                             find: payload["find"] as? String,
+                             element: (payload["element"] as? NSNumber)?.intValue,
+                             app: payload["app"] as? String,
+                             action: payload["action"] as? String ?? "press",
+                             text: payload["text"] as? String,
+                             submit: payload["submit"] as? Bool ?? false,
+                             confirm: payload["confirm"] as? Bool ?? false,
+                             confirmGuard: payload["confirmGuard"] as? String)
+        // Between-turns lesson heartbeat: watch for ANY screen change (the user did
+        // the highlighted step) — the daemon auto-continues the walkthrough on it.
+        case "watch_change_request":
+            FileHandle.standardError.write("watch_change_request app=\(payload["app"] as? String ?? "frontmost")\n".data(using: .utf8)!)
+            guide?.handleWatchChange(id: payload["id"] as? String ?? "",
+                                     app: payload["app"] as? String,
+                                     timeoutMs: payload["timeoutMs"] as? Double ?? 120_000)
         case "guide_end":
             guide?.end()
 

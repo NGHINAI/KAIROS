@@ -58,7 +58,8 @@ test("guide_user reports success with the resolved label and prompts the next st
   expect(tool!.name).toBe("guide_user")
   const out = await tool!.execute({ find: "the Export button" })
   expect(out).toContain('Pointing at "Export…"')
-  expect(out).toContain("next step")
+  expect(out).toContain("say one short line")     // voice-sync contract: name what's highlighted
+  expect(out).toContain("wait_for_screen")        // the loop: watch for the click's effect
 })
 
 test("guide_user teaches recovery when the element isn't found", async () => {
@@ -66,7 +67,7 @@ test("guide_user teaches recovery when the element isn't found", async () => {
   const out = await tool!.execute({ find: "the Zorp button" })
   expect(out).toContain("Couldn't find")
   expect(out).toContain("no match in frontmost window")
-  expect(out).toContain("verbally")
+  expect(out).toContain("read_screen")
 })
 
 test("guide_user degrades to verbal guidance when no HUD is connected", async () => {
@@ -105,6 +106,124 @@ test("guide_user SELF-HEALS: opens the app itself and retries when it isn't runn
   expect(out).toContain('Pointing at "Accessibility"')
 }, 10_000)
 
+// ── wait_for_screen (the walkthrough heartbeat: auto-advance without "done") ──
+
+test("requestWatch round-trips with its own extended timeout", async () => {
+  const { bridge, sent } = bridgeWith(50)              // bridge default timeout tiny…
+  const p = bridge.requestWatch({ find: "Dark", app: "System Settings", timeoutMs: 400 })
+  expect(sent[0].event).toBe("watch_request")
+  expect(sent[0].timeoutMs).toBe(400)
+  await new Promise((r) => setTimeout(r, 150))          // …but the watch outlives it
+  bridge.resolve(sent[0].id, { found: true, label: "Dark" })
+  const r = await p
+  expect(r!.found).toBe(true)
+})
+
+test("wait_for_screen tells the model to advance IMMEDIATELY when the element appears", async () => {
+  const tools = buildGuideTools({
+    bridge: { request: async () => null, requestWatch: async () => {
+      await new Promise((r) => setTimeout(r, 2100))   // a REAL wait (instant hits warn instead)
+      return { found: true, label: "Dark" }
+    } },
+  })
+  const wait = tools.find((t) => t.name === "wait_for_screen")!
+  const out = await wait.execute({ until: "Dark" })
+  expect(out).toContain("completed the step")
+  expect(out).toContain("IMMEDIATELY")
+}, 10_000)
+
+test("a wait timeout routes to read_screen recovery, not nagging", async () => {
+  const tools = buildGuideTools({
+    bridge: { request: async () => null, requestWatch: async () => ({ found: false, reason: "not seen within the wait window" }) },
+  })
+  const wait = tools.find((t) => t.name === "wait_for_screen")!
+  const out = await wait.execute({ until: "Dark", timeout_seconds: 5 })
+  expect(out).toContain("hasn't appeared")
+  expect(out).toContain("read_screen")
+})
+
+test("wait_for_screen clamps the timeout and degrades without a HUD", async () => {
+  let captured: any = null
+  const tools = buildGuideTools({
+    bridge: { request: async () => null, requestWatch: async (req) => { captured = req; return { found: true } } },
+  })
+  const wait = tools.find((t) => t.name === "wait_for_screen")!
+  await wait.execute({ until: "X", timeout_seconds: 9999 })
+  expect(captured.timeoutMs).toBe(120_000)
+  const bare = buildGuideTools({ bridge: { request: async () => null } })
+  const out = await bare.find((t) => t.name === "wait_for_screen")!.execute({ until: "X" })
+  expect(out).toContain("say 'done'")
+})
+
+test("an INSTANT watch hit warns the model it watched for the wrong thing", async () => {
+  const tools = buildGuideTools({
+    bridge: { request: async () => null, requestWatch: async () => ({ found: true, label: "Appearance" }) },
+  })
+  const wait = tools.find((t) => t.name === "wait_for_screen")!
+  const out = await wait.execute({ until: "Appearance" })   // resolves in ~0ms
+  expect(out).toContain("ALREADY visible")
+  // toggle-step escape: an already-visible target may BE the final step
+  expect(out).toContain("END your turn")
+  expect(out).toContain("point the CURRENT step first")
+})
+
+test("guide_user self-heals a CLOSED WINDOW too (app running, no windows)", async () => {
+  let calls = 0
+  const opened: string[] = []
+  const [tool] = buildGuideTools({
+    bridge: {
+      request: async () => {
+        calls++
+        return calls === 1
+          ? { found: false, reason: "System Settings is running but its window is closed — call open_app to bring it forward, then point again" }
+          : { found: true, label: "Wallpaper" }
+      },
+    },
+    openApp: async (name) => { opened.push(name); return { ok: true } },
+  })
+  const out = await tool!.execute({ find: "Wallpaper", app: "System Settings" })
+  expect(opened).toEqual(["System Settings"])
+  expect(out).toContain('Pointing at "Wallpaper"')
+}, 10_000)
+
+// ── read_screen (dynamic guidance: look → point → look) ──
+
+test("requestScreen round-trips a screen inventory through the bridge", async () => {
+  const { bridge, sent } = bridgeWith()
+  const p = bridge.requestScreen("System Settings")
+  expect(sent[0].event).toBe("screen_request")
+  expect(sent[0].app).toBe("System Settings")
+  bridge.resolve(sent[0].id, { found: true, summary: "App: System Settings\nItems: General · Accessibility" })
+  const r = await p
+  expect(r!.summary).toContain("Accessibility")
+})
+
+test("read_screen returns the inventory framed as planning-only context", async () => {
+  const tools = buildGuideTools({
+    bridge: {
+      request: async () => null,
+      requestScreen: async () => ({ found: true, summary: "App: System Settings\nItems: General · Accessibility · Appearance" }),
+    },
+  })
+  const readScreen = tools.find((t) => t.name === "read_screen")!
+  const out = await readScreen.execute({ app: "System Settings" })
+  expect(out).toContain("planning ONLY")
+  expect(out).toContain("Accessibility")
+})
+
+test("read_screen degrades gracefully without a HUD or on failure", async () => {
+  const tools = buildGuideTools({
+    bridge: { request: async () => null, requestScreen: async () => null },
+  })
+  const readScreen = tools.find((t) => t.name === "read_screen")!
+  expect(await readScreen.execute({})).toContain("Guide verbally")
+  const tools2 = buildGuideTools({
+    bridge: { request: async () => null, requestScreen: async () => ({ found: false, reason: "no Accessibility permission" }) },
+  })
+  const out2 = await tools2.find((t) => t.name === "read_screen")!.execute({})
+  expect(out2).toContain("no Accessibility permission")
+})
+
 test("self-heal still teaches when the retry ALSO misses", async () => {
   const [tool] = buildGuideTools({
     bridge: { request: async () => ({ found: false, reason: 'no running app called "Settingz"' }) },
@@ -138,46 +257,6 @@ test("open_app surfaces launch failures with the app name", async () => {
 })
 
 test("open_app is absent when no launcher is wired (HUD-less environments)", () => {
-  const tools = buildGuideTools({ bridge: { request: async () => null, click: async () => null } })
-  expect(tools.map((t) => t.name).sort()).toEqual(["click_element", "guide_user"])
-})
-
-// ── click_element (actuation) ──
-
-test("click_element presses the resolved element and confirms", async () => {
-  const tools = buildGuideTools({ bridge: { request: async () => null, click: async () => ({ found: true, label: "Subscribe Now" }) } })
-  const click = tools.find((t) => t.name === "click_element")!
-  const out = await click.execute({ find: "Subscribe", app: "Safari" })
-  expect(out).toContain('Clicked "Subscribe Now"')
-})
-
-test("click_element self-heals: opens the app then retries the click", async () => {
-  let n = 0
-  const opened: string[] = []
-  const tools = buildGuideTools({
-    bridge: {
-      request: async () => null,
-      click: async () => { n++; return n === 1 ? { found: false, reason: 'no running app called "Music"' } : { found: true, label: "Play" } },
-    },
-    openApp: async (name) => { opened.push(name); return { ok: true } },
-  })
-  const click = tools.find((t) => t.name === "click_element")!
-  const out = await click.execute({ find: "Play", app: "Music" })
-  expect(opened).toEqual(["Music"])
-  expect(out).toContain('Clicked "Play"')
-}, 10_000)
-
-test("click_element teaches when it can't activate the element", async () => {
-  const tools = buildGuideTools({ bridge: { request: async () => null, click: async () => ({ found: false, reason: "the app didn't accept a press" }) } })
-  const click = tools.find((t) => t.name === "click_element")!
-  const out = await click.execute({ find: "Ghost", app: "Finder" })
-  expect(out).toContain("Couldn't click")
-  expect(out).toContain("didn't accept a press")
-})
-
-test("click_element degrades to verbal when no HUD is connected", async () => {
-  const tools = buildGuideTools({ bridge: { request: async () => null, click: async () => null } })
-  const click = tools.find((t) => t.name === "click_element")!
-  const out = await click.execute({ find: "anything" })
-  expect(out).toContain("isn't available")
+  const tools = buildGuideTools({ bridge: { request: async () => null } })
+  expect(tools.map((t) => t.name)).toEqual(["guide_user", "read_screen", "wait_for_screen"])
 })

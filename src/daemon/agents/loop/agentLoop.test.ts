@@ -60,7 +60,9 @@ test("R6: a repeated identical tool round triggers a stall nudge", async () => {
   const echo = toolUse("c", "echo", '{"x":1}')
   const llm = fakeLlm([[echo, done()], [echo, done()], [echo, done()], [delta("ok"), done()]])
   const res = await runAgentLoop([{ role: "user", content: "x" }], { llm: llm as any, tools, stallAfter: 2 })
-  const sawStall = llm.seen.some((msgs) => msgs.some((m: any) => m.role === "system" && /same tool call|repeating|change your approach/i.test(m.content ?? "")))
+  // The nudge is role:"user" with an [automatic check] prefix — gemini-class models
+  // ignore mid-conversation system messages (the read_screen doom-loop fix).
+  const sawStall = llm.seen.some((msgs) => msgs.some((m: any) => m.role === "user" && /\[automatic check/i.test(m.content ?? "") && /same tool call|repeating|change your approach/i.test(m.content ?? "")))
   expect(sawStall).toBe(true)
   expect(res.finalText).toBe("ok")
 })
@@ -259,7 +261,7 @@ test("verify gate: a flag with NO correction string → honest hedge, never the 
     verify: async () => ({ ok: false, concern: "no delete ran" }), // flagged, but no correction provided
   })
   expect(res.finalText).not.toContain("Deleted") // never re-speaks the rejected claim
-  expect(res.finalText).toMatch(/double-check|not.*certain/i)
+  expect(res.finalText).toMatch(/not fully sure|won'?t claim/i)
 })
 
 test("verify gate: a grounded claim passes through untouched", async () => {

@@ -81,6 +81,14 @@ export interface ConductorOpts {
   /** Stable id for THIS foreground turn — root of the activity tree. Background
    *  sub-agents spawned during the turn link to it via parentRunId. */
   runId?: string
+  /** Guide Mode: rendered lesson/last-highlight state. An active-walkthrough block
+   *  ("## Active walkthrough…") makes the turn SKIP the fast front (a lesson turn
+   *  always needs the guide tools); either way the block is appended to the
+   *  planner's instructions when the planner runs. */
+  lessonContext?: string
+  /** True for daemon-injected turns (lesson auto-continue after the user's click) —
+   *  no spoken ack before the planner; the next step IS the response. */
+  synthetic?: boolean
 }
 
 export type AgentEventHandler = (e: AgentEvent) => void

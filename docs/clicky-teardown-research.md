@@ -60,3 +60,47 @@ NEED for Clicky-parity: (1) Cua-style no-foreground computer use (the hard part 
 - ClaudeAgentSDKBridge/bridge.mjs (warm Claude process)
 - ClickyBundledSkills/cua-driver/SKILL.md (the no-foreground contract — full text in HeyClicky.app)
 - skill-suggestion-rules.json (proactive frontmost-app-triggered suggestion chips)
+
+## 2026-06-11 deep-dive addendum — the Codex integration, exactly
+(For the KAIROS smart/deep→Codex initiative. Source: shipped binary v1.0.21 strings + bundle.)
+
+**Lane split (the headline):** HeyClicky does NOT route conversational voice
+through Codex. Voice = `gpt-realtime-2` over wss (OpenAI Realtime). Codex =
+"the explicit agent run the user triggered" (ClickyModelInstructions.md line 1:
+"temporary Codex agent mode"; "keep the main HeyClicky voice flow separate from
+this explicit agent lane"). Agent model default `gpt-5.5`.
+
+**Runtime:** vendored codex-cli 0.124.0 per-arch (171MB) + bundled `rg` on
+PATH, launched via a 648-byte arch-dispatch shim. Warm `codex app-server`
+child with ISOLATED `CODEX_HOME` (own config/log_dir/sqlite_home,
+`history.persistence = "save-all"`). Stale-exit guarded restarts.
+
+**Generated config.toml (verbatim template):**
+  [model_providers.clicky] base_url=<their CF Worker proxy>,
+  env_key="OPENAI_API_KEY", wire_api="responses";
+  [projects."<workspace>"] trust_level="trusted";
+  [notice] hide_full_access_warning=true;
+  [features] apps=true, fast_mode=false, js_repl=true;
+  model_reasoning_effort written per lane (low for voice-ish; an
+  "extra effort" escalation flow re-runs heavy tasks higher).
+
+**MCP servers registered into codex:** [mcp_servers.computer-use] (the Cua
+helper — startup_timeout 10–20s, tool_timeout 120s), [mcp_servers.composio]
+(their Worker proxies + ~10-min schema cache, COMPOSIO_GET_TOOL_SCHEMAS
+lookup), [mcp_servers.clicky-crons] (product-disabled), openaiDeveloperDocs.
+TCC trick: Codex spawns ClickyComputerUseRuntime from INSIDE the .app bundle
+so Accessibility/Screen-Recording attribute to HeyClicky itself.
+
+**Instruction doctrine convergent with KAIROS's verifier gates:** "say the
+blocker instead of pretending it ran" (anti-fabrication); "a successful:true
+response is not enough for writes; verify with a structured read-back"
+(grounded verify); "schemas as contracts — exact keys" ; draft-first email +
+explicit approval before irreversible; never agent-run OAuth (point to
+Settings→Integrations); runtime REJECTS Cmd+L/URL-typing fallbacks
+(launch_app({bundle_id, urls}) only); NEW lesson worth stealing: the
+"permission-prompt storm" rule — never probe multiple OS-protected folders
+(Desktop/Documents/Downloads) speculatively; default to the app's own
+workspace dir; one deliberate prompt max.
+
+**AGENTS.md in Resources is leftover dev scaffolding** (a "leanring-buddy"
+floating-button feature doc) — explicitly disclaimed by their instructions.

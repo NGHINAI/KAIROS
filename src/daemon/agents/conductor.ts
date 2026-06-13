@@ -11,7 +11,7 @@ import { classifyIntent } from "./intentClassifier"
 import { fastMax } from "./tokenBudget"
 import { StreamSpeechController, type SpeakSink } from "./streamSpeechController"
 import { pickAck, pickFiller, describeAction } from "./fillerBank"
-import { isDestructiveCall } from "./loop/verifier"
+import { isDestructiveCall, DO_ASK_RE, TEACHING_RE as TEACH_ASK_RE, GUIDE_RE } from "./loop/verifier"
 import { sanitizeSpoken, SpokenStreamFilter } from "./spokenSanitizer"
 import type { AgentEventHandler, ConductorOpts, Tier, ToolDef } from "./types"
 import type { LoopEvent, LoopMsg } from "./loop/types"
@@ -203,6 +203,23 @@ export class Conductor {
   private async frontFlow(opts: ConductorOpts, emit: AgentEventHandler): Promise<void> {
     const { utterance, signal, conversationId } = opts
 
+    // GUIDE SESSION SKIP: with a lesson live (or a synthetic auto-continue turn),
+    // the front is the wrong brain — it has no tools, and the live session showed it
+    // ANSWERING from memory ("I'm highlighting Light again") instead of guiding.
+    // Every lesson turn goes straight to the planner with the lesson context.
+    // (A mere standalone-highlight hint does NOT skip the front — chit-chat next to
+    // a lingering highlight still deserves the fast path.)
+    if (opts.synthetic || opts.lessonContext?.includes("## Active walkthrough")) {
+      emit({ kind: "agent_intent", tier: "smart", reason: opts.synthetic ? "lesson: auto-continue" : "lesson: active walkthrough" })
+      // Synthetic turns stay silent up front — the next step IS the response, and an
+      // "On it." after every click would turn the lesson into a call-center script.
+      if (!opts.synthetic) await this.speakInterim(nextTaskAck(), signal)
+      const smartCtx = await this.deps.contextBuilder.build({ utterance, tier: "smart", conversationId })
+      if (signal?.aborted) { emit({ kind: "agent_interrupted" }); return }
+      await this.handleSmart(opts, smartCtx, emit)
+      return
+    }
+
     const ctx = await this.deps.contextBuilder.build({ utterance, tier: "fast", conversationId })
     if (signal?.aborted) { emit({ kind: "agent_interrupted" }); return }
 
@@ -225,7 +242,35 @@ export class Conductor {
     })
     if (signal?.aborted) { emit({ kind: "agent_interrupted" }); return }
 
-    const { route, say } = parseFrontDirective(resp.text ?? "")
+    let { route, say } = parseFrontDirective(resp.text ?? "")
+    // DETERMINISTIC OVERRIDE: an EXPLICIT request for careful thought always gets the
+    // think path — the front honors this only stochastically (it answered "think it
+    // through: standing desk?" directly). The user's explicit ask outranks the router.
+    if (route === "answer" && EXPLICIT_THINK_RE.test(utterance)) {
+      route = "think"
+      say = undefined
+    }
+    // DETERMINISTIC SCREEN/DO ROUTING: a do-ask ("switch my Mac to…"), teach-ask, or
+    // point-ask can NEVER be answered by the tool-less front — whatever it says is a
+    // fabrication or a refusal. Regex-on-the-UTTERANCE beats regex-on-the-claim:
+    // the claim wording mutated every round ("I'm highlighting…", "Switched your
+    // Mac…", "Got it — switching it back…") and each variant slipped a claim
+    // pattern. The ask itself is stable. Live 2026-06-11.
+    if (route === "answer" && (DO_ASK_RE.test(utterance) || TEACH_ASK_RE.test(utterance) || GUIDE_RE.test(utterance))) {
+      console.log(`[conductor] screen/do ask answered by the front — forcing [[task]]`)
+      route = "task"
+      say = undefined
+    }
+    // ANTI-FABRICATION GUARD (defense in depth for OTHER phrasings): the front has
+    // NO tools, so any answer CLAIMING an on-screen action ("I'm highlighting Light
+    // again — make sure you see it") is a fabrication by construction. Live session
+    // 2026-06-10: five such gaslighting replies in a row while nothing happened on
+    // screen. Discard the answer and force the planner, which can actually point.
+    if (route === "answer" && FABRICATED_ACTION_RE.test(resp.text ?? "")) {
+      console.log(`[conductor] front fabricated an on-screen action — forcing [[task]]`)
+      route = "task"
+      say = undefined
+    }
     console.log(`[conductor] front route=${route}${say ? ` say="${say.slice(0, 40)}"` : ""}`)
 
     if (route === "task") {
@@ -541,8 +586,15 @@ export class Conductor {
           speaker: this.deps.streamSink,
           // Instant, tool-aware, non-repeating, character-flavored acks + fillers
           // (fillerBank) — no LLM latency, so they actually kill the dead air.
-          ackPhrase: (name, args) => pickAck(name, args),
-          fillerPhrase: (lastTool) => pickFiller(lastTool ? describeAction(lastTool.name, lastTool.args).noun : undefined),
+          // SILENT_TOOLS: instant local tools where an ack is pure noise (the guide
+          // suite especially — "Opening guide now" on every point drove users mad),
+          // and tools whose silence IS the experience (wait_for_screen: the user is
+          // busy clicking; chirping fillers at them would be backseat driving).
+          ackPhrase: (name, args) => (SILENT_ACK_TOOLS.has(name) ? "" : pickAck(name, args)),
+          fillerPhrase: (lastTool) =>
+            lastTool && SILENT_WAIT_TOOLS.has(lastTool.name)
+              ? ""
+              : pickFiller(lastTool ? describeAction(lastTool.name, lastTool.args).noun : undefined),
           fillerMs: Number(process.env.KAIROS_FILLER_MS) || 7000,
           // "Block writes": withhold the live final claim once an irreversible tool
           // fires; we speak the verify-gate's confirmed final at the end instead.
@@ -609,9 +661,12 @@ export class Conductor {
     }
 
     const runFn = this.deps.runPlanner ?? defaultPlannerRunner
+    // Lesson context rides on the INSTRUCTIONS, not the utterance — it's daemon
+    // state ("you last highlighted Appearance; it's still on screen"), and the
+    // utterance must stay the user's words for the verifier + transcript.
     const result = await runFn(opts.utterance, {
       tools: ctx.tools,
-      instructions: ctx.system,
+      instructions: opts.lessonContext ? `${ctx.system}\n\n${opts.lessonContext}` : ctx.system,
       signal: opts.signal,
       onEvent,
       history,
@@ -619,6 +674,11 @@ export class Conductor {
 
     try { opts.signal?.removeEventListener?.("abort", onAbort) } catch { /* */ }
     await controller?.finish()
+
+    // A superseded/aborted turn must end QUIETLY — emitting agent_done with the
+    // "wasn't able to finish" fallback put phantom failures in the transcript (the
+    // NEW turn is already answering; this one just stands down).
+    if (opts.signal?.aborted) { emit({ kind: "agent_interrupted" }); return }
 
     const reply = sanitizeReply(result.finalOutput) || "I wasn't able to finish that — want me to try again?"
 
@@ -792,9 +852,10 @@ const FRONT_ADDENDUM = `
 You have NO tools and cannot look anything up, check anything, or take any action yourself.
 - If the message is small talk, a quick acknowledgment, an opinion, or fully answerable from the conversation above — just reply normally (1–2 short spoken sentences).
 - Otherwise route it by starting your reply with a directive as the FIRST thing:
-  [[task]] — anything involving the user's apps, data, or the outside world (email, calendar, messages, files, search, screen, "do X", "check Y"), or any multi-step work.
+  [[task]] — anything involving the user's apps, data, or the outside world (email, calendar, messages, files, search, screen, "do X", "check Y"), or any multi-step work. This INCLUDES every request to show/point/guide/teach anything ON SCREEN, and every request to DO something on their Mac (open/click/change a setting/switch a mode/type) — you cannot see, point at, or touch the screen yourself.
   [[think]] — a genuinely hard reasoning question answerable by pure thought alone (analysis, tradeoffs, math, judgment) with no lookups needed. If the user EXPLICITLY asks for careful thought ("think it through", "think hard", "reason about"), always route [[think]] — honor the ask even if it seems easy.
 - HARD RULE: any question about the user's OWN current state — what's connected, what's on the calendar, unread email, files, tasks, recent activity, anything that changes over time — is NEVER answerable from your memory. You do not know it. Route [[task]] even if you believe you know the answer.
+- Recalled memory lines ("Relevant memory") are BACKGROUND about the past — never resume or continue an activity from them as if it were happening now. Only the conversation directly above is live.
 - After the directive you may add ONE short spoken acknowledgment (max ~8 words). It must contain NO facts, NO opinions, and NO part of an answer — only an acknowledgment like "on it — checking now." or "good question — one sec."
 - NEVER claim to have done, sent, checked, or found anything. If unsure whether you can answer correctly right now, route to [[task]].
 
@@ -813,15 +874,33 @@ User: "walk me through setting up a signature in Mail" → [[task]] sure — I'l
 User: "okay, it's open now" (after a step you asked for — an app opened, a page loaded) → [[task]] great — one sec.
 User: "done, what's next?" (mid-walkthrough) → [[task]] next step coming up.
 User: "teach me how to crop a photo in Photoshop" → [[task]] sure — I'll walk you through it.
-User: "turn the volume down to 20%" → [[task]] on it.
-User: "pause the music" / "skip this song" → [[task]] done.
-User: "open Spotify and play my Discover Weekly" → [[task]] one sec.
-User: "click the Subscribe button" / "click Accessibility in System Settings" → [[task]] clicking it now.
-User: "turn on Dark Mode" / "press send" → [[task]] on it.
 User: "think it through: should I lease or buy a car?" → [[think]] good question — give me a moment.
 User: "what's 18% of 2,450?" → [[think]]
 User: "which of these two job offers is better, all things considered?" → [[think]] let me think that through.
 User: "do you like jazz?" → Love it — there's nothing like late-period Coltrane. You?`
+
+// Instant LOCAL tools — never speak an ack for these (sub-100ms, and the model speaks
+// its own sync line right after for the guide suite). wait_for_screen additionally
+// suppresses "still on it…" fillers: its silence means the user is mid-step.
+const SILENT_ACK_TOOLS = new Set([
+  "guide_user", "read_screen", "wait_for_screen", "open_app", "end_lesson", "recall_memory", "update_plan",
+  // Act mode narrates itself ("Opening Appearance — now switching to Dark");
+  // a canned "on it" before every click would double-speak each step.
+  "click_element", "type_text",
+])
+const SILENT_WAIT_TOOLS = new Set(["wait_for_screen"])
+
+// Explicit ask for deliberate reasoning — deterministically routed to [[think]].
+const EXPLICIT_THINK_RE = /\b(think (it|this|that) through|think (hard|carefully|deeply)|reason (about|through)|deep think)\b/i
+
+// A tool-less front answer CLAIMING an on-screen act (highlight/point/show/open/
+// guide/switch/click/change…) is fabrication by construction — the front cannot
+// touch the screen. First-person-future forms ("I'll show you") count too: a
+// promise the front can't keep is the same lie one tense earlier. Bare past-tense
+// act claims ("Switched your Mac back to dark mode." — live 2026-06-11, a 0.9s
+// front answer with zero tools) count without a pronoun.
+const FABRICATED_ACTION_RE =
+  /\b(i('?m| am|'?ve| have|'?ll| will| can| just)\s+(just\s+|now\s+|go ahead and\s+|re-?)*(highlight|point|show (you|it|the)|guid|open|click|switch|chang|set|turn|enabl|disabl|typ)\w*|highlighted|highlighting|^(done[.!,]? )?(switched|changed|opened|clicked|enabled|disabled|turned|set) )/i
 
 const FRONT_DIRECTIVE_RE = /^\s*\[\[\s*(task|think)\s*\]\]\s*/i
 
@@ -880,7 +959,7 @@ async function defaultPlannerRunner(
   const { buildProseDistiller } = await import("./loop/toolExecutor")
   const { buildCompactor, COMPACT_PROMPT } = await import("./loop/compactor")
   const { buildUpdatePlanTool } = await import("./loop/updatePlanTool")
-  const { buildDestructiveVerifier } = await import("./loop/verifier")
+  const { buildDestructiveVerifier, TEACHING_RE } = await import("./loop/verifier")
   const { TIER_MODELS, verifyModel } = await import("./types")
 
   // Generous token budget: a reasoning SMART model (kimi-k2.5/minimax) spends tokens
@@ -891,7 +970,18 @@ async function defaultPlannerRunner(
   // it's a thinking/hybrid model (gemini-2.5-flash), disableThinking forces thinking
   // OFF (reasoning.max_tokens:0) so it can't burn the budget and return empty. Off via
   // KAIROS_SMART_DISABLE_THINKING=0. Harmless on a pure non-thinking smart model.
-  const disableThinking = process.env.KAIROS_SMART_DISABLE_THINKING !== "0"
+  // TEACHING TURNS THINK. Guided walkthroughs are a multi-step protocol (look →
+  // point → speak → wait → repeat) that flash-without-thinking reliably fumbles —
+  // HeyClicky's lesson: guidance quality is model-bound. Step gaps are user-paced
+  // (they're clicking), so thinking latency is free here. Reasoning stays EXCLUDED
+  // from content (never spoken). KAIROS_GUIDE_THINKING=0 opts out.
+  // A lesson continuation turn ("Done. What's next?") doesn't match TEACHING_RE,
+  // but its instructions carry the lesson block — it IS a teaching turn (thinking
+  // on, walkthrough-sized turn budget).
+  const teachingTurn = TEACHING_RE.test(input) || opts.instructions.includes("## Active walkthrough")
+  const disableThinking = teachingTurn
+    ? process.env.KAIROS_GUIDE_THINKING === "0"
+    : process.env.KAIROS_SMART_DISABLE_THINKING !== "0"
   const smart = new OpenRouterAdapter({
     defaultModel: TIER_MODELS.smart(),
     defaultMaxTokens: Number(process.env.KAIROS_SMART_MAX_TOKENS) || 4096,
@@ -904,7 +994,7 @@ async function defaultPlannerRunner(
   // tracks the smart model unless KAIROS_VERIFY_MODEL pins it (types.ts), so a
   // gemini-only user no longer fires silent gpt-4o verify calls. Same thinking-off
   // policy (it produces a JSON verdict, not reasoning prose).
-  const verify = new OpenRouterAdapter({ defaultModel: verifyModel(), disableThinking, usageLabel: "verify" })
+  const verify = new OpenRouterAdapter({ defaultModel: verifyModel(), disableThinking: true, usageLabel: "verify" })
   // Observability: log the resolved models for THIS planner turn. Nothing logged
   // per-turn model usage before, which is why the phantom gpt-4o verify calls were
   // invisible. One line per smart/planner turn makes model routing auditable.
@@ -946,6 +1036,10 @@ async function defaultPlannerRunner(
     ],
     {
       llm: smart as unknown as import("./loop/types").LoopLlm,
+      // Walkthroughs are long by NATURE (point→wait→point per step + retries) — a
+      // 5-step lesson legitimately needs ~20 rounds; the default budget cut one off
+      // mid-lesson and the forced-final came back empty.
+      maxTurns: teachingTurn ? 26 : undefined,
       tools,
       signal: opts.signal,
       onEvent: opts.onEvent,          // live streaming → the conductor speaks as it generates
@@ -961,11 +1055,15 @@ async function defaultPlannerRunner(
   let finalOutput = res.finalText
 
   // Empty-output recovery: if the model ran a tool that already produced a complete,
-  // user-facing STRING answer and then said nothing (common with fire-and-forget
-  // tools like spawn_background_task), speak that result instead of the generic
-  // "I wasn't able to finish that" — the action succeeded; saying it failed is a lie.
+  // user-facing STRING answer and then said nothing, speak that result instead of the
+  // generic "I wasn't able to finish that". ALLOWLIST ONLY: most tool results are
+  // INSTRUCTIONS TO THE MODEL, not speech — a silent turn once read wait_for_screen's
+  // "IMMEDIATELY speak the next step and point (guide_user)…" straight into TTS.
   if (!finalOutput.trim()) {
-    const lastStr = [...res.toolCalls].reverse().find((c) => typeof c.result === "string" && String(c.result).trim())
+    const SPEAKABLE_RESULT_TOOLS = new Set(["spawn_background_task", "background_tasks"])
+    const lastStr = [...res.toolCalls].reverse().find(
+      (c) => SPEAKABLE_RESULT_TOOLS.has(c.name) && typeof c.result === "string" && String(c.result).trim(),
+    )
     if (lastStr) finalOutput = String(lastStr.result)
   }
 

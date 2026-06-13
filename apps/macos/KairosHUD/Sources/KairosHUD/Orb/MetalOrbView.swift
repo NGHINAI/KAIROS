@@ -25,6 +25,12 @@ final class MetalOrbView: NSView {
         metalLayer.framebufferOnly = true
         metalLayer.isOpaque = false                 // transparent → composites over the desktop
         metalLayer.backgroundColor = NSColor.clear.cgColor
+        // NEVER let a starved drawable pool block: when the screen is locked/asleep
+        // the compositor stops releasing drawables, and a blocking nextDrawable()
+        // wedged the MAIN THREAD permanently (every display-link tick waited the
+        // full internal timeout, back to back — keepalives, timers, and the whole
+        // guide pipeline went dark while TCP stayed "connected"; live 2026-06-11).
+        metalLayer.allowsNextDrawableTimeout = true
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -54,14 +60,61 @@ final class MetalOrbView: NSView {
             link.add(to: .main, forMode: .common)
             displayLink = link
             updateDrawableSize()
+            observeScreenLock()
         } else if window == nil {
             displayLink?.invalidate()
             displayLink = nil
         }
     }
 
+    // ── render-starvation defenses ────────────────────────────────────────────
+    // A status-bar-level joins-all-spaces panel still reports occlusionState
+    // .visible ON THE LOCK SCREEN, but the compositor stops releasing drawables —
+    // every nextDrawable() then blocks ~1s, the display link refires immediately,
+    // and the MAIN THREAD spends 100% of its time wedged (live 2026-06-11: the
+    // whole guide pipeline + WS heartbeat went dark; `sample` showed 1518/1519
+    // samples inside the drawable semaphore). Two layers of defense:
+    //   1. explicit lock/sleep notifications pause the display link outright;
+    //   2. a SELF-HEALING breaker: any slow/failed drawable acquisition pauses
+    //      rendering for 2s — whatever the cause, main stays responsive and the
+    //      orb resumes by itself.
+
+    private func observeScreenLock() {
+        let dnc = DistributedNotificationCenter.default()
+        dnc.addObserver(forName: .init("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] _ in
+            self?.displayLink?.isPaused = true
+        }
+        dnc.addObserver(forName: .init("com.apple.screenIsUnlocked"), object: nil, queue: .main) { [weak self] _ in
+            self?.displayLink?.isPaused = false
+        }
+        let wnc = NSWorkspace.shared.notificationCenter
+        wnc.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.displayLink?.isPaused = true
+        }
+        wnc.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.displayLink?.isPaused = false
+        }
+    }
+
+    private func backOff() {
+        displayLink?.isPaused = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            self?.displayLink?.isPaused = false
+        }
+    }
+
     @objc private func tick() {
-        guard let orb, let drawable = metalLayer.nextDrawable() else { return }
+        guard window?.occlusionState.contains(.visible) == true else { return }
+        guard let orb else { return }
+        let t0 = CACurrentMediaTime()
+        let drawable = metalLayer.nextDrawable()
+        // Starvation breaker: a slow or failed acquisition means the compositor
+        // isn't draining the pool — back off instead of blocking every frame.
+        if drawable == nil || CACurrentMediaTime() - t0 > 0.25 {
+            if drawable == nil { backOff(); return }
+            backOff()
+        }
+        guard let drawable else { return }
         model.tick()  // advance eased level + motion archetype weights + hue rotation
         let t = Float(CACurrentMediaTime() - start)
         let size = SIMD2(Float(drawable.texture.width), Float(drawable.texture.height))

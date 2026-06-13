@@ -10,7 +10,7 @@
 // pass the tool-result shaper losslessly.
 
 import type { ToolDef } from "./types"
-import { isSelfEchoMemory, age } from "./contextBuilder"
+import { isSelfEchoMemory, stripSelfEcho, age } from "./contextBuilder"
 
 export interface RecallToolDeps {
   injector: {
@@ -48,7 +48,10 @@ export function buildRecallTool(deps: RecallToolDeps): ToolDef {
       } catch {
         return "Memory search failed — continue without it."
       }
-      const clean = hits.filter((h) => h.text && !isSelfEchoMemory(h.text))
+      const clean = hits
+        .filter((h) => h.text && !isSelfEchoMemory(h.text))
+        .map((h) => ({ ...h, text: stripSelfEcho(h.text) }))
+        .filter((h) => h.text.length > 0)
       if (clean.length === 0) {
         return "Nothing relevant in memory for that. Don't invent it — ask the user or use a live tool."
       }

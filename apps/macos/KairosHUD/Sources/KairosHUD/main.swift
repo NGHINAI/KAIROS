@@ -44,6 +44,41 @@ if let i = arguments.firstIndex(of: "--snapshot"), i + 1 < arguments.count {
     exit(0)
 }
 
+// Dev probe: resolve + CLICK an element via AXActor and report whether the screen
+// changed — the whole act pipeline without the LLM loop. Exit 0 on changed.
+// Usage: KairosHUD --axclick "Appearance" "System Settings"
+if let i = arguments.firstIndex(of: "--axclick"), i + 2 < arguments.count {
+    let app = arguments[i + 2] == "frontmost" ? nil : arguments[i + 2]
+    func summary() -> String? {
+        if case .ok(let s, _) = AXFinder.inventory(appName: app) { return s }
+        return nil
+    }
+    switch AXFinder.find(query: arguments[i + 1], appName: app) {
+    case .notFound(let reason):
+        print("NOT FOUND: \(reason)"); exit(2)
+    case .found(let match):
+        print("resolved \"\(match.title)\" role=\(match.role ?? "?")")
+        let pre = summary()
+        let (failure, mode) = AXActor.press(match)
+        if let failure { print("PRESS FAILED: \(failure)"); exit(3) }
+        usleep(900_000)
+        let post = summary()
+        let changed = pre != nil && post != nil && pre != post
+        print(changed ? "CLICKED (\(mode)) + SCREEN CHANGED" : "clicked (\(mode)) — screen inventory unchanged")
+        exit(changed ? 0 : 4)
+    }
+}
+
+// Dev probe: dump the read_screen inventory summary for an app, then exit.
+// Usage: KairosHUD --axinv "System Settings"
+if let i = arguments.firstIndex(of: "--axinv"), i + 1 < arguments.count {
+    switch AXFinder.inventory(appName: arguments[i + 1] == "frontmost" ? nil : arguments[i + 1]) {
+    case .ok(let summary, let entries): print("OK (\(entries.count) entries)\n\(summary)")
+    case .failed(let reason): print("FAILED: \(reason)")
+    }
+    exit(0)
+}
+
 // Dev probe: resolve an element via the AX walker and dump what it saw, then exit.
 // Usage: KairosHUD --axprobe "Privacy and Security" "System Settings"
 if let i = arguments.firstIndex(of: "--axprobe"), i + 2 < arguments.count {

@@ -93,6 +93,11 @@ export async function startWrapApi(opts: WrapApiOpts): Promise<WrapApiServer> {
       return new Response('Not Found', { status: 404 })
     },
     websocket: {
+      // Bun closes clients that SEND nothing for idleTimeout seconds (default 120!).
+      // The HUD is almost receive-only — it kept getting silently dropped (half-open:
+      // URLSessionWebSocketTask never notices without traffic), so guide_requests
+      // vanished into the void. Max out the window; the HUD also keepalives now.
+      idleTimeout: 960,
       open(ws) {
         wsClients.add(ws)
         ws.send(JSON.stringify({ event: 'subscribed', clients: wsClients.size }))
@@ -100,10 +105,17 @@ export async function startWrapApi(opts: WrapApiOpts): Promise<WrapApiServer> {
       close(ws) {
         wsClients.delete(ws)
       },
-      message(_ws, raw) {
+      message(ws, raw) {
         const text = typeof raw === 'string' ? raw : new TextDecoder().decode(raw)
         try {
           const cmd = JSON.parse(text)
+          // Per-socket keepalive ACK: gives receive-only clients (the HUD) a
+          // guaranteed inbound message every ~20s — their staleness watchdog can
+          // then detect zombie handshakes/half-open sockets and reconnect.
+          if (cmd?.cmd === 'hud_keepalive') {
+            try { ws.send('{"event":"keepalive_ack"}') } catch { /* */ }
+            return
+          }
           for (const h of commandHandlers) h(cmd)
         } catch {
           // ignore malformed
@@ -119,7 +131,20 @@ export async function startWrapApi(opts: WrapApiOpts): Promise<WrapApiServer> {
     broadcast(event) {
       const line = JSON.stringify(event)
       for (const ws of wsClients) {
-        try { ws.send(line) } catch { wsClients.delete(ws) }
+        try {
+          // Bun returns -1 on backpressure-drop and 0 on a closed socket — a silent
+          // SKIP, not an exception. Guide requests vanished this way (the HUD stayed
+          // TCP-connected, its inbound keepalives kept arriving, but it never got
+          // another broadcast). Log every non-positive send so a one-way zombie is
+          // visible in minutes, not nights.
+          const r = ws.send(line)
+          if (typeof r === "number" && r <= 0) {
+            console.log(`[wrapApi] broadcast ${String((event as any).event ?? "?")} send=${r} (dropped for one client)`)
+          }
+        } catch {
+          console.log(`[wrapApi] broadcast ${String((event as any).event ?? "?")} threw — evicting client`)
+          wsClients.delete(ws)
+        }
       }
     },
     onCommand(cb) { commandHandlers.push(cb) },

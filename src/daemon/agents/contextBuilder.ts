@@ -107,6 +107,7 @@ export class ContextBuilder {
       "- Good: \"You've got three open issues — the login bug looks like the urgent one. Want me to run through them?\"",
       "If there's one clear answer, just say it in a sentence. Talk like you're telling a colleague, not reading a database.",
       "NEVER read a document, page, email body, note, or any long content out loud — that's unbearable as speech. Give a one-sentence gist (\"it's a project brief about the Q3 launch\") and offer the next step (\"want me to summarize it, or do something with it?\"). Same for presenting choices: name them in a few words each, never recite their contents or ids.",
+      "SCREEN-GUIDANCE SYNC: when you point at something on screen, your words must match what's visibly highlighted RIGHT NOW — name the element and where it is (\"I'm highlighting the Accessibility row in the sidebar\"). One step at a time: never describe a step before its highlight is on screen, never move to the next step until the user says they're done, and never read the screen's contents aloud — the user can see it.",
     ]
 
     const memoryNote =
@@ -196,7 +197,14 @@ export class ContextBuilder {
     // question they failed on — the model parrots its own past failure instead of trying
     // (learned helplessness, 2026-06-10: 8 such rows made the Notion read permanently
     // "impossible"). A past failure is never a fact about the world — drop those hits.
-    return { recentTurns: recent, memoryHits: hits.filter((h) => !isSelfEchoMemory(h.text)), utterance: opts.utterance }
+    return {
+      recentTurns: recent,
+      memoryHits: hits
+        .filter((h) => !isSelfEchoMemory(h.text))
+        .map((h) => ({ ...h, text: stripSelfEcho(h.text) }))
+        .filter((h) => h.text.length > 0),
+      utterance: opts.utterance,
+    }
   }
 
   async build(opts: { utterance: string; tier: Tier; conversationId?: string }): Promise<{ system: string; tools: ToolDef[] }> {
@@ -310,7 +318,7 @@ export function needsMemoryRecall(utterance: string): boolean {
 // A memory hit that is an echo of KAIROS'S OWN past failure/inability — never inject these
 // as "relevant memory" (they read as facts and teach the model the task is impossible).
 export const FAILURE_ECHO_RE =
-  /\b(having trouble|trouble (getting|retrieving|accessing)|can'?t access|unable to (get|retrieve|access|find)|issue with (the )?(tool|retriev\w*)|requires a specific|not available right now|still having issues|i'?ll keep working on it|wasn'?t able to (finish|get|retrieve)|couldn'?t (get|retrieve|access|find)|don'?t have access|don'?t have (a|an|the|any) [\w` ]{0,24}tool|can'?t (directly )?(help|guide|show|point|click|press|look up|search|research|do that)|(can'?t|cannot|unable to) (click|press|tap|do that for you)|clicking isn'?t (available|active|working)|not able to (help|guide|show|click|look|search)|isn'?t (cooperating|working|responding|available)|not (cooperating|working|responding) right now)\b/i
+  /\b(having trouble|trouble (getting|retrieving|accessing)|can'?t access|unable to (get|retrieve|access|find)|issue with (the )?(tool|retriev\w*)|requires a specific|not available right now|still having issues|i'?ll keep working on it|wasn'?t able to (finish|get|retrieve)|couldn'?t (get|retrieve|access|find)|don'?t have access|don'?t have (a|an|the|any) [\w` ]{0,24}tool|can'?t (directly )?(help|guide|show|point|look up|search|research)|not able to (help|guide|show|look|search)|isn'?t (cooperating|working|responding|available)|not (cooperating|working|responding) right now)\b/i
 
 // THE GENERAL SELF-ECHO GUARD. A recalled copy of KAIROS's own past reply poisons two ways:
 //   • failure echoes  → learned helplessness ("the task is impossible") — the Notion incident;
@@ -318,10 +326,29 @@ export const FAILURE_ECHO_RE =
 //     own past "I've started looking into it…" and skips the tools entirely — the flight-research
 //     parroting loop (2026-06-10, six live rows). A past promise is never a fact about the world.
 // Substantive replies ("your next meeting is at 3pm") remain valuable memory and still pass.
+// Walkthrough chatter ("teach me X", "done, I clicked Y", "okay it's open") is
+// EPHEMERAL instruction, not knowledge — recalled later it scripts the WRONG lesson
+// (live: a wallpaper walkthrough pointed at Appearance and waited for "Light",
+// replaying the remembered dark-mode session step by step).
+const WALKTHROUGH_ECHO_RE =
+  /User said: "?(teach me|walk me through|guide me through|show me (how|where)|how (do|to|can) i\b|done[,.]? i clicked|okay[,.]? (i )?(clicked|opened)|now what|what'?s next)/i
+
 export function isSelfEchoMemory(text: string): boolean {
   if (FAILURE_ECHO_RE.test(text)) return true
   if (/KAIROS replied:/i.test(text) && PROMISSORY_RE.test(text)) return true
+  if (WALKTHROUGH_ECHO_RE.test(text)) return true
   return false
+}
+
+// THE GENERAL CURE for reply mimicry: recalled memory NEVER carries KAIROS's own
+// replied words. Four poison flavors hit production in two days (failure echoes →
+// learned helplessness; promise echoes → re-promising without working; denial echoes
+// → "I can't"; SUCCESS echoes → "There it is." with no action taken). Regexes can't
+// keep up with phrasing. So at INJECTION time the assistant half is stripped — the
+// model recalls what the USER said, never how it replied. Durable facts from replies
+// still flow: the consolidator distills FULL records into L3 facts off-line.
+export function stripSelfEcho(text: string): string {
+  return text.replace(/\s*KAIROS replied:[\s\S]*$/i, "").trim()
 }
 
 const HIT_MAX_CHARS = 300        // one memory hit never dominates the delta

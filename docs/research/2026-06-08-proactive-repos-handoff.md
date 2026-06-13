@@ -1195,3 +1195,189 @@ bolted on.
 - **P4** = Life Graph FULL (cross-toolkit resolution, enrichment, bi-temporal).
 - Decay/reinforcement/supersession mechanics: adopt Vellum's numbers as defaults
   (stability 14/proc 60, ×1.5 reinforce, fidelity ladder, Ebbinghaus-at-retrieval).
+
+---
+
+## 7. THE BETA WEDGE — what we ship first, and why (2026-06-11, locked)
+
+§1–§6 design the whole chief-of-staff. This section names the **one thing the beta v1
+leads with** — the entry wedge, the keystones that make it defensible, the safety fixes
+that make it shippable, and how it threads through the §6 model (it adds almost no new
+architecture).
+
+### 7.0 How we chose it (and why to trust it)
+
+Four research agents ran the question from **deliberately divergent lenses** — a solo
+founder's day, a founding-AE's pipeline, a competitive-whitespace sweep, and a
+what-goes-viral lens. **All four independently ranked the SAME wedge #1.** Divergent
+inputs → convergent output means the signal is in the territory, not in the prompt. The
+agents named it differently — Open-Loop Closer / Promised-vs-Done Watchdog /
+Dropped-Ball Closer / Commitment-Keeper — but it is one capability. (Full research +
+citations: memory `kairos-untapped-wedge`.)
+
+### 7.1 The wedge: THE OPEN-LOOP CLOSER (both directions)
+
+**One line:** KAIROS watches your calls / email / Slack / DMs for the **promises you made**
+*and* the **stale promises owed to you**, **verifies across every connected toolkit whether
+the action actually happened** (did the email send? the Stripe invoice go out? the Linear
+ticket get created? the doc get attached? did they ever reply?), and when a loop slipped,
+**drafts the fulfillment in your learned voice for one-tap send.**
+
+Beta scope = **two modes** (founder-locked 2026-06-11): **(A) Promises-I-made** (outbound
+commitments I owe) + **(B) Who-Owes-Me** (threads/deals/intros where the ball is in their
+court and has gone cold). Mode B is the surprise loop's beta home (an expected reply that
+never arrived = the dog that didn't bark). THE CATCH (wrong-attachment / silent
+auto-renewal / quoted-$X-but-reply-says-$Y) is the same machinery and ships post-beta as
+a third mode — the surprise loop is still **coded** as a keystone (§7.2.1).
+
+**Why it's untapped (the structural moat — this is the whole point).** Commitment
+*DETECTION* became table-stakes in 2026: Claryti, Granola, Fellow, and Salesforce's
+Slackbot now all detect "I'll send the deck" and drop it into an 8am brief — **but every
+one of them is a READ-ONLY DETECTOR. Nobody closes the loop.** Closing requires three
+things at once: (a) cross-toolkit READ to verify completion, (b) cross-toolkit WRITE to
+fulfill, (c) learned judgment of which promises matter and how you'd phrase them. Cloud
+single-channel tools (Superhuman / Motion / Gemini Daily Brief — Workspace-locked)
+physically can't watch the OS or act across 200 toolkits; screen-watchers (Screenpipe)
+capture but don't act; notetakers see one channel. **The triple `see + act-everywhere +
+learn-me` is structurally unoccupied — and it is exactly the KAIROS stack** (Composio
+200+ toolkits + OS/voice perception + the You-Policy + the restraint chassis). The moat
+is the user's own tweet: *"My AI caught a promise from a Zoom call 3 days ago, found the
+file, and wrote the email the way I would — the first one that DOES the thing instead of
+reminding me."*
+
+**How it maps onto §6 (no new architecture).**
+- A **commitment is a PROSPECTIVE node** (§6.2 #1) tagged `kind: commitment`, with
+  `direction: made-by-me | owed-to-me`, scoped to the counterparty **entity** (Life Graph),
+  carrying an **event trigger** whose salience ramp (0.05 → 1.0 at the promised date →
+  decay) IS the right-time-to-chase function.
+- The set of open commitments is surfaced as **one "Open Loops" concern canvas** (GAIA
+  6-section) — so it's both graph-native AND the queryable ledger the voice oracle reads.
+- **Verify-fulfillment = grounded-verify reused.** The claim "this loop is closed" must be
+  ⊆ a cross-toolkit read (a sent message to that recipient/thread, an invoice in Stripe,
+  an issue in Linear…). At trigger day-of salience: **no fulfillment signal ⇒ surprise ⇒
+  violation ⇒ open loop.** (Mode B: no inbound reply by the expected date ⇒ they owe me ⇒
+  cold.)
+- The fulfillment draft is a **§5.3 campaign**, voiced by **behavioral nodes scoped to the
+  recipient** (§6.2 #3) — terse with the cofounder, warm with the investor.
+- A kept promise closes the prospective node via a **resolved-by edge** (§6.1).
+
+### 7.2 The five keystones (coded regardless of beta scope), each anchored to the wedge
+
+These are the verification-panel's "make it a breakthrough, not a re-staple" core. Each is
+specced as a general mechanism AND has the wedge as its first proving ground.
+
+1. **Self-predicting surprise (the novelty engine).** KAIROS predicts what it expects to
+   observe and treats prediction error as the salience signal. For the wedge the
+   expectation is "this promise gets fulfilled / this person replies by date"; surprise =
+   day-of with no fulfillment/reply signal. This is the engine under **both** beta modes
+   and is what makes Mode B (Who-Owes-Me) work at all — absence is only detectable because
+   an expectation existed. Mechanized as prospective-node triggers + the sweep's two
+   surprise forms (§6.2 #1), not just named.
+2. **The Judgment Model (calibrated P(accept) drives autonomy).** A *calibrated*
+   probability that the user would accept a given surfacing/action. In beta (draft +
+   one-tap, §7.3) it governs **which** slipping loops surface and how they rank — high
+   P(matters) loops interrupt, low ones pool into the digest or stay silent. Post-beta it
+   gates auto-send. Calibration is the safety hinge: rope is granted on **measured**
+   acceptance with enough samples (a Brier/ECE check), never on a raw "3 accepts" count
+   (§7.3).
+3. **The Glass Box (voice-interrogable causal chain = the legibility moat).** Every
+   surfaced loop can be interrogated: *"How did you know I promised that?"* → *"On Tuesday's
+   call with Dana you said 'I'll send the SOC2 by Thursday' [transcript ts]; it's Thursday,
+   no message to her domain in Gmail and no Drive share — so the loop's open."* The causal
+   chain (which signal, which expectation, which read verified absence) is a first-class,
+   spoken-on-demand artifact. This is also the personalization surface (§7.4).
+4. **The Capability Profile (universality — zero per-toolkit code).** On connect, each
+   toolkit gets **ONE cached LLM classification** declaring `{commitment-signals,
+   fulfillment-signals, read-verbs, write-verbs, reversibility, sensitivity-class}`. The
+   closer's see→verify→act loop reads ONLY this profile — no per-toolkit branching. Gmail:
+   commitment = outbound promise language; fulfillment = a sent message on that thread.
+   Stripe: commitment = "I'll invoice you"; fulfillment = invoice created/sent. Linear:
+   commitment = "I'll file it"; fulfillment = issue created. **Connect a new toolkit → the
+   closer covers it for free.** Reuses the `ComposioToolResolver.classifyLlm` batch pattern;
+   this is what makes proactiveness *universal* across whatever the user connects.
+5. **The Week Simulator (Foresight).** Runs the trigger salience ramps forward across the
+   week → *"5 loops come due this week; 2 are most likely to slip based on your history."*
+   Voice-interrogable: *"what am I about to drop this week?"* Foresight tier on top of the
+   prospective-node + Judgment-Model machinery.
+
+### 7.3 Safety fixes (the panel's real findings — these block ship without them)
+
+These AMEND §1's no-go list and §5.1's warm-up autonomy.
+
+- **Forever-draft classes (hard invariant).** VIP / financial / legal / new-contact actions
+  are **never** auto-sent regardless of warm-up state — they always draft-and-propose. This
+  overrides §5.1's "warmed-up mandate sends in scope" for these classes specifically.
+- **Beta autonomy ceiling = DRAFT + ONE-TAP** (founder-locked). Beta always drafts; the
+  human taps send. The warm-up→autonomous ladder is still **coded** (keystone-adjacent) but
+  **capped at draft for beta** — best demo (you tap "send" on a perfect draft), and it dodges
+  the OpenClaw "agent ran amok on her inbox" failure mode the GTM explicitly warns against.
+- **Calibration-gated autonomy.** Rope is granted only when the Judgment Model is *calibrated*
+  on enough samples (P(accept) above threshold with an acceptable Brier/ECE), not on a raw
+  accept count. Hardens §5.1.
+- **Action circuit-breaker + kill-switch + hold-recall.** A global pause (kill-switch); a
+  short **hold window** before any send (even one-tap) so a mistaken tap is recallable; a
+  circuit-breaker that trips autonomy *down* a rung on a burst of dismissals/reverts.
+- **`source:'proactive'` invariant (closes a real bug).** Proactive-initiated actions MUST
+  carry `source:'proactive'` and NEVER `source:'user'`. The user-bypass at
+  `restraintPipeline.ts:88` is for genuine user turns only; a memUBot-style synthetic
+  stimulus must not inherit it. Without this, the synthetic-turn path silently skips the
+  INTERRUPTION gate.
+- **Route ALL proactive actions through `ActionExecutor` → `RestraintPipeline`.** Close the
+  `orders/v2/actionDispatcher.ts:66-90` path that bypasses restraint (only the TriggerEngine
+  path currently reaches the pipeline). Replace `actionExecutor.ts:98-104`'s hardcoded
+  restraint inputs (novelty 1 / urgency 0.5 / relevance 0.5) with **real signals from the
+  surprise loop**: novelty = surprise magnitude, urgency = trigger salience, relevance =
+  P(matters) from the Judgment Model.
+
+### 7.4 Personalization-as-PRIMARY (founder-locked: "Card + improvement curve")
+
+Personalization is not a feature here — it's the headline benefit and the thing incumbents
+structurally cannot build (they don't see enough of your life to learn your judgment). The
+beta makes "it learns ME" **felt** via **both** surfaces:
+
+- **The learned model** (behavioral + prospective nodes, Memory Reducer): which promises you
+  **keep vs. let slide** (per class and per person), **who matters** (inferred from how you
+  treat them — not a manual VIP list), your **per-relationship voice** (behavioral nodes
+  scoped to entities), and your **restraint threshold** (surface vs. stay-silent, learned
+  from yes/no history). The longer you use it, the fewer false alarms and the more it acts
+  the way you would.
+- **Felt surface A — the inspectable "what I've learned about you" card.** Voice-interrogable
+  provenance: *"I've watched you keep every promise to an investor and drop 'let's grab
+  coffee' twice — so I now only chase the ones that would actually cost you."* This is the
+  Glass Box keystone (§7.2.3) made into a standing, browsable artifact (ChatGPT-memory-style,
+  but with provenance and editable).
+- **Felt surface B — the improvement curve.** A day-1 draft vs. week-4 draft side-by-side for
+  the same person — *"it sounds like me now."* Measurable as edit-rate decay (e.g. 60% of
+  drafts edited in week 1 → 8% now), which doubles as the Time-Back/quality receipt (§5.8).
+
+Both ship in beta; together they are the personalization half of the demo.
+
+### 7.5 Build-order integration (amends §5.11 and §6.4)
+
+The beta wedge rides the §6.4 spine — these are the deltas, not a parallel plan.
+
+- **P1 spine** (already: prospective nodes + triggers + canvases + memory-graph core + Life-
+  Graph thin slice) **+= for the wedge:** the `kind: commitment` tag + `direction` on
+  prospective nodes; the **"Open Loops" concern canvas**; the **commitment extractor** (cheap
+  LLM over outbound mail/Slack + call transcripts — reuse the `realtimeFactExtractor`
+  fire-and-forget pattern); the **Capability Profile classifier** (reuse
+  `ComposioToolResolver.classifyLlm`).
+- **P2 += for the wedge:** the **verify-fulfillment loop** (grounded-verify reused —
+  fulfillment-claim ⊆ cross-toolkit read); the **draft campaign** (draft + one-tap,
+  restraint-gated, voiced by scoped behavioral nodes); **Mode B Who-Owes-Me** (absence
+  detection on `owed-to-me` nodes + learned per-relationship cadence); the **Glass Box answer
+  surface**; **ALL of §7.3's safety fixes** (`source:'proactive'`, route-through-ActionExecutor,
+  forever-draft classes, hold-recall, real restraint inputs).
+- **P3 (slice for beta):** behavioral-node injection + the **inspectable card** + the
+  **improvement curve** (Memory Reducer + JudgmentEvents per §6.4 P3). Full reducer continues
+  post-beta.
+- **Keystones across phases:** surprise (P1–P2) · Capability Profile (P1) · Glass Box (P2) ·
+  Judgment-Model calibration (P3, gates ranking in beta / autonomy post-beta) · Week Simulator
+  (P2–P3 foresight).
+
+**BETA v1 = P0 + P1 + P2 + a slice of P3**, autonomy capped at draft + one-tap, two modes
+(Promises-I-made + Who-Owes-Me), personalization headlined via Card + improvement curve.
+This is also the content of DEMO v2 (memory `kairos-gtm-idle`): the Closer = the **Mandate**
+beat ("never let me drop a ball"), Who-Owes-Me's absence-catch = a **Reflex** surprise, and
+the Week Simulator answers the **Oracle** beat — the wedge and the locked demo are the same
+build.

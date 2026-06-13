@@ -40,8 +40,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guide.resultHandler = { [weak client] id, found, label, reason in
                 client?.sendGuideResult(id: id, found: found, label: label, reason: reason)
             }
-            guide.controlResultHandler = { [weak client] id, ok, label, reason in
-                client?.sendControlResult(id: id, ok: ok, label: label, reason: reason)
+            guide.screenResultHandler = { [weak client] id, ok, summary, reason in
+                client?.sendScreenResult(id: id, ok: ok, summary: summary, reason: reason)
             }
             client.connect()
             daemon = client

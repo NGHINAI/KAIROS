@@ -15,9 +15,22 @@ struct AXMatch {
     let title: String
     /// Screen rect in AppKit coordinates (bottom-left origin), ready for overlay use.
     let frame: CGRect
-    /// The live element handle — kept so we can ACT on it (kAXPressAction), not just
-    /// point. nil only for synthetic/dev matches.
-    let element: AXUIElement?
+    /// The LIVE AX node (act mode presses this directly — kAXPressAction beats
+    /// synthetic clicks: no cursor, no focus steal, works on sidebar rows).
+    /// nil for cached-frame fallbacks and dev/fake matches — those can point, not act.
+    let node: AXUIElement?
+    /// Owning app's pid — CGEvent.postToPid fallback target. nil when node is nil.
+    let pid: pid_t?
+    /// AX role — actuation strategy depends on it (rows/cells SELECT, buttons PRESS).
+    let role: String?
+
+    init(title: String, frame: CGRect, node: AXUIElement? = nil, pid: pid_t? = nil, role: String? = nil) {
+        self.title = title
+        self.frame = frame
+        self.node = node
+        self.pid = pid
+        self.role = role
+    }
 }
 
 enum AXFindResult {
@@ -25,8 +38,15 @@ enum AXFindResult {
     case notFound(reason: String)
 }
 
-enum AXActResult {
-    case ok(label: String)
+/// One numbered entry of a screen snapshot — what guide-by-element points at.
+struct AXInventoryEntry {
+    let label: String
+    let role: String
+    let frame: CGRect   // AppKit coords, resolved at snapshot time
+}
+
+enum AXInventoryResult {
+    case ok(summary: String, entries: [AXInventoryEntry])
     case failed(reason: String)
 }
 
@@ -40,8 +60,7 @@ enum AXFinder {
 
     private static let maxNodes = 12000
     private static let maxDepth = 14
-    private static let perWindowSeconds = 1.6   // each window gets its OWN budget (a heavy window can't starve later ones)
-    private static let totalSeconds = 5.0       // absolute wall-clock cap across all windows (< the 8s bridge timeout)
+    private static let deadlineSeconds = 2.5
     private static var promptedForPermission = false
 
     /// Dev probe (--axprobe): collect every labeled node seen during the walk.
@@ -56,45 +75,7 @@ enum AXFinder {
     private static func ensureMessagingTimeout() {
         guard !messagingTimeoutSet else { return }
         messagingTimeoutSet = true
-        // 1.0s, not 0.3s: a single fetch of a heavy web area's children (Safari) can
-        // exceed 0.3s and time out, returning EMPTY children — the walk then silently
-        // misses everything on the page. 1.0s still bounds a truly hung app; the walk's
-        // own 2.5s overall deadline is the backstop.
-        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 1.0)
-    }
-
-    /// ACTUATE: find the element, then perform a semantic AX action on it — a real
-    /// click with NO cursor move and NO focus theft (kAXPressAction → the element's
-    /// own press handler). Falls back across press → confirm → pick → showMenu so
-    /// buttons, links, menu items, checkboxes, and rows all work. This is the fast
-    /// path Cua/HeyClicky use; the slow part of "computer use" is screenshots, which
-    /// we never take.
-    static func act(query: String, appName: String?) -> AXActResult {
-        let found = find(query: query, appName: appName)
-        guard case .found(let match) = found else {
-            if case .notFound(let reason) = found { return .failed(reason: reason) }
-            return .failed(reason: "not found")
-        }
-        return press(match)
-    }
-
-    /// Press an ALREADY-FOUND element — no second tree walk (the click path finds once,
-    /// points, then presses this). kAXPressAction → confirm → pick → open → showMenu.
-    static func press(_ match: AXMatch) -> AXActResult {
-        guard let el = match.element else { return .failed(reason: "no actionable handle for \"\(match.title)\"") }
-
-        // Only perform an action the element actually advertises (avoids -25205 noise).
-        var namesRef: CFArray?
-        let available: Set<String> = AXUIElementCopyActionNames(el, &namesRef) == .success
-            ? Set((namesRef as? [String]) ?? []) : []
-        let order = [kAXPressAction, kAXConfirmAction as String, kAXPickAction, "AXOpen", kAXShowMenuAction]
-        for action in order where available.isEmpty || available.contains(action) {
-            if AXUIElementPerformAction(el, action as CFString) == .success {
-                return .ok(label: match.title)
-            }
-            if !available.isEmpty { continue }   // unknown action set → try the next blindly
-        }
-        return .failed(reason: "couldn't activate \"\(match.title)\" (the app didn't accept a press)")
+        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.3)
     }
 
     /// Find the best on-screen element matching `query` in `appName` (nil = frontmost app).
@@ -117,14 +98,17 @@ enum AXFinder {
         ensureMessagingTimeout()
         if debug { seenLabels = [] }
         let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        // The system-wide messaging timeout doesn't reliably propagate to app elements
+        // (a freshly-launched System Settings hung a walk >8s past it) — set it on the
+        // app element too; children created from it inherit this connection's timeout.
+        AXUIElementSetMessagingTimeout(axApp, 0.3)
         var best: (score: Int, match: AXMatch)? = nil
         var visited = 0
-        var deadline = Date().addingTimeInterval(perWindowSeconds)   // reset per window
-        let hardDeadline = Date().addingTimeInterval(totalSeconds)   // absolute cap across all windows
+        let deadline = Date().addingTimeInterval(deadlineSeconds)
         let needle = normalize(query)
 
         func walk(_ element: AXUIElement, depth: Int) {
-            if depth > maxDepth || visited > maxNodes || Date() > deadline || Date() > hardDeadline { return }
+            if depth > maxDepth || visited > maxNodes || Date() > deadline { return }
             visited += 1
 
             if let label = labelOf(element), !label.isEmpty {
@@ -135,7 +119,8 @@ enum AXFinder {
                 }
                 if score > 0, let frame = resolvedFrame(of: element) {
                     if best == nil || score > best!.score {
-                        best = (score, AXMatch(title: label, frame: frame, element: element))
+                        best = (score, AXMatch(title: label, frame: frame, node: element,
+                                               pid: app.processIdentifier, role: roleOf(element)))
                     }
                 }
             }
@@ -151,42 +136,125 @@ enum AXFinder {
             }
         }
 
-        // FOCUSED window first — what the user is actually looking at. On a big app
-        // (Safari with heavy tabs has a huge AX tree), walking windows in array order
-        // can blow the node/time budget on a background window before reaching the one
-        // on screen — so the same query resolved nondeterministically. Main/focused
-        // window → other windows → whole app (menus) as the budget allows.
-        var ordered: [AXUIElement] = []
-        var seenWin = Set<AXUIElement>()
-        for attr in [kAXFocusedWindowAttribute, kAXMainWindowAttribute] {
-            var ref: CFTypeRef?
-            if AXUIElementCopyAttributeValue(axApp, attr as CFString, &ref) == .success,
-               CFGetTypeID(ref) == AXUIElementGetTypeID() {
-                let w = ref as! AXUIElement
-                if seenWin.insert(w).inserted { ordered.append(w) }
-            }
-        }
+        // Windows first — what the user can SEE beats menu items with the same name.
+        // The full app tree (menus included) is the fallback if the budget allows.
         var windowsRef: CFTypeRef?
+        var windowCount = 0
         if AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef) == .success,
            let windows = windowsRef as? [AXUIElement] {
-            for w in windows where seenWin.insert(w).inserted { ordered.append(w) }
+            windowCount = windows.count
+            for w in windows {
+                walk(w, depth: 1)
+                if let b = best, b.score >= 100 { break }
+            }
         }
-        for w in ordered {
-            if Date() > hardDeadline { break }
-            visited = 0                                          // fresh node budget per window
-            deadline = Date().addingTimeInterval(perWindowSeconds)  // fresh time budget per window
-            walk(w, depth: 1)
-            if let b = best, b.score >= 100 { break }
-        }
-        if best == nil, Date() < hardDeadline { visited = 0; deadline = Date().addingTimeInterval(perWindowSeconds); walk(axApp, depth: 0) }
+        if best == nil { walk(axApp, depth: 0) }
 
         if let b = best { return .found(b.match) }
         let where_ = appName ?? (app.localizedName ?? "the frontmost app")
-        if ProcessInfo.processInfo.environment["KAIROS_AX_DEBUG"] != nil {
-            let hitDeadline = Date() > deadline
-            FileHandle.standardError.write("AXFinder miss: query=\"\(query)\" app=\(where_) visited=\(visited) deadlineHit=\(hitDeadline)\n".data(using: .utf8)!)
+        if windowCount == 0 {
+            return .notFound(reason: "\(where_) is running but its window is closed — call open_app to bring it forward, then point again")
         }
         return .notFound(reason: "no element matching \"\(query)\" is visible in \(where_) right now")
+    }
+
+    /// READ_SCREEN: the visible element inventory of an app, rendered as compact
+    /// grouped text for the agent to plan guidance steps from. This is what makes
+    /// guidance DYNAMIC (HeyClicky's get_window_state, pointing-only): the agent sees
+    /// what is ACTUALLY there instead of guessing from training memory. Read-only.
+    static func inventory(appName: String?) -> AXInventoryResult {
+        guard AXIsProcessTrusted() else {
+            if !promptedForPermission {
+                promptedForPermission = true
+                let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+                _ = AXIsProcessTrustedWithOptions(opts)
+            }
+            return .failed(reason: "the Accessibility permission isn't granted yet")
+        }
+        guard let app = resolveApp(named: appName) else {
+            return .failed(reason: appName != nil ? "no running app called \"\(appName!)\"" : "no frontmost app")
+        }
+        ensureMessagingTimeout()
+        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(axApp, 0.3)
+
+        var buckets: [String: [String]] = [:]   // human bucket → "N label" (ordered)
+        var entries: [AXInventoryEntry] = []     // numbered snapshot (1-based for the model)
+        var seen = Set<String>()
+        var visited = 0
+        var total = 0
+        let deadline = Date().addingTimeInterval(deadlineSeconds)
+
+        func bucketName(for role: String) -> String {
+            switch role {
+            case kAXButtonRole, kAXPopUpButtonRole: return "Buttons"
+            case kAXTextFieldRole, kAXTextAreaRole: return "Fields"
+            case kAXCheckBoxRole, kAXRadioButtonRole: return "Toggles"
+            case "AXRow", "AXCell", kAXMenuItemRole, "AXTab", "AXLink": return "Items"
+            case kAXStaticTextRole: return "Labels"
+            default: return "Other"
+            }
+        }
+
+        func walk(_ element: AXUIElement, depth: Int) {
+            if depth > maxDepth || visited > maxNodes || total >= 90 || Date() > deadline { return }
+            visited += 1
+            if let label = labelOf(element), !label.isEmpty, label.count <= 60,
+               let role = roleOf(element) {
+                let key = "\(role)|\(label)"
+                if !seen.contains(key), let frame = resolvedFrame(of: element) {
+                    seen.insert(key)
+                    let bucket = bucketName(for: role)
+                    if bucket != "Other" {
+                        entries.append(AXInventoryEntry(label: label, role: role, frame: frame))
+                        buckets[bucket, default: []].append("\(entries.count) \(label)")
+                        total += 1
+                    }
+                }
+            }
+            var childrenRef: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+                  let children = childrenRef as? [AXUIElement] else { return }
+            for child in children { walk(child, depth: depth + 1) }
+        }
+
+        var windowsRef: CFTypeRef?
+        var windowCount = 0
+        if AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+           let windows = windowsRef as? [AXUIElement] {
+            windowCount = windows.count
+            for w in windows { walk(w, depth: 1) }
+        }
+
+        // kAXWindowsAttribute is FLAKY on some apps (System Settings on macOS 26
+        // returns empty while the window is plainly open — find() always survived
+        // this via its app-root fallback; inventory() declared "window is closed"
+        // and blinded the whole walkthrough). Fall back to walking the app element
+        // directly, skipping the menu bar so the inventory stays what's VISIBLE.
+        if total == 0 {
+            var childrenRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(axApp, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+               let children = childrenRef as? [AXUIElement] {
+                for child in children where roleOf(child) != "AXMenuBar" {
+                    windowCount += 1
+                    walk(child, depth: 1)
+                }
+            }
+        }
+
+        if windowCount == 0 {
+            return .failed(reason: "\(app.localizedName ?? "the app") is running but its window is closed — call open_app to bring it forward, then look again")
+        }
+        if total == 0 {
+            return .failed(reason: "\(app.localizedName ?? "the app") exposes no readable elements (window may be empty or the app has poor accessibility support)")
+        }
+
+        var lines = ["App: \(app.localizedName ?? appName ?? "frontmost")"]
+        for bucket in ["Items", "Buttons", "Toggles", "Fields", "Labels"] {
+            guard let labels = buckets[bucket], !labels.isEmpty else { continue }
+            lines.append("\(bucket): " + labels.prefix(28).joined(separator: " · "))
+        }
+        return .ok(summary: String(lines.joined(separator: "\n").prefix(2400)), entries: entries)
     }
 
     // ── matching ──

@@ -175,7 +175,8 @@ import { buildRecallTool } from './agents/recallTool'
 import { buildWebTools } from './agents/webTools'
 import { GuideBridge } from './agents/guideBridge'
 import { buildGuideTools } from './agents/guideTools'
-import { buildControlTools } from './agents/controlTools'
+import { GuideLessonManager, LESSON_CONTINUE_SENTINEL, LESSON_CONTINUE_TEXT } from './agents/guideLesson'
+import { TEACHING_RE } from './agents/loop/verifier'
 import { ToolUsageTracker } from './agents/toolUsageTracker'
 import { TurnLogger } from './agents/turnLogger'
 import { ComposioToolCache, buildComposioSearchTool } from './agents/composioToolProvider'
@@ -2036,21 +2037,25 @@ async function main(): Promise<void> {
             try { out.push(...buildWebTools()) }
             catch (e) { log('[actionTools] web tools failed: ' + String(e), 'warn') }
           }
-          // Full computer control: run_applescript + run_shell (system volume, media,
-          // scriptable apps, anything a Mac CLI can do). Destructive commands hard-
-          // refused; everything else runs without a prompt. KAIROS_COMPUTER_CONTROL=0 off.
-          if (process.env.KAIROS_COMPUTER_CONTROL !== '0') {
-            try { out.push(...buildControlTools()) }
-            catch (e) { log('[actionTools] control tools failed: ' + String(e), 'warn') }
-          }
           // Guide Mode: guide_user points at on-screen elements via the HUD overlay
           // (the orb morphs into a guide); open_app launches the app first when needed
           // (argv-only `open -a` — no shell, no injection surface).
           const guideB = (globalThis as any).__kairosGuideBridge
           if (guideB) {
+            const guideL = (globalThis as any).__kairosGuideLesson
             try {
               out.push(...buildGuideTools({
                 bridge: guideB,
+                // Durable guide session: points feed the lesson/highlight state that
+                // survives turns; end_lesson appears in the toolset when wired.
+                lesson: guideL ? {
+                  notePoint: (p: any, note?: string) => guideL.notePointFromTool(p, note),
+                  noteStepDone: () => guideL.noteStepDone(),
+                  // endRequestFromModel REFUSES (returns false) when no step is done
+                  // yet — the model declaring victory at the first point killed the
+                  // highlight 8s into a live lesson.
+                  endLesson: (reason: string) => guideL.endRequestFromModel(reason),
+                } : undefined,
                 openApp: async (name: string) => {
                   try {
                     const proc = Bun.spawn(['open', '-a', name], { stdout: 'ignore', stderr: 'pipe' })
@@ -2111,9 +2116,35 @@ async function main(): Promise<void> {
     // pointer). Requests go out as guide_request events; the HUD answers with a
     // guide_result command; turn end retracts the guide (guide_end).
     const guideBridge = new GuideBridge({
-      broadcast: (e) => { try { wrapApi.broadcast(e as any) } catch { /* */ } },
+      broadcast: (e) => {
+        try {
+          wrapApi.broadcast(e as any)
+          // One line per guide round-trip: which request went out and to how many
+          // clients. "→ 1 client(s)" with the HUD visibly running = the one-way
+          // zombie (HUD evicted/dropped from the broadcast set) — a class of bug
+          // that burned hours while every other log looked healthy.
+          log(`[guide] broadcast ${String((e as any).event)} → ${wrapApi.clientCount()} client(s)`)
+        } catch { /* */ }
+      },
     })
     ;(globalThis as any).__kairosGuideBridge = guideBridge
+
+    // GUIDE SESSION MANAGER: owns the guide lifecycle ACROSS turns. Lessons persist
+    // (highlight stays up between steps; a between-turns screen watcher injects an
+    // auto-continue turn when the user clicks); standalone highlights persist until
+    // the user speaks or acts. continueLesson is late-bound — handleUtterance is
+    // defined further down; the ref is assigned right after it.
+    let lessonContinueFn: ((cid: string) => void) | undefined
+    const guideLesson = new GuideLessonManager({
+      watchChange: async (app, timeoutMs) => {
+        const r = await guideBridge.requestWatchChange({ app, timeoutMs })
+        return !!r?.found
+      },
+      continueLesson: (cid) => { try { lessonContinueFn?.(cid) } catch { /* */ } },
+      retractGuide: () => guideBridge.endIfActive(),
+      log: (m) => log(`[voice] ${m}`),
+    })
+    ;(globalThis as any).__kairosGuideLesson = guideLesson
 
     const streamingSpeaker = new StreamingSpeaker({
       backend: voiceBundle.sayBackend,
@@ -2516,6 +2547,19 @@ async function main(): Promise<void> {
     const COALESCE_MS = Number(process.env.KAIROS_UTTERANCE_COALESCE_MS) || 800
 
     const handleUtterance = async (utterance: string, conversationId: string): Promise<void> => {
+      // GUIDE LESSON AUTO-CONTINUE: a daemon-injected turn fired by the between-turns
+      // screen watcher (the user clicked the highlighted step). The user's voice always
+      // outranks it — if a real turn is live, the continuation yields silently. The
+      // visible text deliberately matches WALKTHROUGH_ECHO_RE so it never enters recall.
+      const isLessonContinue = utterance === LESSON_CONTINUE_SENTINEL
+      if (isLessonContinue) {
+        if (activeConductorController && !activeConductorController.signal.aborted) {
+          log('[voice] lesson auto-continue yielded — a real turn is in flight')
+          return
+        }
+        utterance = LESSON_CONTINUE_TEXT
+      }
+
       // Coalesce STT fragments of ONE breath (diagnosis #4-truncation d): if the previous
       // turn is STILL in flight and this utterance arrived within ~a breath, the
       // end-of-utterance detector almost certainly split one utterance ("Okay." +
@@ -2523,14 +2567,28 @@ async function main(): Promise<void> {
       // second fragment supersedes + truncates the first's reply. A turn that already
       // FINISHED clears activeConductorController, so a genuinely new utterance never
       // coalesces. Tunable / disable with KAIROS_UTTERANCE_COALESCE_MS=0.
+      // Synthetic lesson turns skip this entirely — they must neither absorb a prior
+      // fragment nor become coalesce-bait for the user's NEXT real words.
       const now = Date.now()
-      const priorLive = !!activeConductorController && !activeConductorController.signal.aborted
-      const coalesced = coalesceFragment(lastUtterance, utterance, now, { coalesceMs: COALESCE_MS, priorLive })
-      if (coalesced !== utterance) log(`[voice] coalesced STT fragment (${now - (lastUtterance?.at ?? now)}ms gap) → "${coalesced.slice(0, 100)}"`)
-      utterance = coalesced
-      lastUtterance = { text: utterance, at: now }
+      if (!isLessonContinue) {
+        const priorLive = !!activeConductorController && !activeConductorController.signal.aborted
+        const coalesced = coalesceFragment(lastUtterance, utterance, now, { coalesceMs: COALESCE_MS, priorLive })
+        if (coalesced !== utterance) log(`[voice] coalesced STT fragment (${now - (lastUtterance?.at ?? now)}ms gap) → "${coalesced.slice(0, 100)}"`)
+        utterance = coalesced
+        lastUtterance = { text: utterance, at: now }
+      }
 
-      log(`[voice] handleUtterance ENTER: "${utterance.slice(0, 120)}" (cid=${conversationId})`)
+      log(`[voice] handleUtterance ENTER: "${utterance.slice(0, 120)}" (cid=${conversationId})${isLessonContinue ? ' [lesson auto-continue]' : ''}`)
+
+      // GUIDE SESSION lifecycle, BEFORE the turn runs: a real utterance applies the
+      // dismissal rules (a lesson ends on "stop / that's all…"; a standalone highlight
+      // is dismissed by ANY speech — the user's spec: "until I say okay or something
+      // else, anything, or I click it"). Then stamp this turn's context so successful
+      // guide_user points know whether they belong to a lesson.
+      try {
+        if (!isLessonContinue) guideLesson.onUserUtterance(conversationId, utterance)
+        guideLesson.setTurnContext(conversationId, utterance, TEACHING_RE.test(utterance))
+      } catch { /* guide session is best-effort */ }
       // Sub-agents spawned during this turn inherit the conversation for context parity.
       try { backgroundSub.manager.setActiveConversation(conversationId) } catch { /* */ }
       // Supersede any in-flight turn: abort its controller, then settle the shared
@@ -2687,7 +2745,16 @@ async function main(): Promise<void> {
       const turnRunId = `turn_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
       try { backgroundSub.manager.setActiveRunId(turnRunId) } catch { /* */ }
       try {
-        await agentConductor.handle({ utterance, conversationId, signal: controller.signal, runId: turnRunId })
+        // Lesson/highlight context rides on the conductor opts: an active walkthrough
+        // skips the fast front entirely (it answered lessons from memory — the
+        // 2026-06-10 fabrication bug) and the planner gets the resume block.
+        const lessonContext = (() => {
+          try { return guideLesson.contextBlockFor(conversationId) || undefined } catch { return undefined }
+        })()
+        await agentConductor.handle({
+          utterance, conversationId, signal: controller.signal, runId: turnRunId,
+          lessonContext, synthetic: isLessonContinue || undefined,
+        })
         log(`[voice] handleUtterance OK`)
         // Persist the AGENT turn (captured from agent_done via onEvent).
         if (lastAgentReply.trim()) {
@@ -2711,14 +2778,24 @@ async function main(): Promise<void> {
             await epStore.record({ source: 'voice', text: voiceTurnObservation(utterance, lastAgentReply) })
           }
         } catch (e) { log(`[voice] episodic record failed: ${(e as Error).message}`) }
-        // Guide Mode: a guide never outlives its turn — retract so the orb re-forms.
-        try { guideBridge.endIfActive() } catch { /* */ }
+        // Guide Mode turn-end handoff: retraction is NO LONGER automatic (highlights
+        // vanished before KAIROS finished speaking — 2026-06-10). The session manager
+        // decides: lesson alive → arm the between-turns screen watcher (auto-continue
+        // on the user's click); standalone highlight up → arm the act-dismissal watch.
+        // OWNERSHIP GUARD: only the turn that is STILL current may hand off. A superseded
+        // (zombie) turn finishing late used to yank the NEW turn's guide off the screen.
+        if (activeConductorController === controller) {
+          try { guideLesson.afterTurn(conversationId) } catch { /* */ }
+        }
         // Only clear if we're still the active turn (a newer turn may have replaced us).
         if (activeConductorController === controller) activeConductorController = undefined
       }
     }
 
     voiceBundle.conductor.setUserUtteranceHandler(handleUtterance)
+    // Late-bind the lesson auto-continue injector now that handleUtterance exists:
+    // the between-turns watcher fires this when the user clicks the highlighted step.
+    lessonContinueFn = (cid) => { void handleUtterance(LESSON_CONTINUE_SENTINEL, cid) }
 
     // Allow WS clients (or scripts/agent-ping.ts) to inject a synthetic
     // utterance — runs the FULL agent loop and emits events the same way as
@@ -2726,12 +2803,19 @@ async function main(): Promise<void> {
     // classifier failures (the issue that hit Phase E.2 v0.7.0): you can
     // smoke-test the agent without touching the mic.
     wrapApi.onCommand((cmd: any) => {
+      // Telemetry commands: high-frequency (tts_level ~15Hz while speaking) — never
+      // trace-log these, they drowned the diagnostics (15 lines/sec of noise).
+      if (cmd?.cmd === 'hud_keepalive') return
+      const QUIET_CMDS = new Set(['tts_level', 'tts_playback'])
+      const quiet = QUIET_CMDS.has(cmd?.cmd)
       // Trace EVERY command from the renderer so we can tell "renderer never sent"
       // from "daemon dropped it". For audio, log size not the base64 blob.
       try {
-        const kind = cmd?.cmd ?? '(no cmd field)'
-        const extra = cmd?.wavBase64 ? ` wavB64=${String(cmd.wavBase64).length}B` : ''
-        log(`[voice] WS cmd: ${kind}${extra}`)
+        if (!quiet) {
+          const kind = cmd?.cmd ?? '(no cmd field)'
+          const extra = cmd?.wavBase64 ? ` wavB64=${String(cmd.wavBase64).length}B` : ''
+          log(`[voice] WS cmd: ${kind}${extra}`)
+        }
       } catch {}
 
       if (cmd?.cmd === 'test_inject_utterance' && typeof cmd.text === 'string') {
@@ -2751,16 +2835,10 @@ async function main(): Promise<void> {
       }
 
       // Guide Mode: the HUD answers a guide_request (found the element + pointing,
-      // or not found + why) — resolves the agent's awaiting guide_user call.
-      if (cmd?.cmd === 'guide_result' && typeof cmd.id === 'string') {
-        guideBridge.resolve(cmd.id, { found: !!cmd.found, label: cmd.label, reason: cmd.reason })
-        return
-      }
-
-      // Click actuation: the HUD answers a control_request (pressed the element, or
-      // couldn't) — resolves the agent's awaiting click_element call.
-      if (cmd?.cmd === 'control_result' && typeof cmd.id === 'string') {
-        guideBridge.resolveControl(cmd.id, { ok: !!cmd.ok, label: cmd.label, reason: cmd.reason })
+      // or not found + why) or a screen_request (the AX element inventory) —
+      // resolves the agent's awaiting guide_user / read_screen call.
+      if ((cmd?.cmd === 'guide_result' || cmd?.cmd === 'screen_result') && typeof cmd.id === 'string') {
+        guideBridge.resolve(cmd.id, { found: !!cmd.found, label: cmd.label, reason: cmd.reason, summary: cmd.summary })
         return
       }
 
@@ -2846,16 +2924,16 @@ async function main(): Promise<void> {
           log(`[barge-in] (renderer VAD) IGNORED — ${sinceTts}ms after our TTS ended (self-trigger guard)`)
           return
         }
-        if (activeConductorController) {
-          log('[barge-in] (renderer VAD) aborting active conductor turn')
-          activeConductorController.abort()
-        }
-        // Stop BOTH layers: the StreamingSpeaker (phrase queue + drain loop) and
-        // the underlying TTS backend (in-flight provider fetch). Stopping only the
-        // backend leaves the speaker draining into a dead sink.
+        // BARGE-IN IS AUDIO-ONLY. It used to ABORT the whole conductor turn — and the
+        // renderer's VAD hears KAIROS'S OWN VOICE through open speakers (AEC residual),
+        // so every answer killed itself the moment it started playing (the 2026-06-10
+        // silent-turn cascade: "yes" → dead, "Hello?" → dead). Now: stop the SOUND
+        // immediately; the turn lives on. A REAL interruption is followed by an actual
+        // utterance, and THAT supersedes/aborts the turn through handleUtterance.
+        log('[barge-in] (renderer VAD) stopping audio — turn continues (utterance, if any, will supersede)')
         try { streamingSpeaker.cancel() } catch {}
         try { voiceBundle!.sayBackend.stop() } catch {}
-        wrapApi.broadcast({ event: 'agent_interrupted' })
+        wrapApi.broadcast({ event: 'tts_stopped' })
         return
       }
 
@@ -2876,7 +2954,9 @@ async function main(): Promise<void> {
       }
     })
 
-    // Listen for barge_in events from sidecar → abort active conductor turn + stop TTS.
+    // Sidecar barge-in — AUDIO-ONLY, same as the renderer path: stop the sound, let
+    // the turn live; a real interruption's utterance supersedes it (VAD hears our own
+    // speaker output through AEC residual — aborting on VAD alone killed answers).
     voiceBundle.sidecar.onEvent((e: any) => {
       if (e.event === 'barge_in_detected' || e.event === 'barge_in' || e.event === 'vad_speech_during_tts') {
         const sinceTts = Date.now() - lastTtsEndAt
@@ -2884,13 +2964,10 @@ async function main(): Promise<void> {
           log(`[barge-in] (sidecar VAD) IGNORED — ${sinceTts}ms after our TTS ended (self-trigger guard)`)
           return
         }
-        if (activeConductorController) {
-          log('[barge-in] aborting active conductor turn')
-          activeConductorController.abort()
-        }
+        log('[barge-in] (sidecar VAD) stopping audio — turn continues')
         try { streamingSpeaker.cancel() } catch {}
         try { voiceBundle!.sayBackend.stop() } catch {}
-        wrapApi.broadcast({ event: 'agent_interrupted' })
+        wrapApi.broadcast({ event: 'tts_stopped' })
       }
     })
 

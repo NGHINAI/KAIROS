@@ -54,7 +54,9 @@ function renderPlan(plan: Array<{ step: string; status: string }> | undefined): 
   return `\nYour current plan:\n${lines}`
 }
 
-const DEFAULT_MAX_TURNS = Number(process.env.KAIROS_MAX_AGENT_TURNS) || 12
+// 16: guided walkthroughs run point→wait→point loops inside ONE turn (a 5-step lesson
+// is ~10-12 tool rounds); 12 cut them off mid-lesson. Still a hard runaway guard.
+const DEFAULT_MAX_TURNS = Number(process.env.KAIROS_MAX_AGENT_TURNS) || 16
 const EMPTY_FALLBACK = "Sorry, I didn't catch that — could you say it again?"
 const STREAM_ERROR_FALLBACK = "I hit a connection problem just now — could you try that again?"
 const MAX_STREAM_RETRIES = 2   // per turn, on transport/provider errors
@@ -70,6 +72,7 @@ export async function runAgentLoop(initial: LoopMsg[], deps: AgentLoopDeps): Pro
   const stallAfter = deps.stallAfter ?? (Number(process.env.KAIROS_STALL_AFTER) || 2)
   let consecutiveFailedRounds = 0
   let badSlugNudged = false
+  let verifyNudged = false   // one ACTION retry per turn for retryable verify flags
   let lastPlan: Array<{ step: string; status: string }> | undefined
   let prevSignature = ""
   let identicalRounds = 1
@@ -183,9 +186,12 @@ export async function runAgentLoop(initial: LoopMsg[], deps: AgentLoopDeps): Pro
       if (signature && signature === prevSignature) {
         identicalRounds++
         if (identicalRounds >= stallAfter) {
+          // role:"user", not "system" — gemini-class models ignore mid-conversation
+          // system messages (this guard fired ~10× into the void during a 20-round
+          // read_screen doom-loop before anyone noticed).
           msgs.push({
-            role: "system",
-            content: `You've now made the same tool call(s) ${identicalRounds} times in a row with no new outcome. Repeating the identical call won't change the result — change your approach, try a different tool or arguments, or tell the user what's blocking.${renderPlan(lastPlan)}`,
+            role: "user",
+            content: `[automatic check — not the user speaking] You've now made the same tool call(s) ${identicalRounds} times in a row with no new outcome. Repeating the identical call won't change the result — change your approach, try a different tool or arguments, or tell the user what's blocking.${renderPlan(lastPlan)}`,
           })
           identicalRounds = 1
           prevSignature = ""
@@ -270,7 +276,18 @@ export async function runAgentLoop(initial: LoopMsg[], deps: AgentLoopDeps): Pro
       }
     }
 
-    const finalText = draft || deps.emptyFallback || EMPTY_FALLBACK
+    // An empty final after TOOL WORK means the model went quiet mid-task, not that
+    // the user was misheard — "could you say it again?" was a bizarre closer for a
+    // walkthrough that had just pointed successfully (live 2026-06-11: point landed,
+    // lesson started, and KAIROS said "sorry, didn't catch that"). Guide turns get a
+    // grounded line (the highlight IS on screen); the rest get the pause/continue.
+    const pointedOk = toolCalls.some((c) => c.name === "guide_user" && String(c.result ?? "").startsWith("Pointing at"))
+    const finalText = draft
+      || (toolCalls.length > 0
+            ? (pointedOk
+                ? "I've highlighted it on your screen — click it and I'll take you from there."
+                : "I had to pause there — say \"continue\" and I'll pick it right back up.")
+            : (deps.emptyFallback || EMPTY_FALLBACK))
 
     // ── Grounded verify gate (text-only correction; NEVER re-executes) ─────────
     // Before this claim stands, check it is supported by the tool ledger. If it is
@@ -285,13 +302,30 @@ export async function runAgentLoop(initial: LoopMsg[], deps: AgentLoopDeps): Pro
     // promissory check catches "I'm going to create it…" finals where nothing was done at all
     // (its LLM grounding pass still only fires when external tools actually ran).
     if (deps.verify && draft) {
-      let v: { ok: boolean; concern?: string; correction?: string } | null = null
+      let v: { ok: boolean; concern?: string; correction?: string; retryable?: boolean } | null = null
       try { v = await deps.verify({ finalText, toolCalls }) } catch { v = null }
       if (v && v.ok === false) {
         emit({ kind: "self_correct", concern: v.concern ?? "the reply was not supported by the tool results" })
+        // ACTION-NEEDED flags (promissory final, unfinished walkthrough): a text-only
+        // replacement can't satisfy these — give the model ONE round to actually do
+        // the missing work. The concern goes to the MODEL as a user-role note (never
+        // to TTS — speaking it leaked "call the tools you need" to the user).
+        if (v.retryable && !verifyNudged && !lastTurn) {
+          verifyNudged = true
+          msgs.push({ role: "assistant", content: draft })
+          msgs.push({
+            role: "user",
+            content: `[automatic check — not the user speaking] ${v.concern ?? "finish the task"}. Do it NOW in this same turn — do not answer with another promise.`,
+          })
+          continue
+        }
+        // Fact-correction (or a retry that still failed): replace the spoken text.
+        // The hedge NEVER includes the internal concern — that text is for the model.
+        // Actionable, no dangling yes/no: "Want me to double-check?" spawned doomed
+        // contextless "yes" turns (the model had no idea what to re-check either).
         const corrected = v.correction && v.correction.trim()
           ? v.correction.trim()
-          : `Actually — I'm not fully certain about that${v.concern ? ` (${v.concern})` : ""}, so I won't assume it. Want me to double-check?`
+          : "Hmm — I'm not fully sure that worked, so I won't claim it did. Tell me what you'd like me to do next."
         emit({ kind: "final", text: corrected })
         return { finalText: corrected, toolCalls, turns: turn, stopped: "final", plan: lastPlan, corrected: true }
       }

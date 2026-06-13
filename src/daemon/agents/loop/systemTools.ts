@@ -31,7 +31,7 @@ const DESTRUCTIVE_SHELL_PATTERNS: RegExp[] = [
   /:\s*\(\s*\)\s*\{/,                                         // fork bomb :(){ :|:& };:
   /\bDROP\s+(?:TABLE|DATABASE)\b/i,
   /git\s+push\b[^\n]*--force|--force\b[^\n]*\bpush/i,         // force-push
-  />\s*\/dev\/(?:r?disk\d|sd[a-z]|nvme\d|hd[a-z])/i,          // write to a raw block device — macOS disk0 / Linux sda (NOT /dev/null|zero, which are safe sinks)
+  />\s*\/dev\/(?:sd|nvme|disk|null|zero)/i,                   // write to raw devices
   /\b(?:shutdown|reboot|halt|poweroff|killall)\b/i,
   /\bsudo\b/i,
   /\b(?:curl|wget|fetch)\b[^\n|]*\|\s*(?:sh|bash|zsh|python3?|node|ruby|perl)\b/i, // pipe-to-shell RCE
