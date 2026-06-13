@@ -177,6 +177,7 @@ import { GuideBridge } from './agents/guideBridge'
 import { buildGuideTools } from './agents/guideTools'
 import { buildActionToolset, type ActionToolDeps } from './agents/buildActionToolset'
 import { createKairosMcpServer } from './codex/mcpServer'
+import { createBrainProxy, defaultAliasMap } from './codex/brainProxy'
 import { GuideLessonManager, LESSON_CONTINUE_SENTINEL, LESSON_CONTINUE_TEXT } from './agents/guideLesson'
 import { TEACHING_RE } from './agents/loop/verifier'
 import { ToolUsageTracker } from './agents/toolUsageTracker'
@@ -1611,10 +1612,27 @@ async function main(): Promise<void> {
     log: (m: string) => log(m),
   })
 
+  // Hidden inference proxy (A1): codex points its model_provider base_url at
+  // /brain/v1; this forwards Responses-API calls to OpenRouter (which supports
+  // /v1/responses natively — verified), rewriting the model alias + injecting the
+  // server-side key. Dev: expectedBearer == KAIROS_BRAIN_KEY (codex sends it);
+  // ship: a per-install token mapped to the key. Only enabled when the key exists.
+  const brainKey = process.env.KAIROS_BRAIN_KEY
+  const brainProxy = brainKey
+    ? createBrainProxy({
+        upstreamKey: brainKey,
+        expectedBearer: brainKey,
+        aliasMap: defaultAliasMap(),
+        log: (m: string) => log(m),
+      })
+    : null
+  if (!brainProxy) log('[brain-proxy] KAIROS_BRAIN_KEY not set — /brain disabled (codex brain unavailable)', 'warn')
+
   const wrapApi: WrapApiServer = await startWrapApi({
     port: wrapApiPort,
     hostname: '127.0.0.1',
     mcpHandler: (req) => kairosMcp.handleRequest(req),
+    brainHandler: brainProxy ? (req, subpath) => brainProxy.handleRequest(req, subpath) : undefined,
     adapters: {
       // /v1/llm/complete — direct Anthropic SDK (matches LLMAdapter.complete shape:
       // { messages, system, model, max_tokens, temperature, signal }). The

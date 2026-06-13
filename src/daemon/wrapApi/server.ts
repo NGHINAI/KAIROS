@@ -25,6 +25,10 @@ export type WrapApiOpts = {
    *  auth, so it's safe to mount on the same loopback server as the (currently
    *  tokenless) /v1 + WS paths without breaking the HUD/Electron clients. */
   mcpHandler?: (req: Request) => Promise<Response>
+  /** Optional handler for the hidden inference proxy (/brain/*). Codex's
+   *  model_provider base_url points at /brain/v1; subpath is the path AFTER
+   *  /brain (e.g. "/v1/responses"). Does its own bearer auth. */
+  brainHandler?: (req: Request, subpath: string) => Promise<Response>
 }
 
 export type WrapApiServer = {
@@ -101,6 +105,12 @@ export async function startWrapApi(opts: WrapApiOpts): Promise<WrapApiServer> {
       if (url.pathname === '/mcp') {
         if (opts.mcpHandler) return opts.mcpHandler(req)
         return new Response('MCP not enabled', { status: 503 })
+      }
+      // Hidden inference proxy: /brain/<subpath> → upstream. base_url codex uses is
+      // /brain/v1, so codex POSTs /brain/v1/responses → subpath "/v1/responses".
+      if (url.pathname === '/brain' || url.pathname.startsWith('/brain/')) {
+        if (opts.brainHandler) return opts.brainHandler(req, url.pathname.slice('/brain'.length) || '/')
+        return new Response('brain proxy not enabled', { status: 503 })
       }
       return new Response('Not Found', { status: 404 })
     },
