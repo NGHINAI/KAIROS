@@ -72,7 +72,9 @@ describe("generateConfigToml", () => {
     brainKeyEnv: "KAIROS_BRAIN_KEY",
     modelAlias: "kairos-smart",
     mcpUrl: "http://127.0.0.1:9876/mcp",
-    mcpTokenEnv: "KAIROS_MCP_TOKEN",
+    mcpToken: "tok-mcp",
+    bunPath: "/Users/x/.bun/bin/bun",
+    bridgeScript: "/repo/src/daemon/codex/mcpStdioBridge.ts",
   })
 
   test("declares the hidden provider speaking the Responses API", () => {
@@ -84,10 +86,17 @@ describe("generateConfigToml", () => {
     expect(cfg).toContain('model = "kairos-smart"')   // alias; proxy maps to MiniMax
   })
 
-  test("registers the in-process MCP server over HTTP with a bearer token", () => {
+  test("registers the MCP server via the STDIO BRIDGE (not a url) + opens loopback", () => {
     expect(cfg).toContain("[mcp_servers.kairos]")
-    expect(cfg).toContain('url = "http://127.0.0.1:9876/mcp"')
-    expect(cfg).toContain('bearer_token_env_var = "KAIROS_MCP_TOKEN"')
+    expect(cfg).toContain('command = "/Users/x/.bun/bin/bun"')
+    expect(cfg).toContain('"/repo/src/daemon/codex/mcpStdioBridge.ts"')
+    expect(cfg).toContain("[mcp_servers.kairos.env]")
+    expect(cfg).toContain('KAIROS_MCP_URL = "http://127.0.0.1:9876/mcp"')
+    expect(cfg).toContain('KAIROS_MCP_TOKEN = "tok-mcp"')
+    expect(cfg).not.toContain("bearer_token_env_var")   // NOT the flaky HTTP path
+    // workspace-write Seatbelt blocks loopback without this — the bridge would hang codex
+    expect(cfg).toContain("[sandbox_workspace_write]")
+    expect(cfg).toContain("network_access = true")
   })
 
   test("pre-trusts the workspace + suppresses the full-access warning", () => {
@@ -110,7 +119,7 @@ describe("generateConfigToml", () => {
     const evil = generateConfigToml({
       workspaceDir: '/tmp/x"]\nmalicious_key = "pwned',
       baseUrl: "http://127.0.0.1:8788/v1", brainKeyEnv: "KAIROS_BRAIN_KEY",
-      modelAlias: "kairos-smart", mcpUrl: "http://127.0.0.1:9876/mcp", mcpTokenEnv: "KAIROS_MCP_TOKEN",
+      modelAlias: "kairos-smart", mcpUrl: "http://127.0.0.1:9876/mcp", mcpToken: "tok-mcp", bunPath: "/Users/x/.bun/bin/bun", bridgeScript: "/repo/src/daemon/codex/mcpStdioBridge.ts",
     })
     // The string may appear as ESCAPED data inside the quoted path; what must NOT
     // exist is an ACTIVE key — a real newline followed by `malicious_key =`.
@@ -124,7 +133,7 @@ describe("ensureCodexHome (filesystem, temp dir)", () => {
     const root = mkdtempSync(join(tmpdir(), "kairos-codexhome-"))
     const r = await ensureCodexHome({
       root, baseUrl: "http://127.0.0.1:8788/v1", brainKeyEnv: "KAIROS_BRAIN_KEY",
-      modelAlias: "kairos-smart", mcpUrl: "http://127.0.0.1:9876/mcp", mcpTokenEnv: "KAIROS_MCP_TOKEN",
+      modelAlias: "kairos-smart", mcpUrl: "http://127.0.0.1:9876/mcp", mcpToken: "tok-mcp", bunPath: "/Users/x/.bun/bin/bun", bridgeScript: "/repo/src/daemon/codex/mcpStdioBridge.ts",
     })
     expect(existsSync(r.configPath)).toBe(true)
     expect(existsSync(join(r.workspace, ".git"))).toBe(true)          // git init'd (codex needs a repo)
@@ -140,7 +149,7 @@ describe("ensureCodexHome (filesystem, temp dir)", () => {
 
   test("idempotent across daemon restarts — regenerating doesn't throw or corrupt", async () => {
     const root = mkdtempSync(join(tmpdir(), "kairos-codexhome-re-"))
-    const o = { root, baseUrl: "http://127.0.0.1:8788/v1", brainKeyEnv: "KAIROS_BRAIN_KEY", modelAlias: "kairos-smart", mcpUrl: "http://127.0.0.1:9876/mcp", mcpTokenEnv: "KAIROS_MCP_TOKEN" }
+    const o = { root, baseUrl: "http://127.0.0.1:8788/v1", brainKeyEnv: "KAIROS_BRAIN_KEY", modelAlias: "kairos-smart", mcpUrl: "http://127.0.0.1:9876/mcp", mcpToken: "tok-mcp", bunPath: "/Users/x/.bun/bin/bun", bridgeScript: "/repo/src/daemon/codex/mcpStdioBridge.ts" }
     const a = await ensureCodexHome(o)
     const b = await ensureCodexHome(o)            // second boot — must be safe
     expect(b.configPath).toBe(a.configPath)

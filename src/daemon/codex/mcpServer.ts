@@ -24,6 +24,13 @@ export interface KairosMcpOptions {
   /** Restrained-subset gate for unattended/proactive turns (12 §C): return false to
    *  hide/deny a tool. Omit for the full interactive surface. */
   toolFilter?: (name: string) => boolean
+  /** Max concurrent MCP sessions before LRU eviction (default 64). Guards the
+   *  unbounded-session-map leak: the stdio bridge dies per codex turn without
+   *  sending DELETE, so without a cap + idle-sweep + onclose eviction, every turn
+   *  pins a {server,transport} pair forever. */
+  maxSessions?: number
+  /** Evict sessions idle longer than this (ms, default 10min). */
+  sessionTtlMs?: number
   log?: (msg: string) => void
 }
 
@@ -51,6 +58,8 @@ export interface KairosMcpServer {
   handleRequest: (req: Request) => Promise<Response>
   /** The resolved toolset right now (for diagnostics/tests). */
   listToolNames: () => Promise<string[]>
+  /** Live MCP session count (for diagnostics/tests — guards the leak). */
+  sessionCount: () => number
   close: () => Promise<void>
 }
 
@@ -83,7 +92,25 @@ export function createKairosMcpServer(opts: KairosMcpOptions): KairosMcpServer {
     return server
   }
 
-  const sessions = new Map<string, { server: Server; transport: WebStandardStreamableHTTPServerTransport }>()
+  interface Session { server: Server; transport: WebStandardStreamableHTTPServerTransport; lastSeen: number }
+  const sessions = new Map<string, Session>()
+  const maxSessions = opts.maxSessions ?? 64
+  const ttlMs = opts.sessionTtlMs ?? 10 * 60_000
+
+  async function evict(id: string): Promise<void> {
+    const s = sessions.get(id)
+    if (!s) return
+    sessions.delete(id)
+    try { await s.server.close() } catch { /* */ }
+  }
+
+  // Idle sweep — evicts sessions whose client (the stdio bridge, which never sends
+  // DELETE) has gone away. Unref'd so it never keeps the process alive.
+  const sweep = setInterval(() => {
+    const cutoff = Date.now() - ttlMs
+    for (const [id, s] of sessions) if (s.lastSeen < cutoff) void evict(id)
+  }, 60_000)
+  ;(sweep as any).unref?.()
 
   async function handleRequest(req: Request): Promise<Response> {
     if (process.env.KAIROS_MCP_DEBUG) log(`[mcp] ${req.method} accept=${req.headers.get("accept") ?? "-"} sid=${req.headers.get("mcp-session-id") ?? "-"} ct=${req.headers.get("content-type") ?? "-"}`)
@@ -94,18 +121,27 @@ export function createKairosMcpServer(opts: KairosMcpOptions): KairosMcpServer {
       }
     }
     try {
-      // Existing session → route to its transport.
+      // Existing session → route to its transport (refresh lastSeen).
       const sid = req.headers.get("mcp-session-id")
-      if (sid && sessions.has(sid)) return await sessions.get(sid)!.transport.handleRequest(req)
+      const existing = sid ? sessions.get(sid) : undefined
+      if (existing) { existing.lastSeen = Date.now(); return await existing.transport.handleRequest(req) }
 
-      // New session (initialize): mint a session-scoped (server, transport) pair.
+      // New session (initialize): evict LRU if at the cap, then mint a pair.
+      while (sessions.size >= maxSessions) {
+        let oldest: string | undefined; let oldestSeen = Infinity
+        for (const [id, s] of sessions) if (s.lastSeen < oldestSeen) { oldestSeen = s.lastSeen; oldest = id }
+        if (oldest) await evict(oldest); else break
+      }
       const server = buildServer()
       const transport: WebStandardStreamableHTTPServerTransport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: () => crypto.randomUUID(),
         enableJsonResponse: true,
-        onsessioninitialized: (id: string) => { sessions.set(id, { server, transport }) },
-        onsessionclosed: (id: string) => { sessions.delete(id) },
+        onsessioninitialized: (id: string) => { sessions.set(id, { server, transport, lastSeen: Date.now() }) },
+        onsessionclosed: (id: string) => { void evict(id) },
       })
+      // A dropped connection (the bridge process dying when codex closes stdin)
+      // fires onclose — free the entry even without an explicit DELETE.
+      transport.onclose = () => { if (transport.sessionId) void evict(transport.sessionId) }
       await server.connect(transport)
       return await transport.handleRequest(req)
     } catch (e) {
@@ -117,9 +153,10 @@ export function createKairosMcpServer(opts: KairosMcpOptions): KairosMcpServer {
   return {
     handleRequest,
     listToolNames: async () => (await buildActionToolset(opts.deps())).filter((t) => allowed(t.name)).map((t) => t.name),
+    sessionCount: () => sessions.size,
     close: async () => {
-      for (const { server } of sessions.values()) { try { await server.close() } catch { /* */ } }
-      sessions.clear()
+      clearInterval(sweep)
+      for (const id of [...sessions.keys()]) await evict(id)
     },
   }
 }

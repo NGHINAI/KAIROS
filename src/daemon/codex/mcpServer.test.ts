@@ -93,6 +93,21 @@ describe("KAIROS MCP server — end to end over real transport", () => {
     await expect(connectClient(url, null)).rejects.toThrow()
   })
 
+  test("session map stays BOUNDED — the leak fix (bridge never sends DELETE)", async () => {
+    // Drive many initialize handshakes WITHOUT closing — simulates codex spawning
+    // a fresh bridge per turn that dies without DELETE. The map must not grow
+    // unbounded; the LRU cap holds.
+    const mcp = createKairosMcpServer({ deps, bearerToken: "test-token", maxSessions: 4 })
+    mcpServers.push(mcp)
+    const init = (i: number) => mcp.handleRequest(new Request("http://x/mcp", {
+      method: "POST",
+      headers: { authorization: "Bearer test-token", "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: i, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: `c${i}`, version: "0" } } }),
+    }))
+    for (let i = 0; i < 12; i++) await init(i)
+    expect(mcp.sessionCount()).toBeLessThanOrEqual(4)   // capped, not 12
+  })
+
   test("restrained-subset (12§C): toolFilter hides + denies the disallowed tool", async () => {
     // Unattended posture: deny guide_user (an act-ish tool), allow read_screen.
     const { url } = serve({ toolFilter: (n) => n !== "guide_user" })
