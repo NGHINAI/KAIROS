@@ -66,12 +66,14 @@ export function createKairosMcpServer(opts: KairosMcpOptions): KairosMcpServer {
     const server = new Server({ name: "kairos", version: "0.1.0" }, { capabilities: { tools: {} } })
     server.setRequestHandler(ListToolsRequestSchema, async () => {
       const tools = (await buildActionToolset(opts.deps())).filter((t) => allowed(t.name))
+      if (process.env.KAIROS_MCP_DEBUG) log(`[mcp] tools/list → ${tools.length} tools`)
       return { tools: tools.map((t: ToolDef) => ({ name: t.name, description: t.description, inputSchema: toInputSchema(t.parameters) })) }
     })
     server.setRequestHandler(CallToolRequestSchema, async (req) => {
       const name = req.params.name
       const args = (req.params.arguments ?? {}) as Record<string, unknown>
       if (!allowed(name)) return { isError: true, content: [{ type: "text", text: `Tool "${name}" is not permitted in this mode.` }] }
+      if (process.env.KAIROS_MCP_DEBUG) log(`[mcp] tools/call → ${name}`)
       const tools = await buildActionToolset(opts.deps())
       const tool = tools.find((t) => t.name === name)
       if (!tool) return { isError: true, content: [{ type: "text", text: `Unknown tool "${name}".` }] }
@@ -84,6 +86,7 @@ export function createKairosMcpServer(opts: KairosMcpOptions): KairosMcpServer {
   const sessions = new Map<string, { server: Server; transport: WebStandardStreamableHTTPServerTransport }>()
 
   async function handleRequest(req: Request): Promise<Response> {
+    if (process.env.KAIROS_MCP_DEBUG) log(`[mcp] ${req.method} accept=${req.headers.get("accept") ?? "-"} sid=${req.headers.get("mcp-session-id") ?? "-"} ct=${req.headers.get("content-type") ?? "-"}`)
     if (opts.bearerToken) {
       const got = (req.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "")
       if (!got || !safeEqual(got, opts.bearerToken)) {
