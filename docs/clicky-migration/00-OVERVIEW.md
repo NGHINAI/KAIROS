@@ -31,22 +31,35 @@ and our Composio auto-connect. Based on:
     heavy / multi-step / "do a whole task" request. The harness (planning,
     retries, sandboxed shell, MCP) dominates there and latency is free.
   - A heavy smart turn may ESCALATE to Codex (hook in 01). Measure per-task.
-- **AX-first; Cua is pluggable later (not "never").** We do NOT bundle Cua NOW.
-  Our own computer-use (`AXActor` AXPress→per-PID CGEvent, `AXFinder`,
+- **AX-first; Cua is the EXPLICIT automatic AX-failure backup (14 §H2).** Our own
+  computer-use (`AXActor` AXPress→per-PID CGEvent, `AXFinder`,
   `click_element`/`type_text`/`read_screen`) is the fast default and powers the
-  guide/teach UX (Cua does pure actuation, no guidance). BUT Cua is genuinely
-  better at browser-DOM (query/execute-JS in-page), AX-blind apps (Electron/
-  canvas/games via vision fallback), and rich input (scroll/hotkey/drag). Since
-  Codex consumes tools via MCP, **Cua is ADDITIVE** — register it as an extra
-  MCP server (exactly as HeyClicky does) the moment we hit a real AX-blind app
-  or serious browser automation. Narrowest-route doctrine: our AX → Cua
-  last-mile. (08 §A0.)
+  guide/teach UX (Cua does pure actuation, no guidance). Cua is the registered
+  fallback MCP server, triggered AUTOMATICALLY when `AXFinder` returns
+  not-found/unresolvable OR an AX-blind app is detected (Electron/canvas/games/
+  poor-AX) — it brings vision + browser-DOM (query/execute-JS in-page) + rich
+  input (scroll/hotkey/drag). Since Codex consumes tools via MCP, Cua registers as
+  an extra MCP server (exactly as HeyClicky does). Narrowest-route doctrine: our
+  AX → Cua last-mile. AX-first + guide engine stay the default; "wholesale vision"
+  stays DECLINED, targeted-vision-via-Cua is the fallback. (08 §A0.)
 - **Model = MiniMax for now, ENV-SWAPPABLE.** Pilot on MiniMax; the proxy
   exposes it as the alias `kairos-smart`/`kairos-deep` and the real slug is set
   by ENV, so swapping models later needs NO app/config change (env table below).
-- **`KAIROS_BRAIN` is TEMPORARY.** It's a migration/rollback safety only —
-  Codex is the destination for the deep/background lanes; the flag is removed
-  once stable, not a permanent dual-brain.
+- **End-state = ONE agentic brain (item E, 14§E).** EVERYTHING agentic (any
+  tool-using turn — deep, background, AND proactive WORK) is Codex's job; the
+  loop-free fast chat tier (no tools, pure conversation/routing) stays ours
+  forever. There is ONE shared post-turn verifier + ONE shared block-writes/
+  `suppressedFinal` gate that BOTH `agentLoop` and `CodexBrain` call, so the two
+  paths can't drift during the transition (kills the divergence trap).
+- **`KAIROS_BRAIN` is a TEMPORARY rollback — with an explicit RETIREMENT
+  criterion, NOT a standing parallel architecture.** It's a migration/rollback
+  switch only; it is removed once deep + background are stable on Codex for N days.
+  `defaultPlannerRunner` stays ONLY until then, not indefinitely.
+- **`KAIROS_BRAIN_SMART_VOICE` (default off) gates ONLY the smart-voice lane**,
+  separate from `KAIROS_BRAIN`. Smart-voice-agentic is the ONE measured lane:
+  flip it to Codex (low effort, warm process, ported filler contract) IF measured
+  TTFT passes the stated budget; else it stays on our loop as an explicit,
+  documented latency exception — NOT a permanent parallel architecture.
 
 ### Environment variables (single source — keep updated as we add knobs)
 
@@ -58,7 +71,9 @@ and our Composio auto-connect. Based on:
 | `KAIROS_BRAIN_MODEL_DEEP` | Real slug behind alias `kairos-deep` | `minimax/minimax-01` (same model, effort differs) |
 | `KAIROS_BRAIN_EFFORT_SMART` | per-turn effort for smart/escalated | `low` |
 | `KAIROS_BRAIN_EFFORT_DEEP` | per-turn effort for deep | `high` |
-| `KAIROS_BRAIN` | TEMP migration rollback (`codex` \| `local`) | `codex` |
+| `KAIROS_BRAIN` | TEMP migration rollback (`codex` \| `local`); retired once deep+background stable on Codex for N days (14§E) | `codex` |
+| `KAIROS_BRAIN_SMART_VOICE` | Gates ONLY the smart-voice→Codex flip (default OFF); on only if measured TTFT passes budget (14§E) | `0` |
+| `KAIROS_MCP_TOKEN` | Bearer for the in-process `/mcp` mount + the codex child's allowlisted env; never the daemon key (14§A6/§B8) | `mcp-…` |
 | `KAIROS_HIDE_ON_CAPTURE` | overlay auto-hide during screen capture (default off) | `0` |
 
 > Model swaps = change `KAIROS_BRAIN_MODEL_*` (and the proxy's alias map);
@@ -85,6 +100,9 @@ and our Composio auto-connect. Based on:
    (`CodexVoiceSession.swift` 210-224). So smart = same model @ low/minimal
    effort, deep = same model @ high/xhigh effort — set on `turn/start`, NOT via
    `[profiles.*]`. `ReasoningEffort` ∈ {none, minimal, low, medium, high, xhigh}.
+   (End-state per 14§E: smart-voice is the ONE measured lane — it flips to Codex
+   behind `KAIROS_BRAIN_SMART_VOICE` only if measured TTFT passes the budget;
+   otherwise it stays on our loop as a documented latency exception.)
 4. **Models via OpenRouter through a hidden proxy + a SEPARATE dedicated key.**
    codex 0.133.0 HARD-REJECTS `wire_api="chat"` at config load, so the proxy
    must speak the OpenAI **Responses** API to Codex and translate to OpenRouter
@@ -104,12 +122,15 @@ and our Composio auto-connect. Based on:
    keep our warm-gold→cyan liquid-glass material, not Clicky's flat red (03/04).
 8. **Proactive features are coming soon — leave hooks.** The daemon tick +
    suggestion rules + synthetic-stimulus bridge route proactive WORK through
-   the SAME Codex brain (not `claude -p`); silent chips first (05 / 10).
+   the SAME Codex brain — `claude -p` is REMOVED ENTIRELY (NO Claude anywhere in
+   the runtime, 14 §H1; CI grep-gates `grep -r "claude -p"` empty), WORK flips to
+   Codex in the SAME rollout step as background; silent chips first (05 / 10).
 9. **Preserve KAIROS memory + self-learning + Composio auto-connect.** Durable
-   persona → `thread/start` instructions; volatile per-turn delta →
-   `turn/start` instructions; `recall_memory` → MCP tool; trajectories keep
-   feeding AwmWorker unchanged; Composio OAuth stays 100% daemon-side, invisible
-   to Codex (11).
+   persona → `thread/start.baseInstructions`; volatile per-turn delta injected
+   via `thread/inject_items` BEFORE `turn/start` (codex 0.133 `turn/start` has NO
+   `instructions` field — see 14§A1); `recall_memory` → MCP tool; trajectories
+   keep feeding AwmWorker unchanged; Composio OAuth stays 100% daemon-side,
+   invisible to Codex (11).
 
 ## Target architecture (one picture)
 
@@ -124,8 +145,9 @@ Voice → STT → fast front (OURS, loop-free, unchanged — chit-chat + routing
                 │      tools  → in-process KAIROS MCP server (guide/act/memory/
                 │               Composio search+execute/background); Codex-native
                 │               web_search on the responses path
-                │      memory → durable persona in thread/start instructions;
-                │               per-turn delta in turn/start; recall_memory tool
+                │      memory → durable persona in thread/start.baseInstructions;
+                │               per-turn delta via thread/inject_items (pre-turn);
+                │               recall_memory tool
                 │      events → translate to our LoopEvents → daemon → TTS + HUD
                 │      verify → deterministic gate POST-turn; one re-injected turn
                 │      learn  → translate events → TrajWriter.record() (unchanged)
@@ -183,14 +205,17 @@ Knowledge: per-app .md docs injected by target app (the ONLY md we generate)
 3. **Phase C — Notch/Agents surface + sounds** (04): the "alive" layer; Agents
    cards map 1:1 to Codex threads (10).
 4. **Phase D — Proactiveness + app knowledge** (05.B/C + 10): tick rules +
-   per-app docs + synthetic-stimulus → CodexBrain (WORK re-route off
-   `claude -p`), silent chips first.
+   per-app docs + synthetic-stimulus → CodexBrain (WORK with `claude -p` REMOVED
+   entirely, routed to Codex in the SAME rollout step as background — 14 §H1),
+   silent chips first.
 
-Every phase stays behind env flags (`KAIROS_BRAIN`, `KAIROS_BRAIN_BASE_URL`,
-`KAIROS_HIDE_ON_CAPTURE`, …); nothing ships half-on. `KAIROS_BRAIN` is a
-TEMPORARY migration/rollback switch (decided 2026-06-12) — Codex is the
-destination for the deep/background lanes; the flag is removed once stable. The
-model-alias + key envs (table above) are the ones that persist.
+Every phase stays behind env flags (`KAIROS_BRAIN`, `KAIROS_BRAIN_SMART_VOICE`,
+`KAIROS_BRAIN_BASE_URL`, `KAIROS_HIDE_ON_CAPTURE`, …); nothing ships half-on.
+`KAIROS_BRAIN` is a TEMPORARY migration/rollback switch (decided 2026-06-12) —
+Codex is the destination for ALL agentic lanes (deep + background + proactive
+WORK); the flag is removed against an explicit retirement criterion (deep +
+background stable on Codex for N days, 14§E), not kept as a standing parallel
+brain. The model-alias + key envs (table above) are the ones that persist.
 
 ## The seam, restated (why the swap is low-risk)
 
@@ -203,7 +228,10 @@ CodexBrain is implemented as a `PlannerRunner` that emits the SAME `LoopEvent`
 shapes — orb, captions, activity tree, TTS, replay, and self-learning all keep
 working with zero downstream changes. Do NOT mutate the `LoopEvent` union
 (`agents/loop/types.ts` 36-46) during the swap; map any Codex-only signal onto
-existing kinds.
+existing kinds. Note: `LoopEvent` carries `name` on `tool_call_done`/
+`tool_call_failed` (not just on `tool_call_start`) — CodexBrain MUST emit the
+namespace-stripped tool name on EVERY tool event so the activity-tree + trajectory
+naming stay correct (`conductor.ts:631-636`; 14§A5, detailed in 11§5).
 
 ## Source artifacts
 

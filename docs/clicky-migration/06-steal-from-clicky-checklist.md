@@ -37,11 +37,11 @@ binary).
 | Item | Us | Take |
 |---|---|---|
 | File-permission-storm rule | ❌ | 05.D (durable thread/start doctrine + daemon guard) |
-| Write-readback + no-alias Composio rule | 🟡 (grounded-verify) | 05.E (fold into thread/start instructions) |
+| Write-readback + no-alias Composio rule | 🟡 (grounded-verify) | 05.E (fold into durable `thread/start.baseInstructions` — NOT a per-turn `turn/start.instructions` field, which does not exist in codex 0.133, 14§A1) |
 | Consent before chaining follow-up points | 🟡 (restraint) | 04.F soft consent (`PointFollowUpConsentPromptPanel`) |
 | User-pickable guidance color | ❌ | 04.F pref (`OverlayCursorColorButton`, colorblind win) |
 | Proactive frontmost-app suggestion chips | 🟡 (tick + cos design) | 05.C + 10 (synthetic stimulus → CodexBrain, silent first) |
-| Re-route proactive WORK off `claude -p` → Codex | ❌ | 10 / 05.C (the biggest proactive correctness fix) |
+| REMOVE `claude -p` entirely; proactive WORK → Codex (NO Claude in runtime, 14§H1; CI grep-gate) | ❌ | 10 / 05.C (the biggest proactive correctness fix; flips in the SAME rollout step as background) |
 | Codex web_search on the responses path | ❌ | Enable `tools.web_search` in generated config; do NOT export our DDG tools to Codex (11.B) — keep DDG only for fast tier + bg sub-agents |
 | Codex-native effort escalation ("extra effort") | 🟡 (think flag) | Re-run smart turn once at higher effort on budget/forced-final (01.E) |
 

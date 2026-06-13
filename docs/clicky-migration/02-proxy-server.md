@@ -78,6 +78,55 @@ through where supported and drop it where the OR model can't honor it).
   translator may choke on shapes Codex sends). Pin behavior with **golden-file
   tests** against a recorded OR chat stream so an OR SSE-shape change is caught.
 
+#### Prompt-cache plane (D15)
+
+The durable persona/doctrine prefix (`buildSessionPrefix`, [09] §B.1/E) is the
+stable head of every deep turn, but the translator is stateless and would
+re-prefill it on each request — paying first-token latency AND input cost over
+and over. FIX: **the translator marks the stable prefix cacheable** when the
+model+provider supports it. On the inbound map (Responses → chat) it emits a
+`cache_control` breakpoint (or relies on implicit prefix caching) at the
+prefix/delta seam — the persona/doctrine messages are cacheable, the fresh
+per-turn delta + history + utterance are NOT.
+
+- The prefix/delta split **already exists** ([09] §B: durable doctrine vs
+  volatile per-turn delta), so the cache boundary is free — the translator just
+  needs to know where the stable head ends. Carry that boundary as an explicit
+  marker on the inbound items (e.g. a sentinel between the doctrine block and the
+  delta) so the translator never guesses.
+- The persona (witty/sarcastic, onboarding-set via soul.md/SoulWizard/
+  `KAIROS_PERSONA_TONE`, user-changeable) lives INSIDE this cacheable prefix
+  ([14] §H3). KAIROS learning flows through the VOLATILE per-turn delta, NOT by
+  rewriting the prefix — so the cache stays warm turn-over-turn. A persona change
+  is a rare event (onboarding / user re-tune) handled as a NEW thread, which is
+  the only time the cached head changes ([01] §G, [09] §E).
+- Gate on capability: emit `cache_control` ONLY when `modelAliases.ts` records
+  the real upstream slug as cache-capable; otherwise pass through unmarked (the
+  alias map is the single place that knows the real provider's caching surface,
+  and it stays server-side so no slug leaks). A model that can't honor caching
+  must degrade silently, not error.
+- This cuts first-token latency on deep turns AND input cost; the savings
+  surface in metering (§5) as reduced billed input tokens per cached turn.
+
+#### Version-bump contract fixture (C14)
+
+The proxy sits between TWO translation layers — codex's JSON-RPC app-server
+surface (inbound Responses items) and OpenRouter's chat SSE (upstream). A codex
+minor bump can change the inbound Responses item shapes; an OR change can move
+the SSE shape. The golden-file tests above pin the OUTBOUND side (recorded OR
+chat stream). C14 pins the INBOUND side and **binds the two layers**:
+
+- **Capture a real inbound `codex → Responses` item stream** during a live
+  app-server turn (the same logging-passthrough capture used to scope the
+  translator) and commit it as a **pinned fixture**.
+- The **version-bump test replays that fixture through the translator** and
+  asserts the produced chat-out messages/tools are unchanged — so bumping the
+  pinned codex ([01] §5) is a deterministic, offline contract check, not a
+  discover-at-ship-time surprise. Pair it with the outbound OR golden file so a
+  single test run validates BOTH translation directions end-to-end.
+- This is the fixture task tracked in [13] (A1); treat a codex/OR bump as a
+  required pass of this contract test before the bump lands (see §10).
+
 ---
 
 ## 3. Model aliasing (swap models without an app update)
@@ -117,6 +166,31 @@ Two options:
 Either way, on a 401 the daemon refreshes (HeyClicky: "agent session token rotated"
 / "retrying with refreshed Supabase token") and respawns only if forced.
 
+### Loopback auth — bearer + Origin/Host allowlist (B8)
+
+The local `Bun.serve` facade listens on `127.0.0.1`, but any other local process
+(a malicious npm postinstall, a browser page via DNS-rebind, another app) can
+reach `127.0.0.1` too. Loopback is **not** an auth boundary. FIX: require a
+bearer on EVERY local entry point — independent of the migration, applied to the
+shared server (see [08], the `wrapApi` server task):
+
+- **Bearer on `/mcp` AND the existing `/v1/*` + WS command paths.** The facade
+  and the KAIROS MCP mount ([08]) and the daemon's WS control channel all require
+  `Authorization: Bearer <KAIROS_MCP_TOKEN>` (a per-boot local token, distinct
+  from the per-install `KAIROS_BRAIN_KEY` proxy token of §4). Compare with
+  **`crypto.timingSafeEqual`** (constant-time; never `===`) to avoid a timing
+  oracle on the token.
+- **Origin/Host allowlist.** Reject requests whose `Origin`/`Host` are not on a
+  fixed allowlist (`127.0.0.1:<port>` / `localhost:<port>`), which kills
+  DNS-rebinding from a browser tab even if it somehow learned the token.
+- The codex child gets `KAIROS_MCP_TOKEN` in its minimal allowlisted spawn env
+  (B6, [01] §3) so it can reach the in-process `/mcp` mount; nothing else on the
+  box has it. Keep the bearer in env, not on-disk where avoidable (B11).
+
+> This is the local analog of the hosted facade's per-install token (§4): §4
+> hides the provider chain over the network; B8 stops *local* processes from
+> hijacking the loopback brain/MCP/WS surface. Both must hold.
+
 ---
 
 ## 5. Metering + budgets + kill-switch (server-side authority)
@@ -134,6 +208,39 @@ Either way, on a 401 the daemon refreshes (HeyClicky: "agent session token rotat
   careless access log would leak both user content and the fact that OpenRouter /
   specific models are upstream — defeating the entire hiding goal. State this in
   the eventual privacy page.
+
+---
+
+## 5a. Upstream resilience (C13)
+
+The proxy is the **single hop** to OpenRouter — if it forwards a transient
+upstream failure raw, every Codex turn breaks. It must own retry/backoff/
+circuit-break/degrade so a flaky provider never reads as a dead brain:
+
+- **Classify the upstream failure.** Distinguish retryable from terminal:
+  `429` (rate limit) and `5xx` / connection resets / read timeouts are retryable;
+  `4xx` (bad request, `401` auth) are terminal and pass straight through (a
+  `401` from upstream is a server-side key problem, surfaced as such — never
+  exposing the provider).
+- **Bounded server-side backoff, honor `Retry-After`.** On a retryable failure,
+  retry inside the facade with capped exponential backoff (small bounded attempt
+  count + a hard wall-clock ceiling so a deep turn never hangs indefinitely). If
+  the upstream sends `Retry-After`, honor it as the floor of the wait. Backoff is
+  **server-side**: the codex child sees one slow-but-eventually-succeeding
+  request, not N retries, so its own turn timing stays clean. (Streaming caveat:
+  retry is only safe BEFORE the first byte is forwarded downstream — once
+  Responses SSE has started flowing to Codex, a mid-stream upstream drop cannot
+  be transparently retried and becomes the transport error below.)
+- **Circuit-break → graceful hedge.** After repeated failures within a window,
+  open a short-lived circuit so the facade stops hammering a down provider and
+  instead returns a clean, body-free **transport error** (a "provider's flaky,
+  try again in a moment" hedge — no provider name, no slug). Surface it as the
+  SAME class of transport error the conductor already hedges on, so the existing
+  hedge/retry-or-apologize path handles it with no new client logic. The error
+  carries no upstream identity (consistent with §5 logging + §7 hiding).
+- Hosted vs local: identical handler (§6). Worker pre-warm/keep-alive for the
+  hosted phase is **declined for now** ([14] "What we DECLINED") — note here,
+  don't build.
 
 ---
 
@@ -220,10 +327,12 @@ is the proxy token, never a provider key.)
 | `wire_api="chat"` hard-rejected → Responses↔chat translator is mandatory | Golden-file tests vs recorded OR SSE; capture real codex Responses items before finalizing scope. |
 | OR `/v1/responses` is beta + stateless | Use chat/completions UPSTREAM; never advertise stateful Responses to Codex. |
 | Responses surface is large; minimal translator may choke | Scope v1 to the exact item types codex 0.133 emits; logging passthrough during a live turn. |
-| Version drift (codex app-server JSON-RPC + Responses items change across minors) | Pin codex ([01] §5); treat a bump as a breaking-change test pass for BOTH the JSON-RPC adapter and the translator. |
+| Version drift (codex app-server JSON-RPC + Responses items change across minors) | Pin codex ([01] §5); treat a bump as a breaking-change test pass for BOTH the JSON-RPC adapter and the translator. **C14:** a pinned inbound codex→Responses fixture + the outbound OR golden file replay through the translator on every bump (§ translator, [13] A1). |
 | Token rotation race (spawn-time key can't refresh mid-session) | Prefer stable install token + server-side key swap (constant child env); else respawn-on-401. |
 | Privacy/log leak reveals provider chain | Counters only, never bodies; no provider names in logs. |
-| `danger-full-access` codex bypasses our gates | Verifier + MCP destructive-confirm run independently ([01] §D); write/irreversible tools keep their own approval gating. |
+| Upstream `429`/`5xx`/outage on the single hop breaks every turn (C13) | Facade classifies retryable vs terminal, bounded server-side backoff honoring `Retry-After`, circuit-break to a body-free transport-error hedge the conductor already retries on (§5a). |
+| Local process hijacks loopback brain/MCP/WS (B8) | Bearer (`KAIROS_MCP_TOKEN`, `timingSafeEqual`) on `/mcp` + `/v1/*` + WS, plus an Origin/Host allowlist vs DNS-rebind (§4 loopback auth). |
+| `danger-full-access` codex bypasses our gates | Verifier + MCP destructive-confirm run independently ([01] §D); write/irreversible tools keep their own approval gating. **Default sandbox is `workspace-write`, not `danger-full-access`** ([14] B7) — full-access is interactive-opt-in only. |
 
 ---
 
@@ -232,11 +341,13 @@ is the proxy token, never a provider key.)
 | File | Change |
 |---|---|
 | `src/daemon/brainProxy/facade.ts` (NEW dir) | `export default { fetch }` portable handler (Bun + Worker). Routes `/v1/responses`, `/v1/chat/completions`, `/v1/models`. |
-| `src/daemon/brainProxy/responsesToChat.ts` (NEW) | The Responses↔chat streaming translator (the only nontrivial code). |
-| `src/daemon/brainProxy/modelAliases.ts` (NEW) | `kairos-smart`/`kairos-deep` → OR slugs; backs `GET /v1/models`. |
-| `src/daemon/brainProxy/auth.ts` (NEW) | Per-install token validate + server-side provider-key swap. |
+| `src/daemon/brainProxy/responsesToChat.ts` (NEW) | The Responses↔chat streaming translator (the only nontrivial code). Marks the stable persona/doctrine prefix cacheable at the prefix/delta seam when the alias is cache-capable (D15). |
+| `src/daemon/brainProxy/modelAliases.ts` (NEW) | `kairos-smart`/`kairos-deep` → OR slugs; backs `GET /v1/models`. Records per-slug cache capability for D15. |
+| `src/daemon/brainProxy/upstream.ts` (NEW) | C13: classify 429/5xx vs terminal, bounded server-side backoff honoring `Retry-After`, circuit-breaker → body-free transport-error hedge. Wraps the OR client below. |
+| `src/daemon/brainProxy/auth.ts` (NEW) | Per-install token validate + server-side provider-key swap; **plus** the loopback bearer (`KAIROS_MCP_TOKEN`, `timingSafeEqual`) + Origin/Host allowlist for `/mcp` + `/v1/*` + WS (B8). |
 | `src/daemon/brainProxy/metering.ts` (NEW) | Per-token counters, budget/kill-switch, `x-kairos-build` gate. |
-| `src/daemon/wrapApi/server.ts` | Extract the `Bun.serve` routes pattern into a reusable handler so the facade runs as a localhost route now AND exports the identical fetch handler for a Worker later. |
+| `tests/brainProxy/translatorContract.fixture` (NEW) | C14: pinned inbound codex→Responses item stream replayed through the translator alongside the outbound OR golden file; the version-bump contract test ([13] A1). |
+| `src/daemon/wrapApi/server.ts` | Extract the `Bun.serve` routes pattern into a reusable handler so the facade runs as a localhost route now AND exports the identical fetch handler for a Worker later. Enforce the B8 bearer + Origin/Host allowlist on `/mcp` + `/v1/*` + WS at this shared seam. |
 | `src/daemon/wrapApi/adapters/openRouterAdapter.ts` | Reuse as the facade's UPSTREAM client (already streams `${baseUrl}/chat/completions`); factor SSE parsing so the translator wraps the same delta stream. |
 | `src/daemon/llm/usageMeter.ts` | Add `codex_smart`/`codex_deep` task_type + per-install/token dimension; wire budget caps to the facade enforcement point. |
 

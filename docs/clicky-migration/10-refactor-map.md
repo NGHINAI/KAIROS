@@ -51,12 +51,12 @@ changes — the `onEvent` mapper (conductor.ts:624–651) and the WS broadcast
 
 | File | Status | Change | Why |
 |---|---|---|---|
-| `src/daemon/agents/codexBrain.ts` | **NEW** | The warm `codex app-server` JSON-RPC child + the `CodexBrain` PlannerRunner. Spawn via `Bun.spawn(['codex','app-server','--listen','stdio://','-c','approval_policy=never','-c','sandbox_mode=danger-full-access'])`, isolated `CODEX_HOME=state/codex/home`, PATH-prepend vendored `rg`. newline-delimited JSON-RPC, `initialize`→`initialized`→`thread/start`→`turn/start`. Per conversation: one thread (`conversationId`→threadId map, reuse). Per turn: `turn/start { input, model, effort, instructions }` where `instructions` = `contextBuilder.build()` output. Translate `item/agentMessage/delta`→`assistant_delta`, `item/mcpToolCall`+`command/exec`→`tool_call_start/done/failed`, `turn/plan/updated`→`plan_update`, `turn/completed`→`final` (+ usage/`time_to_first_token_ms`). Barge-in→`turn/interrupt {threadId,turnId}`. Stale-exit restart guard; per-request timeouts (30s init/thread-start, 90s turn). | The single new agent module — mirrors openclicky `CodexProcessManager` + `CodexVoiceSession`/`CodexAgentSession`. The whole brain swap lives here. |
+| `src/daemon/agents/codexBrain.ts` | **NEW** | The warm `codex app-server` JSON-RPC child + the `CodexBrain` PlannerRunner. Spawn via `Bun.spawn(['codex','app-server','--listen','stdio://','-c','approval_policy=never','-c','sandbox_mode=workspace-write'])` (default; egress restricted to the proxy host — `danger-full-access` ONLY behind an explicit interactive opt-in, never the default), with a MINIMAL allowlisted env (only `KAIROS_BRAIN_KEY`, `KAIROS_MCP_TOKEN`, `CODEX_HOME`, `PATH`=vendored runtime dir, `HOME`) — NEVER `{...process.env}` (14 §B6/B7). Isolated `CODEX_HOME=state/codex/home`, PATH-prepend vendored `rg`. newline-delimited JSON-RPC, `initialize`→`initialized`→`thread/start`→`turn/start`. Per conversation: one thread (`conversationId`→threadId map, reuse). Durable persona/doctrine goes on `thread/start.baseInstructions`; per-turn volatile context (memory delta, lessonContext, per-app knowledge) is injected via **`thread/inject_items`** BEFORE `turn/start` — `turn/start` has NO `instructions` field in codex 0.133 (14 §A1). Per turn: `turn/start { input, model, effort }`. Translate `item/agentMessage/delta`→`assistant_delta`, `item/mcpToolCall`+`command/exec`→`tool_call_start/done/failed`, `turn/plan/updated`→`plan_update`, `turn/completed`→`final` (+ usage). TTFT is measured CLIENT-SIDE from the first delta — `time_to_first_token_ms` is NOT in the codex bindings (14 §D17). Barge-in→`turn/interrupt {threadId,turnId}`. Stale-exit restart guard; per-request timeouts (30s init/thread-start, 90s turn). | The single new agent module — mirrors openclicky `CodexProcessManager` + `CodexVoiceSession`/`CodexAgentSession`. The whole brain swap lives here. |
 | `src/daemon/agents/codexProto/` (dir) | **NEW** | Vendored, pinned typed bindings: `codex app-server generate-ts --out src/daemon/agents/codexProto --experimental` output (`ClientRequest`, `ServerNotification`, `ServerRequest`, `TurnStartParams`, `ReasoningEffort`, `v2/*`). Regenerate ONLY on a codex version bump. | Typed JSON-RPC client; app-server is experimental so freeze bindings against the pinned binary. |
 | `src/daemon/agents/conductor.ts` | **EXTEND** | Add the `KAIROS_BRAIN=codex` branch in `handleSmart` (574) and `handleThink` (321): when set + route in {task,think}, delegate to the `CodexBrain` runner via `deps.runPlanner`. Keep the SAME `onEvent`→controller→activity wiring (624–651), the SAME `appendTurn`/rolling-summary persistence (715), and the SAME `trajWriter.append` (134) so replay + self-learning are unaffected. Pass `effort` per turn from the tier (task→low/minimal, think→high/xhigh) — NOT a config profile. Preserve quiet-abort: on supersede emit `agent_interrupted`, never `agent_done`. | The routing fork. `handleFast` (546) stays untouched. `runPlanner` injection means no `handleSmart` rewrite. |
 | `src/daemon/agents/loop/types.ts` | **KEEP** | The `LoopEvent` union (36–46) is the STABLE CONTRACT Codex must conform to. Do NOT add new kinds during the swap — map every Codex signal onto existing kinds. Document it as the frozen seam. | If the contract drifts, the HUD/TTS/activity-tree all break. The whole "zero downstream change" guarantee rests on this staying fixed. |
-| `src/daemon/agents/loop/verifier.ts` | **PORT** | Run the deterministic verifier POST-TURN over `(utterance, finalText, toolCallLedger)` reconstructed from the Codex event stream — `buildDestructiveVerifier.verify` already takes exactly that tuple. On `retryable:true`, inject ONE `[automatic check …]` follow-up turn into the SAME codex thread (mirrors today's in-loop retry). Make `LOCAL_TOOLS` matching and the `startsWith('kairos_')` destructive check robust to MCP namespacing (strip `kairos__`/`kairos.` prefix in the ledger translator before feeding the verifier). | The anti-gaslighting stack (promissory/fabrication/do-mode/false-blindness/false-done) MUST survive the brain swap. It already runs post-turn on a tuple Codex provides — the only new work is the ledger translation + namespace strip. |
-| `src/daemon/agents/loop/agentLoop.ts` | **KEEP (as fallback)** | Unchanged. Remains the `KAIROS_BRAIN!=codex` smart/deep path AND the background sub-agent loop. Do NOT delete (see "What we retire"). | The flag is a permanent fallback per 01.E; agentLoop owns tools/streaming/verify/compaction/maxTurns/replan today. |
+| `src/daemon/agents/loop/verifier.ts` | **PORT** | Run the deterministic verifier POST-TURN over `(utterance, finalText, toolCallLedger)` reconstructed from the Codex event stream — `buildDestructiveVerifier.verify` already takes exactly that tuple. On `retryable:true`, start ONE new `[automatic check …]` `turn/start` on the SAME codex thread (post-turn correction is a NEW turn, not `turn/steer` which needs an active turn). The CodexBrain ledger translator **strips the MCP namespace (`kairos__`/`kairos.`) BEFORE `isDestructiveCall`/`effectiveName`** so Composio writes (e.g. `kairos__GMAIL_SEND_EMAIL`) are not mis-read as LOCAL/safe; `verifier.ts` switches from `startsWith('kairos_')` to an explicit ALLOWLIST of KAIROS-internal tools (NOT a prefix match) (14 §A3). | The anti-gaslighting stack (promissory/fabrication/do-mode/false-blindness/false-done) MUST survive the brain swap. It already runs post-turn on a tuple Codex provides — the only new work is the ledger translation + namespace strip. |
+| `src/daemon/agents/loop/agentLoop.ts` | **KEEP (temporary rollback)** | Unchanged for now. Remains the `KAIROS_BRAIN!=codex` smart/deep path AND the background sub-agent loop. Do NOT delete YET (see "What we retire"). | `KAIROS_BRAIN` is a TEMPORARY rollback with an explicit retirement criterion (deep+background stable on Codex for N days → remove `defaultPlannerRunner`), NOT a permanent parallel architecture — the end-state is ONE agentic brain (14 §E). agentLoop owns tools/streaming/verify/compaction/maxTurns/replan today. |
 | `src/daemon/agents/types.ts` | **KEEP** | The `ToolDef { name, description, parameters, execute }` shape (32–41) is reused verbatim by the new MCP server. No change. | Single source of truth for tool shape; the MCP server iterates it. |
 
 **Smart-vs-deep effort handling (confirmed):** `ReasoningEffort` has six values
@@ -79,7 +79,7 @@ index.ts:1979–2074.
 | File | Status | Change | Why |
 |---|---|---|---|
 | `src/daemon/index.ts:1979–2074` (`actionTools`) | **REPLACE→EXTRACT** | Extract the closure body into an exported pure `buildActionToolset(deps): ToolDef[]` where `deps` = the `__kairos*` singletons passed EXPLICITLY (not read off `globalThis`). The existing ContextBuilder loader and the new MCP server both consume this one function. | Guarantees the Codex brain and the legacy loop expose byte-identical tools; removes the hidden-global coupling that would make a child process toolless. |
-| `src/daemon/mcp/kairosMcpServer.ts` | **NEW** | The KAIROS MCP server. Instantiate `@modelcontextprotocol/sdk` `McpServer`; for each `ToolDef` from `buildActionToolset` register a tool (name, description, JSON-Schema→Zod/json-schema-compat shim, callback→`ToolDef.execute`→`{content:[{type:'text',text}]}`). **CRITICAL: run IN-PROCESS with the daemon, not as a standalone `bun run` child** — the tools close over live singletons (`__kairosToolRetriever`, `__kairosComposioExecute`, GuideBridge, BackgroundAgentManager, MemoryInjector); a child has none of them. Use either an in-memory transport pair handed to the codex child, OR `StreamableHTTP` mounted as the `/mcp` route on the EXISTING daemon `Bun.serve` at `127.0.0.1:9876` (per doc 11 — no second listener) registered as `[mcp_servers.kairos] url="http://127.0.0.1:9876/mcp"`. Tier the surface: smart-voice gets guide/act + Composio dispatch + recall + background; WITHHOLD `composio_search_tools` catalog discovery + heavy tools from the low-latency smart profile. | This is the file 01.B/05 named but doesn't exist. The in-process requirement CORRECTS 01:67–71 (`command=bun args=[run kairosMcpServer.ts]` would be a toolless zombie). |
+| `src/daemon/mcp/kairosMcpServer.ts` | **NEW** | The KAIROS MCP server. Instantiate `@modelcontextprotocol/sdk` `McpServer`; for each `ToolDef` from `buildActionToolset` register a tool (name, description, JSON-Schema→Zod/json-schema-compat shim, callback→`ToolDef.execute`→`{content:[{type:'text',text}]}`). **CRITICAL: run IN-PROCESS with the daemon, not as a standalone `bun run` child** — the tools close over live singletons (`__kairosToolRetriever`, `__kairosComposioExecute`, GuideBridge, BackgroundAgentManager, MemoryInjector); a child has none of them. Mount `webStandardStreamableHttp` (Web Fetch — NOT the Node `StreamableHTTPServerTransport` class, which won't bind to `Bun.serve`'s `Request` handler; 14 §A4) as the `/mcp` route on the EXISTING daemon `Bun.serve` at `127.0.0.1:9876` (per doc 11 — no second listener) registered as `[mcp_servers.kairos] url="http://127.0.0.1:9876/mcp"`. Tier the surface: smart-voice gets guide/act + Composio dispatch + recall + background; WITHHOLD `composio_search_tools` catalog discovery + heavy tools from the low-latency smart profile. | This is the file 01.B/05 named but doesn't exist. The in-process requirement CORRECTS 01:67–71 (`command=bun args=[run kairosMcpServer.ts]` would be a toolless zombie). |
 | `src/daemon/mcp/mcpHost.ts:21–31,204–219` | **KEEP / reuse pattern** | Reuse the existing `DestructiveActionConfirmer` + `DESTRUCTIVE_PATTERN` to wrap the new MCP server's execute callbacks. No change to the file; the pattern is borrowed in `kairosMcpServer.ts`. | Don't reinvent destructive gating; the host already has it. |
 | `src/daemon/index.ts:897–900` (`__kairosComposioExecute`) | **EXTEND** | Wire `SelfHealConnect` inline: on a `NOT_CONNECTED` envelope (Composio returns `successful:false`, NOT a throw) OR error from `composioClient.executeTool`, call the stashed `__kairosSelfHealConnect.connectAndRetry(toolkit, ()=>execute)` so OAuth stays daemon-side and Codex only ever sees the final result. Activates the "future inline-on-error wiring" the comment at index.ts:2239 anticipates. | Composio auto-connect must stay 100% daemon-side and invisible to Codex. Codex calls `search_tools`/`execute_tool` and never touches OAuth/tokens/redirects. |
 | `src/daemon/agents/selfHealConnect.ts` | **KEEP** | No change — it's already built (initiate→browser→poll ACTIVE→retry). Just gets CALLED inline now from `__kairosComposioExecute`. | The flow exists; only the call site is new. |
@@ -95,16 +95,17 @@ index.ts:1979–2074.
 ## 3) Memory / self-learning
 
 Decisive design (BOTH, asymmetric — mirrors openclicky's two layers): durable
-persona/doctrine → `thread/start` instructions (AGENTS.md-equivalent, set once per
-thread, re-written from ContextBuilder on every CODEX_HOME regen); volatile
-per-turn memory delta → `turn/start` instructions; `recall_memory` → MCP tool for
-mid-task pulls. Self-learning is UNCHANGED because AwmWorker reads the file store
+persona/doctrine → `thread/start.baseInstructions` (AGENTS.md-equivalent, set once per
+thread, re-written from ContextBuilder on every CODEX_HOME regen — this is the
+CACHEABLE prefix, 14 §H3); volatile per-turn memory delta → **`thread/inject_items`**
+before `turn/start` (NOT `turn/start` instructions — that field does not exist in
+codex 0.133, 14 §A1); `recall_memory` → MCP tool for mid-task pulls. Self-learning is UNCHANGED because AwmWorker reads the file store
 (`~/.kairos/traj/`), never the model — we only translate Codex's event stream into
 the same `TrajWriter.record()` shape.
 
 | File | Status | Change | Why |
 |---|---|---|---|
-| `src/daemon/agents/contextBuilder.ts` | **EXTEND** | Add a method (or split `build()`) that returns the CACHED session prefix (persona/soul.md + character + talk + act rules + standing orders) SEPARATELY from the per-turn delta. `CodexBrain` writes the prefix into CODEX_HOME's AGENTS.md/model-instructions ONCE per thread (durable doctrine) and passes ONLY the delta as `turn/start` instructions. Keep `build()` for the fallback loop (concatenates both as today). Reuse the existing self-echo strip (`stripSelfEcho`/`isSelfEchoMemory`) + `needsMemoryRecall` pre-gate BEFORE building Codex turn instructions. | Mirrors `CodexVoiceSession.composePrompt`; avoids double-history; keeps all delta hygiene for free on the Codex path. |
+| `src/daemon/agents/contextBuilder.ts` | **EXTEND** | Add a method (or split `build()`) that returns the CACHED session prefix (persona/soul.md + character + talk + act rules + standing orders) SEPARATELY from the per-turn delta. `CodexBrain` writes the prefix into `thread/start.baseInstructions` (durable doctrine, cacheable prefix) ONCE per thread and feeds ONLY the delta through `thread/inject_items` before each `turn/start` (NOT `turn/start` instructions — no such field in codex 0.133, 14 §A1/§H3). Keep `build()` for the fallback loop (concatenates both as today). Reuse the existing self-echo strip (`stripSelfEcho`/`isSelfEchoMemory`) + `needsMemoryRecall` pre-gate BEFORE building the injected delta. | Mirrors `CodexVoiceSession.composePrompt`; avoids double-history; keeps all delta hygiene for free on the Codex path. |
 | `src/daemon/memory/memoryInjector.ts` | **KEEP** | Unchanged — `contextBuilder` calls it; the L2/L3/L4 merge into ContextBlocks is identical whether the consumer is the loop or Codex. | Memory assembly is brain-agnostic. |
 | `src/daemon/memory/episodicMemory.ts` | **KEEP** | Unchanged. SQLite L2 + FTS5 + hybrid recall + soft-delete all stay daemon-side. | Codex never sees the stores; it pulls via `recall_memory` MCP or the injected delta. |
 | `src/daemon/voice/conversationMessageStore.ts` | **KEEP (authoritative)** | Stays the transcript of record + layered replay (`loadForReplay`/`appendTurn`/`updateRollingSummary`). DECISION: KAIROS-authoritative continuity — inject `loadForReplay` output as the turn-input prefix; do NOT also let Codex `history.persistence='save-all'` re-feed the same turns (double-history risk). Reuse `buildTurnDigest`'s `execute_tool`-unwrap (116–120) in the event translator so trajectory tool names stay granular. | The layered pyramid + handle-preservation + cross-restart durability are already tuned; keep one source of truth for in-thread continuity. |
@@ -147,7 +148,7 @@ add region/scroll/arrow affordances in our material language.
 | `src/daemon/index.ts:2494` (agentConductor `onEvent` broadcast) | **KEEP** | Unchanged — Codex events become `LoopEvent`s upstream in `CodexBrain`, so this broadcast is brain-agnostic. | The "zero downstream change" guarantee. |
 | `src/daemon/index.ts:2379–2413` (bg `appendTraj`) | **KEEP / reuse pattern** | Unchanged; the `CodexBrain` trajectory translator wires to `__kairosTrajWriter` EXACTLY like this bg lane does. | Proven translation pattern; copy it for the foreground Codex path. |
 | `src/daemon/index.ts` (routing) | **EXTEND** | Route tier in {task,think} + `KAIROS_BRAIN=codex` → `CodexBrain`, else current `handleSmart`/`handleThink`. Wire `CodexBrain` process lifecycle (warm child, stale-exit guard) + proxy base-URL config. | The flag fork at the daemon boundary. |
-| `src/daemon/taskRunner.ts:78–115` | **REPLACE** | Gate the `claude -p` spawn behind `KAIROS_BRAIN`; when codex, route the proactive `WORK` verb through `codex exec --json` (background) or a `CodexBrain` app-server thread — same brain/tools(MCP)/verifier as the conductor's `[[task]]` path. | **Single biggest proactive correctness risk:** if only the conductor swaps and `taskRunner` stays on `claude -p`, the proactive lane diverges (two brains, no verifier wrap) AND fails in shipped builds (`claude -p` 401s without an authenticated Claude CLI; Anthropic is off the cloud path). |
+| `src/daemon/taskRunner.ts:78–115` | **REPLACE (remove `claude -p`)** | REMOVE the `claude -p` spawn ENTIRELY — NO Claude anywhere in the runtime (14 §H1). Route the proactive `WORK` verb through `codex exec --json` (background) or a `CodexBrain` app-server thread — same brain/tools(MCP)/verifier as the conductor's `[[task]]` path — in the SAME rollout step as background. A CI grep-gate (`grep -r "claude -p"` must be empty) enforces this. | **Single biggest proactive correctness risk:** if only the conductor swaps and `taskRunner` stays on `claude -p`, the proactive lane diverges (two brains, no verifier wrap) AND fails in shipped builds (`claude -p` 401s without an authenticated Claude CLI; Anthropic is off the cloud path entirely). |
 | `src/daemon/index.ts:446–493` (`onWork`/`onNotify`/`onSuggest`) | **EXTEND (hooks)** | Leave proactive hooks: when the Proposer ships, its drafted actions enter via the synthetic-stimulus bridge into the conductor/`CodexBrain` path (restraint-gated BEFORE Codex is invoked). Keep `SUGGEST` as the quiet HUD chip path; add `knowledge/suggestion-rules.json` evaluation as a pre-tick hook. Proactive turns are NON-VOICE: suppress the `assistant_delta`→TTS pipe unless the delivery plane decides to speak. | Proactive coming soon — re-route WORK now, leave the Proposer bridge as a hook. HeyClicky keeps voice off Codex; proactive = "the explicit agent run" = belongs on Codex as background threads. |
 | `src/daemon/scheduler.ts`, `src/daemon/decisionEngine.ts` | **KEEP** | Unchanged tick loop + six-verb DecisionEngine; the tick LLM stays the injected OpenRouter completer (NOT claude -p). Only `WORK`'s executor (taskRunner) changes. | Restraint/decision gating runs BEFORE Codex; the engine itself is brain-agnostic. |
 | `src/daemon/llm/usageMeter.ts` | **EXTEND** | Add `task_type` `codex_smart`/`codex_deep` + a per-install/token dimension so facade-side metering mirrors local `llm_call_log`; wire budget caps to the facade enforcement point. | Metering unification (05.G); shipped source of truth is proxy-side. |
@@ -201,27 +202,33 @@ shim. Pin an EXACT validated version (app-server is experimental).
 ## What we delete / retire
 
 Nothing is hard-deleted in the first cut. The brain swap is **flag-gated and
-reversible** (`KAIROS_BRAIN=codex`), and the research is explicit that the flag is
-a **permanent fallback** (01.E). Specifically:
+reversible** (`KAIROS_BRAIN=codex`), but the flag is a **TEMPORARY rollback with an
+explicit retirement criterion**, NOT a permanent parallel architecture — the
+end-state is ONE agentic brain (14 §E). Specifically:
 
 - **`defaultPlannerRunner` (conductor.ts:948) + `runAgentLoop` (agentLoop.ts): KEEP
-  as the fallback.** When `KAIROS_BRAIN!=codex`, smart/deep still run the in-house
-  loop. The background sub-agent lane (backgroundSubsystem.ts) ALSO independently
-  uses `runAgentLoop` — migrate it to `codex exec --json` first (rollout step 1),
-  but keep `runAgentLoop` until that lane is proven on Codex. **Decision: do NOT
-  remove until both (a) smart-voice-on-Codex passes the A/B latency gate and ships
-  as default AND (b) the background lane is validated on `exec --json`.** Treat
-  removal as a separate, later, deliberate PR — not part of this migration.
-- **`buildActionToolset` must stay dual-consumer** (loop + MCP server) for as long
-  as the fallback exists. If/when the loop is retired, the ContextBuilder loader
-  drops its consumer and only the MCP server remains.
+  as the temporary rollback.** When `KAIROS_BRAIN!=codex`, smart/deep still run the
+  in-house loop. The background sub-agent lane (backgroundSubsystem.ts) ALSO
+  independently uses `runAgentLoop` — migrate it to `codex exec --json` first
+  (rollout step 1), but keep `runAgentLoop` until that lane is proven on Codex.
+  **Retirement criterion: once deep + background are stable on Codex for N days,
+  REMOVE `defaultPlannerRunner`/`runAgentLoop`** (the one-agentic-brain end-state).
+  Smart-voice-on-Codex must also pass the A/B latency gate before its default flip,
+  but that flip is gated separately by `KAIROS_BRAIN_SMART_VOICE` and does not block
+  the retirement of the deep/background fallback. The removal is a deliberate PR
+  driven by the criterion above — not "indefinitely later."
+- **`buildActionToolset` stays dual-consumer** (loop + MCP server) ONLY until the
+  fallback is retired per the criterion above — NOT indefinitely. When the loop is
+  retired, the ContextBuilder loader drops its consumer and only the MCP server
+  remains.
 - **In-loop verify round** is RETIRED in the Codex path (becomes a post-turn
-  re-injected thread turn — see verifier PORT). The in-loop version stays only in
-  the fallback `runAgentLoop`.
-- **`claude -p` in taskRunner.ts: RETIRE for the proactive WORK lane** (it 401s
-  without an authenticated Claude CLI; Anthropic is off the cloud path by design).
-  This is the one path safe to fully cut over to Codex now (background, no voice
-  risk) — keep the `KAIROS_BRAIN` gate so dev can still fall back if needed.
+  new-`turn/start` correction — see verifier PORT). The in-loop version stays only
+  in the fallback `runAgentLoop` until that fallback is retired.
+- **`claude -p` in taskRunner.ts: REMOVED ENTIRELY** — NO Claude anywhere in the
+  runtime (14 §H1). Proactive WORK routes through Codex in the SAME rollout step as
+  background (`claude -p` 401s without an authenticated Claude CLI; Anthropic is off
+  the cloud path by design). A CI grep-gate (`grep -r "claude -p"` must be empty)
+  enforces that no Claude path survives.
 - **`[profiles.smart]`/`[profiles.deep]` per-profile effort config (01.B): RETIRE**
   in favor of one model + per-turn `effort` on `turn/start`. Update doc 01.B.
 - **Codex native `web_search` vs KAIROS DDG tools: one is retired per model.** If
@@ -270,10 +277,11 @@ steps depend on earlier ones.
 13. Metering: `usageMeter`/`costTracker` `codex_*` task types. (§5)
 
 **Phase 4 — Smart-voice (flagged, A/B gated)**
-14. Route `[[task]]` smart-voice through `CodexBrain` behind `KAIROS_BRAIN=codex`;
-    suppress TTS for non-voice/proactive turns. Measure `time_to_first_token_ms`
-    via turns.jsonl; A/B vs the direct loop before flipping default. (§1) —
-    *blocks on 07.4 (latency tolerance).*
+14. Route `[[task]]` smart-voice through `CodexBrain` behind `KAIROS_BRAIN_SMART_VOICE`
+    (default off); suppress TTS for non-voice/proactive turns. Measure TTFT
+    CLIENT-SIDE from the first delta (`time_to_first_token_ms` is NOT in the codex
+    bindings, 14 §D17) and log to turns.jsonl; A/B vs the direct loop before flipping
+    default. (§1) — *blocks on 07.4 (latency tolerance).*
 
 **Phase 5 — Guidance overlay (independent of Phase 0–4)**
 15. `AXFinder` `unionFrame` + `scrollableAncestor` (AHEAD of the SwiftUI shapes). (§4)
@@ -287,8 +295,10 @@ steps depend on earlier ones.
 19. `suggestion-rules.json` pre-tick hook + Proposer synthetic-stimulus bridge
     (restraint-gated, non-voice). (§5) — *proactive coming soon; hooks only.*
 
-**Later (separate PR, not this migration):** decide whether to retire
-`defaultPlannerRunner`/`runAgentLoop` once Codex is the proven default.
+**Later (separate PR, driven by the retirement criterion):** RETIRE
+`defaultPlannerRunner`/`runAgentLoop` once deep + background are stable on Codex for
+N days (the one-agentic-brain end-state, 14 §E) — this is the planned terminus, not
+an open "whether."
 
 ---
 
@@ -302,5 +312,7 @@ steps depend on earlier ones.
 - **07.4** First-token latency tolerance X for smart-voice on Codex. (gates Phase 4.)
 - **07.9** Ship binary: both arches (~193MB each) vs arm64-only / download-on-first-run.
 - **Codex pin version** to validate + freeze (0.124 vs 0.133 vs 0.139). (gates §7 + §1.)
-- **Transport** for the KAIROS MCP server: in-memory/stdio pair vs StreamableHTTP
-  on 127.0.0.1. (gates §2 step 5.)
+- **Transport** for the KAIROS MCP server: RESOLVED — `webStandardStreamableHttp`
+  (Web Fetch) mounted on the existing daemon `Bun.serve` loopback at 127.0.0.1:9876
+  (14 §A4/§G23). Not the Node `StreamableHTTPServerTransport` class; no stdio
+  alternative carried forward. (gates §2 step 5.)

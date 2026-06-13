@@ -218,10 +218,10 @@ The `LoopEvent` union is the stable contract (`agents/loop/types.ts:36-46`):
 
 ```
 type LoopEvent =
-  | { kind:"assistant_delta"; text }       // → assistant_delta → StreamSpeechController/TTS + caption
-  | { kind:"tool_call_start"; id; name; args }   // → agent_tool_call (activity node)
-  | { kind:"tool_call_done";  id; result }       // → agent_tool_done
-  | { kind:"tool_call_failed"; id; error }        // → agent_tool_failed
+  | { kind:"assistant_delta"; text }              // → assistant_delta → StreamSpeechController/TTS + caption
+  | { kind:"tool_call_start";  id; name; args }   // → agent_tool_call (activity node)
+  | { kind:"tool_call_done";   id; name; result } // → agent_tool_done   (name IS present — 14§A5)
+  | { kind:"tool_call_failed"; id; name; error }  // → agent_tool_failed (name IS present — 14§A5)
   | { kind:"plan_update"; plan }            // → activity plan node
   | { kind:"compaction"; ... }              // internal
   | { kind:"self_correct"; concern }        // → self_correct envelope (verify retry)
@@ -240,19 +240,30 @@ CodexBrain (01§A, `src/daemon/agents/codexBrain.ts`) is implemented as a
 
 1. Map `conversationId → codex thread` (thread/start once per conversation,
    reuse; `turn/start` per turn).
-2. Pass the SAME instructions surface `handleSmart` builds today — the
-   `contextBuilder` system prompt + lesson context + per-app knowledge doc — as
-   `turn/start { input, instructions }`.
+2. Pass the SAME context surface `handleSmart` builds today — the durable
+   `contextBuilder` persona on `thread/start.baseInstructions` (once per
+   conversation), and the volatile per-turn delta (lesson context + per-app
+   knowledge doc) via `thread/inject_items` BEFORE `turn/start { input }`. codex
+   0.133 `turn/start` has NO `instructions` field (14§A1), so per-turn context is
+   injected, not passed on the turn.
 3. Translate the Codex app-server JSON-RPC notification stream into `LoopEvent`s:
 
 | Codex notification | → LoopEvent | → wire `agent_*` |
 |---|---|---|
 | `item/agentMessage/delta` | `assistant_delta` | `assistant_delta` (TTS + caption) |
 | `item/mcpToolCall` start / `command/exec` start | `tool_call_start {id,name,args}` | `agent_tool_call` |
-| `item/mcpToolCall` end / `command/exec` end | `tool_call_done` / `tool_call_failed` | `agent_tool_done` / `agent_tool_failed` |
+| `item/mcpToolCall` end / `command/exec` end | `tool_call_done {id,name,result}` / `tool_call_failed {id,name,error}` | `agent_tool_done` / `agent_tool_failed` |
+
+> **CodexBrain emits the (namespace-stripped) tool `name` on EVERY tool event** —
+> `tool_call_start`, `tool_call_done`, AND `tool_call_failed` (the `name` field is
+> present on all three, 14§A5). The Codex MCP namespace (e.g. `kairos__guide_user`)
+> is stripped to the bare name before it goes on the LoopEvent, so the activity
+> tree + trajectory naming (`conductor.ts:631-636`) stay correct AND the verifier's
+> bare-name destructive gate fires (§5c, 14§A3). Carry the namespace-strip + the
+> `name` on the done/failed pair, never just the start.
 | `turn/plan/updated` | `plan_update` | (activity plan node) |
 | `turn/completed` (final agentMessage) | `final {text}` | `agent_done` |
-| `thread/tokenUsage/updated` / `turn/completed.time_to_first_token_ms` | (meter only) | → `llm_call_log` task_type `codex_smart`/`codex_deep` (01§F) |
+| `thread/tokenUsage/updated` (+ TTFT measured client-side from first delta — `time_to_first_token_ms` is NOT in the bindings, 14§D17) | (meter only) | → `llm_call_log` task_type `codex_smart`/`codex_deep` (01§F) |
 | `error` | (error) | `agent_error` |
 
 4. Debounce `assistant_delta` ~180ms before UI/caption (matches openclicky's
@@ -276,7 +287,12 @@ LoopEvent (which the HUD already renders). One caveat the adapter must respect:
 the verifier's block-writes behavior (withhold the live "done, deleted" claim
 until verify confirms) means destructive tool calls must be detected from the
 MCP tool name EARLY in the event stream so the `assistant_delta`→TTS path can be
-gated before it voices an unverified claim (open question §8).
+gated before it voices an unverified claim. RESOLVED (14§A3): the CodexBrain
+ledger translator strips the MCP namespace BEFORE `isDestructiveCall`/
+`effectiveName`, and `verifier.ts` uses an explicit allowlist of KAIROS-internal
+tools — NOT `startsWith("kairos_")`, which would silently read Codex's
+namespaced Composio writes (e.g. `kairos__GMAIL_SEND_EMAIL`) as LOCAL/safe and
+disable the destructive gate.
 
 ### 5d. What stays ours (NOT on the Codex path)
 
@@ -362,10 +378,11 @@ as **non-voice / background threads**. The seam consequence to preserve now:
   but not `SpeakingStateTracker`.
 - Proactive acts still flow through the SAME `agent_*` broadcast and Lane B
   cards, so the Agents surface (04§B) shows them with no new event types.
-- The `taskRunner` WORK path (today spawns `claude -p`) re-routes through
-  CodexBrain when `KAIROS_BRAIN=codex` so proactive and reactive share one brain,
-  one tool surface, and one verifier gate (05§C). Leave this hook; do not wire
-  proactive delivery yet.
+- The `taskRunner` WORK path (today spawns `claude -p`) has `claude -p` REMOVED
+  ENTIRELY (NO Claude anywhere in the runtime, 14§H1; CI grep-gate `grep -r
+  "claude -p"` must be empty) and routes through CodexBrain in the SAME rollout
+  step as background, so proactive and reactive share one brain, one tool surface,
+  and one verifier gate (05§C). Leave this hook; do not wire proactive delivery yet.
 
 ---
 
@@ -385,9 +402,12 @@ as **non-voice / background threads**. The seam consequence to preserve now:
   deltas straight to TTS — must we re-implement the destructive-stream gate on
   the Codex `assistant_delta` path, or can a destructive MCP tool name be
   detected early enough to gate the stream?
-- **MCP namespace in the ledger:** Codex may report namespaced tool names
-  (`kairos__guide_user`); the verifier's `LOCAL_TOOLS` / `startsWith('kairos_')`
-  logic matches bare names. The ledger translator must strip the namespace
-  before feeding the verifier (else every tool mis-gates).
+- **MCP namespace in the ledger (RESOLVED — 14§A3):** Codex reports namespaced
+  tool names (`kairos__guide_user`, `kairos__GMAIL_SEND_EMAIL`). The ledger
+  translator strips the MCP namespace BEFORE `isDestructiveCall`/`effectiveName`,
+  and `verifier.ts` switches from `startsWith("kairos_")` to an explicit
+  allowlist of KAIROS-internal tools — otherwise namespaced Composio writes read
+  as LOCAL/safe and the destructive gate is silently disabled. Hard, tested
+  invariant.
 - **Delta backpressure:** confirm the 180ms debounce + broadcast loop survives a
   long deep turn streaming at token speed without `send<=0` drops.

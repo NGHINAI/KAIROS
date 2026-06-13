@@ -53,10 +53,11 @@ app. This is their answer to "how does it know Photoshop."
   match: [name patterns] }`, body = concise operating notes (where key controls
   live, common flows, gotchas, preferred structured route vs GUI).
 - Injection: when a turn targets an app (open_app / read_screen app / frontmost
-  app on a guide/act/do ask), `contextBuilder` appends the matching doc to the
-  **`turn/start` instructions** (same per-turn channel as `lessonContext` — NOT
-  the durable `thread/start` instructions; see 11.A for the split). Cheap,
-  bounded, cache-keyed by app.
+  app on a guide/act/do ask), `contextBuilder` injects the matching doc via
+  **`thread/inject_items` before `turn/start`** (same per-turn channel as
+  `lessonContext` — NOT a `turn/start.instructions` field, which does not exist in
+  codex 0.133 [14] §A1; and NOT the durable `thread/start.baseInstructions`; see
+  11.A for the split). Cheap, bounded, cache-keyed by app.
 - IMPORTANT (user's explicit point): these are the ONLY md files we generate —
   app-knowledge docs so the agent has expertise. We are NOT spawning general
   doc sprawl. Seed a handful (System Settings, Finder, Mail, Safari, the apps
@@ -73,14 +74,16 @@ design lives in 10. The load-bearing reconciliation for THIS doc:
   203-207) whose `DecisionEngine` emits six verbs (SLEEP/WORK/INVESTIGATE/
   NOTIFY/CONSOLIDATE/SUGGEST, `decisionEngine.ts` 148-170).
 - **The single biggest correctness hook:** the `WORK` verb currently spawns
-  `claude -p` as a one-shot subprocess (`taskRunner.ts` 78-115). When
-  `KAIROS_BRAIN=codex`, WORK MUST re-route through CodexBrain (rollout step 1 =
-  `codex exec --json` background, or an app-server thread) so the proactive
-  agent lane shares the conductor's brain, tools (MCP), and verifier gate. If
-  we swap only `[[task]]`/`[[think]]` and leave WORK on `claude -p`, the
-  proactive lane silently diverges — two brains, two tool surfaces, no verifier
-  wrapping proactive acts. (It also 401s in a shipped build: the Claude CLI is
-  unauthenticated and Anthropic is off the cloud path by design.)
+  `claude -p` as a one-shot subprocess (`taskRunner.ts` 78-115). This is REMOVED
+  ENTIRELY — NO Claude anywhere in the runtime ([14] §H1). WORK routes through
+  CodexBrain (`codex exec --json` background, or an app-server thread) in the SAME
+  rollout step as background (step 1) so the proactive agent lane shares the
+  conductor's brain, tools (MCP), and verifier gate. If we swapped only
+  `[[task]]`/`[[think]]` and left WORK on `claude -p`, the proactive lane would
+  silently diverge — two brains, two tool surfaces, no verifier wrapping proactive
+  acts. (It also 401s in a shipped build: the Claude CLI is unauthenticated and
+  Anthropic is off the cloud path by design.) A CI grep-gate (`grep -r "claude -p"`
+  must be empty) enforces that no Claude path survives.
 - Proactive turns are **background, non-voice Codex threads**: the
   synthetic-stimulus bridge (concern → plain-language intent) produces a turn
   that enters the SAME `handleSmart`/CodexBrain path, with `assistant_delta`
@@ -115,9 +118,11 @@ file — ask/confirm the path.
   instructions (durable doctrine, 11.A), AND a daemon-side guard that refuses
   >1 distinct protected-root access per turn without an explicit user path. Our
   sub-agents have file tools and no such rule today.
-- Especially important under Codex's `sandbox_mode="danger-full-access"` +
-  `approval_policy="never"` (the openclicky spawn posture): the agent has
-  unrestricted local exec, so write/irreversible MCP tools keep their OWN
+- This holds under our DEFAULT posture — `sandbox_mode="workspace-write"` (egress
+  restricted to the proxy host) + `approval_policy="never"` ([14] §B7), spawned with
+  a minimal allowlisted env ([14] §B6). `danger-full-access` is ONLY an explicit
+  interactive opt-in, never the unattended default. Because `approval_policy="never"`
+  still bypasses codex's own approval, write/irreversible MCP tools keep their OWN
   approval gating independent of codex's policy (see E and 11.B).
 
 ## E. Composio discipline (already partially ours, tighten per their doctrine)
@@ -159,8 +164,9 @@ file — ask/confirm the path.
 
 - Codex turns → `llm_call_log` with task_type `codex_smart`/`codex_deep`
   (smart = effort low, deep = effort high — same model). Parse per-turn token
-  usage + `time_to_first_token_ms` from `turn/completed` (proves Codex surfaces
-  per-turn usage for metering).
+  usage from `turn/completed` (proves Codex surfaces per-turn usage for metering).
+  TTFT is measured CLIENT-SIDE from the first delta — `time_to_first_token_ms` is
+  NOT a field in the codex bindings ([14] §D17).
 - The PROXY-side per-token/per-install counters (09) are the shipped source of
   truth (local code can't be trusted in a shipped app); the local log stays for
   dev visibility. Wire budget caps to the facade enforcement point. Add a
@@ -173,6 +179,8 @@ file — ask/confirm the path.
 KAIROS `ToolDef.parameters` are raw JSON Schema; the MCP SDK's
 `McpServer.registerTool` wants Zod or its json-schema-compat path. A shim is
 required or the first tool call fails validation. Strip the MCP namespace
-(`kairos__guide_user` → `guide_user`) before feeding the verifier's
-`LOCAL_TOOLS` exemption and `startsWith('kairos_')` destructive check, or the
-gate mis-fires on every tool (11.B).
+(`kairos__guide_user` → `guide_user`) in the ledger translator BEFORE the
+verifier's `LOCAL_TOOLS` exemption and `isDestructiveCall`/`effectiveName`, and
+switch the destructive gate from `startsWith('kairos_')` to an explicit
+KAIROS-internal ALLOWLIST ([14] §A3) — otherwise the gate mis-fires on every tool
+or Codex's namespaced Composio writes read as local-safe (11.B).
