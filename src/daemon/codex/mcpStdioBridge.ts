@@ -47,15 +47,19 @@ function daemonClient(): Promise<Client> {
 async function main() {
   // ── server ← codex (stdio) FIRST — answer initialize immediately ──
   const server = new Server({ name: "kairos", version: "0.1.0" }, { capabilities: { tools: {} } })
+  // Reset the cached connection on ANY call error so the next call reconnects —
+  // otherwise a daemon restart leaves a dead cached client and every subsequent
+  // tool call fails forever (the bridge outlives a daemon bounce).
+  const dropClient = () => { clientPromise = null }
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     blog("tools/list")
     try { const { tools } = await (await daemonClient()).listTools(); blog(`tools/list → ${tools.length}`); return { tools } }
-    catch (e) { blog(`tools/list err: ${String((e as Error)?.message ?? e)}`); return { tools: [] } }
+    catch (e) { dropClient(); blog(`tools/list err: ${String((e as Error)?.message ?? e)}`); return { tools: [] } }
   })
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     blog(`tools/call ${req.params.name}`)
     try { return await (await daemonClient()).callTool({ name: req.params.name, arguments: req.params.arguments ?? {} }) }
-    catch (e) { return { isError: true, content: [{ type: "text", text: `bridge upstream error: ${String((e as Error)?.message ?? e)}` }] } }
+    catch (e) { dropClient(); return { isError: true, content: [{ type: "text", text: `bridge upstream error: ${String((e as Error)?.message ?? e)}` }] } }
   })
 
   await server.connect(new StdioServerTransport())
