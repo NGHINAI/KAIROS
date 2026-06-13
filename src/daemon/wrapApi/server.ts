@@ -20,6 +20,11 @@ export type WrapApiOpts = {
   port?: number
   hostname?: string
   adapters: WrapApiAdapters
+  /** Optional handler for the Codex-facing MCP endpoint (/mcp). Wired to the
+   *  in-process KAIROS MCP server (codex/mcpServer.ts). It does its OWN bearer
+   *  auth, so it's safe to mount on the same loopback server as the (currently
+   *  tokenless) /v1 + WS paths without breaking the HUD/Electron clients. */
+  mcpHandler?: (req: Request) => Promise<Response>
 }
 
 export type WrapApiServer = {
@@ -89,6 +94,13 @@ export async function startWrapApi(opts: WrapApiOpts): Promise<WrapApiServer> {
       if (url.pathname === '/v1/voice/events') {
         if (srv.upgrade(req)) return
         return new Response('Upgrade failed', { status: 426 })
+      }
+      // Codex-facing MCP endpoint — the in-process KAIROS tool server. All methods
+      // (POST initialize/list/call, GET SSE, DELETE close) flow through; bearer
+      // auth is enforced inside the handler.
+      if (url.pathname === '/mcp') {
+        if (opts.mcpHandler) return opts.mcpHandler(req)
+        return new Response('MCP not enabled', { status: 503 })
       }
       return new Response('Not Found', { status: 404 })
     },

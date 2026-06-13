@@ -176,6 +176,7 @@ import { buildWebTools } from './agents/webTools'
 import { GuideBridge } from './agents/guideBridge'
 import { buildGuideTools } from './agents/guideTools'
 import { buildActionToolset, type ActionToolDeps } from './agents/buildActionToolset'
+import { createKairosMcpServer } from './codex/mcpServer'
 import { GuideLessonManager, LESSON_CONTINUE_SENTINEL, LESSON_CONTINUE_TEXT } from './agents/guideLesson'
 import { TEACHING_RE } from './agents/loop/verifier'
 import { ToolUsageTracker } from './agents/toolUsageTracker'
@@ -1598,9 +1599,22 @@ async function main(): Promise<void> {
     ? new VoiceAdapter({ llm: { complete: (b) => llmAdapter.complete(b) }, store: voiceBundle.conversationStore })
     : null
 
+  // Codex-facing MCP server (08): exposes the SAME action toolset (buildActionToolset)
+  // to a Codex brain over /mcp. deps() is LAZY — it reads __kairosActionToolDeps,
+  // populated later in boot — so the toolset is always current (Composio connects at
+  // runtime). Bearer token (KAIROS_MCP_TOKEN) is minted for the session if unset, and
+  // the same value is handed to the codex child's minimal env when it spawns (A4).
+  if (!process.env.KAIROS_MCP_TOKEN) process.env.KAIROS_MCP_TOKEN = crypto.randomUUID()
+  const kairosMcp = createKairosMcpServer({
+    deps: () => ((globalThis as any).__kairosActionToolDeps?.() ?? { log }) as ActionToolDeps,
+    bearerToken: process.env.KAIROS_MCP_TOKEN,
+    log: (m: string) => log(m),
+  })
+
   const wrapApi: WrapApiServer = await startWrapApi({
     port: wrapApiPort,
     hostname: '127.0.0.1',
+    mcpHandler: (req) => kairosMcp.handleRequest(req),
     adapters: {
       // /v1/llm/complete — direct Anthropic SDK (matches LLMAdapter.complete shape:
       // { messages, system, model, max_tokens, temperature, signal }). The
