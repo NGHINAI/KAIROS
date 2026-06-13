@@ -137,4 +137,15 @@ describe("ensureCodexHome (filesystem, temp dir)", () => {
     expect(r.home).toContain(root)
     expect(r.home).not.toContain("/.codex")
   })
+
+  test("idempotent across daemon restarts — regenerating doesn't throw or corrupt", async () => {
+    const root = mkdtempSync(join(tmpdir(), "kairos-codexhome-re-"))
+    const o = { root, baseUrl: "http://127.0.0.1:8788/v1", brainKeyEnv: "KAIROS_BRAIN_KEY", modelAlias: "kairos-smart", mcpUrl: "http://127.0.0.1:9876/mcp", mcpTokenEnv: "KAIROS_MCP_TOKEN" }
+    const a = await ensureCodexHome(o)
+    const b = await ensureCodexHome(o)            // second boot — must be safe
+    expect(b.configPath).toBe(a.configPath)
+    expect(existsSync(join(b.workspace, ".git"))).toBe(true)   // git init not re-run destructively
+    expect(readFileSync(b.configPath, "utf8")).toContain('wire_api = "responses"')
+    expect(statSync(b.configPath).mode & 0o077).toBe(0)        // still locked down
+  })
 })

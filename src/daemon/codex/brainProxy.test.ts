@@ -126,6 +126,18 @@ describe("robustness", () => {
   })
 })
 
+describe("GET passthrough (codex hits /models etc.)", () => {
+  test("a GET with no body forwards to the right subpath with the upstream key", async () => {
+    const { p, calls } = proxy({}, () => new Response(JSON.stringify({ data: [] }), { status: 200, headers: { "content-type": "application/json" } }))
+    const req = new Request("http://x/brain/v1/models", { method: "GET", headers: { authorization: `Bearer ${BEARER}` } })
+    const r = await p.handleRequest(req, "/v1/models")
+    expect(r.status).toBe(200)
+    expect(calls[0]!.url).toBe("https://openrouter.ai/api/v1/models")
+    expect((calls[0]!.init.headers as any).authorization).toBe(`Bearer ${UPSTREAM_KEY}`)
+    expect(calls[0]!.init.body).toBeUndefined()   // no body on GET
+  })
+})
+
 describe("defaultAliasMap", () => {
   test("one model by default; env overrides per lane", () => {
     expect(defaultAliasMap({})["kairos-smart"]).toBe("minimax/minimax-m3")
