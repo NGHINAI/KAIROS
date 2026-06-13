@@ -175,6 +175,7 @@ import { buildRecallTool } from './agents/recallTool'
 import { buildWebTools } from './agents/webTools'
 import { GuideBridge } from './agents/guideBridge'
 import { buildGuideTools } from './agents/guideTools'
+import { buildActionToolset, type ActionToolDeps } from './agents/buildActionToolset'
 import { GuideLessonManager, LESSON_CONTINUE_SENTINEL, LESSON_CONTINUE_TEXT } from './agents/guideLesson'
 import { TEACHING_RE } from './agents/loop/verifier'
 import { ToolUsageTracker } from './agents/toolUsageTracker'
@@ -1851,6 +1852,36 @@ async function main(): Promise<void> {
       },
     })
 
+    // Action-toolset deps: read the live daemon singletons off globalThis and pass
+    // them EXPLICITLY into buildActionToolset (the single source of truth, 08). The
+    // in-house planner loop (below) and the Codex-facing MCP server both call
+    // buildActionToolset with THIS deps object → byte-identical tools. Stashed on
+    // globalThis so codex/mcpServer.ts reuses the exact same deps.
+    const actionToolDeps = (): ActionToolDeps => ({
+      intentRegistry: (globalThis as any).__kairosIntentRegistry,
+      intentDispatch: (globalThis as any).__kairosIntentDispatch,
+      toolRetriever: (globalThis as any).__kairosToolRetriever,
+      composioExecute: (globalThis as any).__kairosComposioExecute,
+      toolUsage: (globalThis as any).__kairosToolUsage,
+      backgroundManager: (globalThis as any).__kairosBackgroundManager,
+      memoryInjector: (globalThis as any).__kairosMemoryInjector,
+      guideBridge: (globalThis as any).__kairosGuideBridge,
+      guideLesson: (globalThis as any).__kairosGuideLesson,
+      webSearchEnabled: process.env.KAIROS_WEB_SEARCH !== '0',
+      hotToolsN: Number(process.env.KAIROS_HOT_TOOLS) || 5,
+      openApp: async (name: string) => {
+        try {
+          const proc = Bun.spawn(['open', '-a', name], { stdout: 'ignore', stderr: 'pipe' })
+          const code = await proc.exited
+          if (code === 0) return { ok: true }
+          const err = await new Response(proc.stderr).text().catch(() => '')
+          return { ok: false, error: err.trim().slice(0, 120) || `exit ${code}` }
+        } catch (e) { return { ok: false, error: (e as Error).message } }
+      },
+      log: (m: string, lvl?: string) => log(m, lvl as any),
+    })
+    ;(globalThis as any).__kairosActionToolDeps = actionToolDeps
+
     // Real layered ContextBuilder — session-prefix cache (persona / orders /
     // memory overview / tools) plus per-turn delta (recent conversation +
     // injected memory hits).
@@ -1976,102 +2007,13 @@ async function main(): Promise<void> {
         //     tool per turn via hybrid retrieval (ToolRetriever), then runs it.
         //     This replaces pre-loading all toolkit tools, so it scales to 50+
         //     connected toolkits without context bloat.
-        actionTools: async () => {
-          const out: any[] = []
-          const reg = (globalThis as any).__kairosIntentRegistry
-          const dispatch = (globalThis as any).__kairosIntentDispatch
-          if (reg && dispatch) {
-            const HIDDEN = new Set(['add_to_memory', 'log', 'suspend', 'notify'])
-            try { out.push(...intentsAsTools({ registry: reg, dispatch, filter: (e: any) => !HIDDEN.has(e.id) })) }
-            catch (e) { log('[actionTools] intent bridge failed: ' + String(e), 'warn') }
-          }
-          const retriever = (globalThis as any).__kairosToolRetriever
-          const execFn = (globalThis as any).__kairosComposioExecute
-          if (retriever && execFn) {
-            try {
-              const { searchTool, executeTool } = buildToolDispatchTools({ retriever, execute: execFn })
-              out.push(searchTool, executeTool)
-              // HOT SET: the user's most-used tools, loaded DIRECTLY so common
-              // actions ("send email", "create event") skip the search→execute hop
-              // (faster + fewer multi-step fumbles). Read-only ones run concurrently.
-              const usage = (globalThis as any).__kairosToolUsage
-              if (usage && typeof retriever.getByNames === 'function') {
-                const hotN = Number(process.env.KAIROS_HOT_TOOLS) || 5
-                for (const d of retriever.getByNames(usage.topNames(hotN)) as any[]) {
-                  out.push({
-                    name: d.name,
-                    description: d.description,
-                    parameters: (d.parameters && typeof d.parameters === 'object' && d.parameters.type) ? d.parameters : { type: 'object', properties: {}, required: [] },
-                    execute: async (args: any) => execFn(d.name, args ?? {}),
-                    concurrencySafe: /(_LIST|_GET|_SEARCH|_FETCH|_READ|LIST_|GET_|SEARCH_|FIND_)/i.test(d.name),
-                  })
-                }
-              }
-            } catch (e) { log('[actionTools] tool dispatch bridge failed: ' + String(e), 'warn') }
-          } else {
-            // Loud signal: without these the planner has NO Composio actions at all.
-            log('[actionTools] search_tools/execute_tool NOT available (Composio subsystem not started?) — planner has no external-app tools', 'warn')
-          }
-          // Background agent lane (Batch 2): the foreground voice agent gets
-          // spawn_background_task (offload heavy/long work to an autonomous sub-agent
-          // so the conversation isn't blocked) + background_tasks (check on running
-          // sub-agents → answer "how's my task going?" in human language). Read from
-          // the stash since the manager is constructed AFTER the ContextBuilder.
-          const bgManager = (globalThis as any).__kairosBackgroundManager
-          if (bgManager) {
-            try { out.push(...buildBackgroundTools({ manager: bgManager })) }
-            catch (e) { log('[actionTools] background tools failed: ' + String(e), 'warn') }
-          }
-          // JIT memory recall: the per-turn delta injects memory keyed on the UTTERANCE;
-          // recall_memory lets the planner pull memory MID-TASK with its own query
-          // (stored preferences, past decisions, harvested learnings).
-          const memInj = (globalThis as any).__kairosMemoryInjector
-          if (memInj) {
-            try { out.push(buildRecallTool({ injector: memInj })) }
-            catch (e) { log('[actionTools] recall_memory failed: ' + String(e), 'warn') }
-          }
-          // Web access (free, keyless): web_search + read_webpage. Always available —
-          // the 2026-06-10 "research flights" session had NO research capability and
-          // the planner hallucinated instead. KAIROS_WEB_SEARCH=0 disables.
-          if (process.env.KAIROS_WEB_SEARCH !== '0') {
-            try { out.push(...buildWebTools()) }
-            catch (e) { log('[actionTools] web tools failed: ' + String(e), 'warn') }
-          }
-          // Guide Mode: guide_user points at on-screen elements via the HUD overlay
-          // (the orb morphs into a guide); open_app launches the app first when needed
-          // (argv-only `open -a` — no shell, no injection surface).
-          const guideB = (globalThis as any).__kairosGuideBridge
-          if (guideB) {
-            const guideL = (globalThis as any).__kairosGuideLesson
-            try {
-              out.push(...buildGuideTools({
-                bridge: guideB,
-                // Durable guide session: points feed the lesson/highlight state that
-                // survives turns; end_lesson appears in the toolset when wired.
-                lesson: guideL ? {
-                  notePoint: (p: any, note?: string) => guideL.notePointFromTool(p, note),
-                  noteStepDone: () => guideL.noteStepDone(),
-                  // endRequestFromModel REFUSES (returns false) when no step is done
-                  // yet — the model declaring victory at the first point killed the
-                  // highlight 8s into a live lesson.
-                  endLesson: (reason: string) => guideL.endRequestFromModel(reason),
-                } : undefined,
-                openApp: async (name: string) => {
-                  try {
-                    const proc = Bun.spawn(['open', '-a', name], { stdout: 'ignore', stderr: 'pipe' })
-                    const code = await proc.exited
-                    if (code === 0) return { ok: true }
-                    const err = await new Response(proc.stderr).text().catch(() => '')
-                    return { ok: false, error: err.trim().slice(0, 120) || `exit ${code}` }
-                  } catch (e) { return { ok: false, error: (e as Error).message } }
-                },
-              }))
-            }
-            catch (e) { log('[actionTools] guide tools failed: ' + String(e), 'warn') }
-          }
-          const seen = new Set<string>()
-          return out.filter((t: any) => t?.name && !seen.has(t.name) && (seen.add(t.name), true))
-        },
+        // Extracted to buildActionToolset (the single source of truth, 08): ONE
+        // assembly, TWO consumers — this in-house loop AND the in-process MCP
+        // server Codex connects to. Deps are read from globalThis HERE and passed
+        // explicitly so the function stays pure + unit-testable. Stashed on
+        // globalThis too so the MCP server (codex/mcpServer.ts) reuses the exact
+        // same deps → byte-identical tools across brains.
+        actionTools: async () => buildActionToolset(actionToolDeps()),
       },
       memoryInjector: {
         inject: async (q: string, opts?: any) => {
