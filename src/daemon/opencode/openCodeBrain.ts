@@ -271,7 +271,14 @@ export function createOpenCodeBrain(deps: OpenCodeBrainDeps) {
     handle = null; connectPromise = null; activeTurns.clear()
   }
 
-  return { run, shutdown }
+  /** Pre-spawn the warm `opencode serve` at boot so the FIRST real turn skips the cold
+   *  serve-spawn latency (the sim showed ~13s cold vs ~8s warm to the first tool).
+   *  Fire-and-forget; failures are non-fatal (the first turn will just spawn lazily). */
+  function warmUp(): Promise<void> {
+    return ensureConnected().then(() => { log("opencode brain warmed (serve up)") }).catch((e) => log(`warm-up failed (will spawn lazily): ${String((e as Error)?.message ?? e)}`))
+  }
+
+  return { run, shutdown, warmUp }
 }
 
 // ── the real SDK adapter (not unit-tested; validated by the live E2E, B3) ──────

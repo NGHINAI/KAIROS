@@ -2478,6 +2478,7 @@ async function main(): Promise<void> {
           })
           openCodeRunPlanner = (input, o) => ocBrain.run(input, o)
           openCodeBrainShutdown = ocBrain.shutdown
+          void ocBrain.warmUp()   // pre-spawn `opencode serve` so the first real turn isn't cold
           log(`[opencode-brain] ENABLED — via=${viaProxy ? `/brain proxy (hidden → ${realModel})` : `OpenRouter direct (${realModel})`}, tools via /mcp`)
         } catch (e) {
           log(`[opencode-brain] init failed, using the in-house loop: ${String((e as Error)?.message ?? e)}`, 'warn')

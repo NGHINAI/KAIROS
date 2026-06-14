@@ -179,6 +179,17 @@ describe("openCodeBrain — lifecycle against a fake opencode handle", () => {
     expect(eventsB.every((e: any) => !String(e.text ?? "").includes("STALE"))).toBe(true)
   })
 
+  test("warmUp() pre-spawns the connection (boot warm-up — skips first-turn cold start)", async () => {
+    let connects = 0
+    const f = fakeHandle(normalTurn())
+    const b = brain(() => { connects++; return f.handle })
+    await b.warmUp()
+    expect(connects).toBe(1)
+    // a subsequent turn reuses the warmed connection (no second connect)
+    await b.run("x", { tools: [], instructions: "" })
+    expect(connects).toBe(1)
+  })
+
   test("reports token usage via onUsage post-turn (D3 metering)", async () => {
     const f = fakeHandle((o: any, push: Push) => {
       const sid = o.sessionID
