@@ -20,7 +20,7 @@ function fakeHandle(script: (o: any, push: Push, sent: any) => Promise<void> | v
   const push: Push = (raw) => handler(raw)
   const handle: OpenCodeHandle = {
     createSession: async () => { sent.sessions++; return `ses_${sent.sessions}` },
-    prompt: async (o) => { sent.prompts.push(o); await script(o, push, sent); return {} },
+    prompt: async (o) => { sent.prompts.push(o); const r = await script(o, push, sent); return (r as any) ?? {} },
     abort: async () => { sent.aborts++ },
     onEvent: (h) => { handler = h },
     respondPermission: async () => { sent.permissions++ },
@@ -74,6 +74,18 @@ describe("openCodeBrain — lifecycle against a fake opencode handle", () => {
     const kinds = events.map((e) => e.kind)
     expect(kinds).toContain("assistant_delta")
     expect(kinds.indexOf("tool_call_start")).toBeLessThan(kinds.indexOf("tool_call_done"))
+  })
+
+  test("finalText from prompt() (the clean final message) is preferred over the streamed concatenation", async () => {
+    const f = fakeHandle((o: any, push: Push) => {
+      const sid = o.sessionID
+      push(part({ type: "text", id: "t1", text: "streamed messy text across steps" }, sid))
+      push(idle(sid))
+      return { finalText: "Clean final answer." } as any
+    })
+    const res = await brain(() => f.handle).run("x", { tools: [], instructions: "" })
+    expect(res.finalOutput).toBe("Clean final answer.")
+    expect(res.streamedText).toBe("streamed messy text across steps")   // streaming still reflects what was spoken live
   })
 
   test("same conversationId reuses ONE session across two turns", async () => {

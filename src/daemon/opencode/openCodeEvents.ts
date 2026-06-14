@@ -63,6 +63,9 @@ export function createOpenCodeTurnAccumulator(opts: {
   // Per-part cumulative text seen so far (text parts), to compute deltas.
   const textByPart = new Map<string, string>()
   const textOrder: string[] = []
+  // messageID → role (from message.updated). Lets us drop the USER message's echoed
+  // text part — opencode streams the prompt back as a text part too (prompt-echo bug).
+  const roleByMsg = new Map<string, string>()
   // Tool parts: id → ledger entry; started set guards a single tool_call_start.
   const toolById = new Map<string, OpenCodeToolCall>()
   const started = new Set<string>()
@@ -73,6 +76,8 @@ export function createOpenCodeTurnAccumulator(opts: {
   }
 
   function onTextPart(part: any) {
+    // Drop the USER message's echoed prompt (opencode streams it as a text part too).
+    if (part.messageID && roleByMsg.get(String(part.messageID)) === "user") return
     const id = String(part.id)
     const full = String(part.text ?? "")
     const prev = textByPart.get(id) ?? ""
@@ -118,6 +123,13 @@ export function createOpenCodeTurnAccumulator(opts: {
     const { type, properties } = unwrap(raw)
     if (!type) return
     switch (type) {
+      case "message.updated": {
+        // Record role per messageID (opencode sends this BEFORE the message's parts),
+        // so onTextPart can drop the user message's echoed prompt.
+        const info = properties?.info
+        if (properties?.sessionID === opts.sessionID && info?.id) roleByMsg.set(String(info.id), String(info.role ?? ""))
+        return
+      }
       case "message.part.updated": {
         const part = properties?.part
         if (!part) return

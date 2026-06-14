@@ -80,6 +80,17 @@ describe("openCodeEvents — per-session accumulator", () => {
     expect(a.state().toolCalls.at(-1)).toMatchObject({ name: "GMAIL_SEND_EMAIL", error: "not connected" })
   })
 
+  test("a USER-message text part is NOT streamed or accumulated (prompt-echo guard)", () => {
+    const { a, events } = acc()
+    // opencode emits message.updated (carrying role) before the message's parts.
+    a.handle({ payload: { type: "message.updated", properties: { sessionID: SID, info: { id: "m_user", role: "user" } } } })
+    a.handle({ payload: { type: "message.updated", properties: { sessionID: SID, info: { id: "m_asst", role: "assistant" } } } })
+    a.handle(partUpdate({ type: "text", id: "tu", messageID: "m_user", text: "what is on my screen?" }))   // the echoed prompt
+    a.handle(partUpdate({ type: "text", id: "ta", messageID: "m_asst", text: "You are in Settings." }))      // the real answer
+    expect(events.filter((e) => e.kind === "assistant_delta").map((e: any) => e.text)).toEqual(["You are in Settings."])
+    expect(a.state().finalText).toBe("You are in Settings.")
+  })
+
   test("reasoning + step parts do NOT produce assistant_delta or tool calls", () => {
     const { a, events } = acc()
     a.handle(reasoningPart("r1", "thinking hard about the screen"))

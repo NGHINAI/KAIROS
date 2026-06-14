@@ -123,14 +123,17 @@ export function createOpenCodeBrain(deps: OpenCodeBrainDeps) {
   }
 
   /** Drive ONE turn to completion / abort / timeout, streaming events live. */
-  async function runOneTurn(h: OpenCodeHandle, sessionID: string, text: string, system: string, opts: OpenCodeRunOpts): Promise<{ state: ReturnType<typeof createOpenCodeTurnAccumulator>["state"] extends () => infer S ? S : never; outcome: "completed" | "timeout" | "aborted" | "error" }> {
+  async function runOneTurn(h: OpenCodeHandle, sessionID: string, text: string, system: string, opts: OpenCodeRunOpts): Promise<{
+    finalText: string; streamedText: string; toolCalls: OpenCodeToolCall[]; outcome: "completed" | "timeout" | "aborted" | "error"
+  }> {
     const acc = createOpenCodeTurnAccumulator({ sessionID, mcpServerName: deps.mcpServerName, emit: (e) => opts.onEvent?.(e) })
     active = { sessionID, acc }
 
     let timer: ReturnType<typeof setTimeout> | undefined
     let onAbort: (() => void) | undefined
+    let promptResult: { finalText?: string } | undefined
     const promptP = h.prompt({ sessionID, text, system, model: { providerID: deps.modelProviderID, modelID: deps.modelID } })
-      .then(() => "completed" as const)
+      .then((r) => { promptResult = r; return "completed" as const })
       .catch((e) => { log(`openCodeBrain: prompt error: ${String((e as Error)?.message ?? e)}`); return "error" as const })
     const watchdogP = new Promise<"timeout">((res) => { timer = setTimeout(() => res("timeout"), turnTimeoutMs); (timer as any)?.unref?.() })
     const abortP = new Promise<"aborted">((res) => {
@@ -147,7 +150,12 @@ export function createOpenCodeBrain(deps: OpenCodeBrainDeps) {
     // Swallow the dangling prompt promise if it ever settles later (timeout/abort path).
     void promptP.catch(() => {})
     if (active?.sessionID === sessionID) active = null
-    return { state: acc.state(), outcome }
+    const st = acc.state()
+    // finalText: prefer prompt()'s returned FINAL message text (a single clean answer)
+    // over the streamed concatenation, which can span multiple steps; fall back to the
+    // accumulator (tests / when the adapter doesn't surface a final).
+    const finalText = (outcome === "completed" && promptResult?.finalText) ? promptResult.finalText : st.finalText
+    return { finalText, streamedText: st.streamedText, toolCalls: st.toolCalls, outcome }
   }
 
   function destructiveAlreadySucceeded(ledger: OpenCodeToolCall[]): boolean {
@@ -162,13 +170,13 @@ export function createOpenCodeBrain(deps: OpenCodeBrainDeps) {
       const system = opts.instructions && opts.instructions.length ? opts.instructions : deps.baseInstructions
 
       const turn = await runOneTurn(h, sessionID, input, system, opts)
-      let finalOutput = turn.state.finalText
-      let ledger = turn.state.toolCalls
+      let finalOutput = turn.finalText
+      let ledger = turn.toolCalls
       let corrected = false
 
       // Quiet-abort: a superseded/aborted turn ends without a verifier pass.
       if (turn.outcome === "aborted" || opts.signal?.aborted) {
-        return { finalOutput, streamedText: turn.state.streamedText, corrected: false, toolCalls: ledger }
+        return { finalOutput, streamedText: turn.streamedText, corrected: false, toolCalls: ledger }
       }
 
       // POST-TURN verifier gate (ported). Only on a CLEAN completion (not timeout/error,
@@ -180,8 +188,8 @@ export function createOpenCodeBrain(deps: OpenCodeBrainDeps) {
             opts.onEvent?.({ kind: "self_correct", concern: v.concern ?? "" })
             const followUp = `[automatic check] ${v.concern ?? "re-check your last answer against what the tools actually returned and correct it."}`
             const corr = await runOneTurn(h, sessionID, followUp, system, opts)
-            if (corr.state.finalText) finalOutput = corr.state.finalText
-            ledger = ledger.concat(corr.state.toolCalls)
+            if (corr.finalText) finalOutput = corr.finalText
+            ledger = ledger.concat(corr.toolCalls)
             corrected = true
           } else if (!v.ok && v.correction && !v.retryable) {
             finalOutput = v.correction
@@ -190,7 +198,7 @@ export function createOpenCodeBrain(deps: OpenCodeBrainDeps) {
         } catch (e) { log(`openCodeBrain: verifier error (not blocking): ${String((e as Error)?.message ?? e)}`) }
       }
 
-      return { finalOutput, streamedText: turn.state.streamedText, corrected, toolCalls: ledger }
+      return { finalOutput, streamedText: turn.streamedText, corrected, toolCalls: ledger }
     } catch (e) {
       log(`openCodeBrain: run failed: ${String((e as Error)?.message ?? e)}`)
       return { finalOutput: "", streamedText: "", corrected: false, toolCalls: [] }
@@ -263,8 +271,12 @@ export async function spawnOpenCode(o: { config: any; log?: (m: string) => void 
       return id
     },
     prompt: async ({ sessionID, text, system, model }) => {
-      await client.session.prompt({ path: { id: sessionID }, body: { model, parts: [{ type: "text", text }], ...(system ? { system } : {}) } } as any)
-      return {}
+      const res: any = await client.session.prompt({ path: { id: sessionID }, body: { model, parts: [{ type: "text", text }], ...(system ? { system } : {}) } } as any)
+      // prompt() returns the FINAL assistant message — its text part(s) are the clean
+      // single answer (no prompt-echo, no cross-step duplication).
+      const parts = res?.data?.parts ?? res?.parts ?? []
+      const finalText = parts.filter((p: any) => p?.type === "text").map((p: any) => p.text ?? "").join("")
+      return { finalText }
     },
     abort: async (sessionID) => { try { await client.session.abort({ path: { id: sessionID } } as any) } catch { /* */ } },
     onEvent: (h) => { handler = h },
