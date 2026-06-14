@@ -15,7 +15,7 @@
 // opencode exposes MCP tools as FLAT Chat-Completions function tools, so ANY OpenRouter
 // model (minimax) can call them — the capability codex lacked (docs 17/18).
 
-import { createOpenCodeTurnAccumulator, type OpenCodeToolCall } from "./openCodeEvents"
+import { createOpenCodeTurnAccumulator, unwrapOpenCodeEvent, type OpenCodeToolCall } from "./openCodeEvents"
 import { isDestructiveCall } from "../agents/loop/verifier"
 import type { LoopEvent, LoopMsg } from "../agents/loop/types"
 
@@ -78,33 +78,34 @@ export interface OpenCodeRunResult {
 
 interface ActiveTurn { sessionID: string; acc: ReturnType<typeof createOpenCodeTurnAccumulator> }
 
-function payloadType(raw: any): { type?: string; properties?: any } {
-  const p = raw?.payload ?? raw
-  return { type: p?.type, properties: p?.properties }
-}
-
 export function createOpenCodeBrain(deps: OpenCodeBrainDeps) {
   const log = deps.log ?? (() => {})
   const turnTimeoutMs = deps.turnTimeoutMs ?? 120_000
 
   let handle: OpenCodeHandle | null = null
   let connectPromise: Promise<OpenCodeHandle> | null = null
-  const sessions = new Map<string, Promise<string>>()
-  let active: ActiveTurn | null = null
+  // The set of LIVE turns. Each event is delivered to EVERY live accumulator, which
+  // self-filters by sessionID — so concurrent/overlapping turns (barge-in supersede)
+  // can't clobber each other (review CRITICAL #1 + the two HIGHs on the single `active`
+  // ref). Fresh session per turn (below) makes the sessionID filter airtight.
+  const activeTurns = new Set<ActiveTurn>()
 
   function ensureConnected(): Promise<OpenCodeHandle> {
     if (handle) return Promise.resolve(handle)
     if (!connectPromise) {
       connectPromise = Promise.resolve(deps.connect()).then((h) => {
         handle = h
-        // ONE event router for the process — routes every event to the CURRENT turn's
-        // accumulator (it self-filters by sessionID, so this is safe) + auto-allows
-        // permission requests for the active session.
+        // ONE event router — fan every event out to all live accumulators (each
+        // self-filters by sessionID) + auto-allow permission for the matching session.
+        // Uses the SAME unwrap as the accumulator so sync-wrapped events are seen (HIGH).
         h.onEvent((raw) => {
-          if (active) { try { active.acc.handle(raw) } catch (e) { log(`openCodeBrain: acc error: ${String((e as Error)?.message ?? e)}`) } }
-          const { type, properties } = payloadType(raw)
-          if (type === "permission.updated" && active && properties?.sessionID === active.sessionID) {
-            h.respondPermission(active.sessionID, properties?.id).catch((e) => log(`openCodeBrain: permission respond failed: ${String((e as Error)?.message ?? e)}`))
+          for (const t of activeTurns) { try { t.acc.handle(raw) } catch (e) { log(`openCodeBrain: acc error: ${String((e as Error)?.message ?? e)}`) } }
+          const { type, properties } = unwrapOpenCodeEvent(raw)
+          if (type === "permission.updated" && properties?.id) {
+            const sid = properties?.sessionID ?? properties?.info?.sessionID
+            if (sid && [...activeTurns].some((t) => t.sessionID === sid)) {
+              h.respondPermission(sid, properties.id).catch((e) => log(`openCodeBrain: permission respond failed: ${String((e as Error)?.message ?? e)}`))
+            }
           }
         })
         return h
@@ -113,48 +114,54 @@ export function createOpenCodeBrain(deps: OpenCodeBrainDeps) {
     return connectPromise
   }
 
-  function ensureSession(h: OpenCodeHandle, convId: string): Promise<string> {
-    let p = sessions.get(convId)
-    if (!p) {
-      p = h.createSession().catch((e) => { sessions.delete(convId); throw e })
-      sessions.set(convId, p)
-    }
-    return p
-  }
-
   /** Drive ONE turn to completion / abort / timeout, streaming events live. */
   async function runOneTurn(h: OpenCodeHandle, sessionID: string, text: string, system: string, opts: OpenCodeRunOpts): Promise<{
     finalText: string; streamedText: string; toolCalls: OpenCodeToolCall[]; outcome: "completed" | "timeout" | "aborted" | "error"
   }> {
-    const acc = createOpenCodeTurnAccumulator({ sessionID, mcpServerName: deps.mcpServerName, emit: (e) => opts.onEvent?.(e) })
-    active = { sessionID, acc }
-
     let timer: ReturnType<typeof setTimeout> | undefined
     let onAbort: (() => void) | undefined
-    let promptResult: { finalText?: string } | undefined
-    const promptP = h.prompt({ sessionID, text, system, model: { providerID: deps.modelProviderID, modelID: deps.modelID } })
-      .then((r) => { promptResult = r; return "completed" as const })
-      .catch((e) => { log(`openCodeBrain: prompt error: ${String((e as Error)?.message ?? e)}`); return "error" as const })
-    const watchdogP = new Promise<"timeout">((res) => { timer = setTimeout(() => res("timeout"), turnTimeoutMs); (timer as any)?.unref?.() })
+    let resolveTerminal: (() => void) | undefined
+    const acc = createOpenCodeTurnAccumulator({
+      sessionID, mcpServerName: deps.mcpServerName, emit: (e) => opts.onEvent?.(e),
+      // Race session.ERROR so an errored turn ends immediately instead of hanging to the
+      // watchdog (review CRITICAL #2). We do NOT race session.idle — idle normally
+      // coincides with prompt() returning, and letting idle win would drop prompt()'s
+      // authoritative clean finalText; the watchdog covers the (degenerate) idle-without-
+      // prompt-return case.
+      onTerminal: (s) => { if (s === "error") resolveTerminal?.() },
+    })
+    const myTurn: ActiveTurn = { sessionID, acc }
+    activeTurns.add(myTurn)
+
+    // Construct the terminal + abort racers BEFORE dispatching the prompt: events can
+    // arrive synchronously during prompt() (the SSE pump / tests), so resolveTerminal +
+    // onAbort must already be wired or an early session.error is lost (microtask race).
+    const terminalP = new Promise<"error">((res) => { resolveTerminal = () => res("error") })
     const abortP = new Promise<"aborted">((res) => {
       if (opts.signal?.aborted) return res("aborted")
       onAbort = () => res("aborted")
       opts.signal?.addEventListener?.("abort", onAbort, { once: true })
     })
+    const watchdogP = new Promise<"timeout">((res) => { timer = setTimeout(() => res("timeout"), turnTimeoutMs); (timer as any)?.unref?.() })
 
-    const outcome = await Promise.race([promptP, watchdogP, abortP])
+    let promptResult: { finalText?: string } | undefined
+    const promptP = h.prompt({ sessionID, text, system, model: { providerID: deps.modelProviderID, modelID: deps.modelID } })
+      .then((r) => { promptResult = r; return "completed" as const })
+      .catch((e) => { log(`openCodeBrain: prompt error: ${String((e as Error)?.message ?? e)}`); return "error" as const })
+
+    const outcome = await Promise.race([promptP, watchdogP, abortP, terminalP])
     if (timer) clearTimeout(timer)
     try { if (onAbort) opts.signal?.removeEventListener?.("abort", onAbort) } catch { /* */ }
     // On a non-clean exit, abort the session so opencode stops working the turn.
     if (outcome !== "completed") { try { await h.abort(sessionID) } catch { /* */ } }
     // Swallow the dangling prompt promise if it ever settles later (timeout/abort path).
     void promptP.catch(() => {})
-    if (active?.sessionID === sessionID) active = null
+    activeTurns.delete(myTurn)
+    acc.close()   // a late trailing event can't mutate this finished turn
     const st = acc.state()
     // finalText: prefer prompt()'s returned FINAL message text (a single clean answer)
-    // over the streamed concatenation, which can span multiple steps; fall back to the
-    // accumulator (tests / when the adapter doesn't surface a final).
-    const finalText = (outcome === "completed" && promptResult?.finalText) ? promptResult.finalText : st.finalText
+    // whenever prompt resolved, over the streamed concatenation; else the accumulator.
+    const finalText = promptResult?.finalText || st.finalText
     return { finalText, streamedText: st.streamedText, toolCalls: st.toolCalls, outcome }
   }
 
@@ -165,8 +172,12 @@ export function createOpenCodeBrain(deps: OpenCodeBrainDeps) {
   async function run(input: string, opts: OpenCodeRunOpts): Promise<OpenCodeRunResult> {
     try {
       const h = await ensureConnected()
-      const convId = opts.conversationId ?? "default"
-      const sessionID = await ensureSession(h, convId)
+      // FRESH session per turn (review CRITICAL #1): a unique sessionID per turn makes
+      // the accumulator's sessionID filter airtight, so a superseded turn's trailing
+      // events (same conversation) can never pollute the next turn. The opencode SERVER
+      // stays warm; only the (cheap) session is new. Cross-turn memory is KAIROS-
+      // authoritative (history injection is a tracked follow-up; opts.history not yet sent).
+      const sessionID = await h.createSession()
       const system = opts.instructions && opts.instructions.length ? opts.instructions : deps.baseInstructions
 
       const turn = await runOneTurn(h, sessionID, input, system, opts)
@@ -178,19 +189,26 @@ export function createOpenCodeBrain(deps: OpenCodeBrainDeps) {
       if (turn.outcome === "aborted" || opts.signal?.aborted) {
         return { finalOutput, streamedText: turn.streamedText, corrected: false, toolCalls: ledger }
       }
+      // Error/timeout: best-effort partial — no verifier (the answer is incomplete), but
+      // return cleanly (never hang). The conductor speaks the partial or its fallback.
+      if (turn.outcome === "error" || turn.outcome === "timeout") {
+        return { finalOutput, streamedText: finalOutput, corrected: false, toolCalls: ledger }
+      }
 
-      // POST-TURN verifier gate (ported). Only on a CLEAN completion (not timeout/error,
-      // where the answer is partial). Corrective retry = a NEW prompt (write-guarded).
+      // POST-TURN verifier gate (ported). Only on a CLEAN completion. Corrective retry =
+      // a NEW prompt (write-guarded); adopt it only if it completed cleanly + not aborted.
       if (deps.verifier && turn.outcome === "completed") {
         try {
           const v = await deps.verifier.verify({ utterance: input, finalText: finalOutput, toolCalls: ledger })
-          if (!v.ok && v.retryable && !destructiveAlreadySucceeded(ledger)) {
+          if (!v.ok && v.retryable && !destructiveAlreadySucceeded(ledger) && !opts.signal?.aborted) {
             opts.onEvent?.({ kind: "self_correct", concern: v.concern ?? "" })
             const followUp = `[automatic check] ${v.concern ?? "re-check your last answer against what the tools actually returned and correct it."}`
             const corr = await runOneTurn(h, sessionID, followUp, system, opts)
-            if (corr.finalText) finalOutput = corr.finalText
-            ledger = ledger.concat(corr.toolCalls)
-            corrected = true
+            if (corr.outcome === "completed" && !opts.signal?.aborted) {   // only adopt a clean correction
+              if (corr.finalText) finalOutput = corr.finalText
+              ledger = ledger.concat(corr.toolCalls)
+              corrected = true
+            }
           } else if (!v.ok && v.correction && !v.retryable) {
             finalOutput = v.correction
             corrected = true
@@ -198,7 +216,13 @@ export function createOpenCodeBrain(deps: OpenCodeBrainDeps) {
         } catch (e) { log(`openCodeBrain: verifier error (not blocking): ${String((e as Error)?.message ?? e)}`) }
       }
 
-      return { finalOutput, streamedText: turn.streamedText, corrected, toolCalls: ledger }
+      // Read-tier double-speak guard (review HIGH): the conductor re-speaks the final
+      // when it differs from what streamed live. streamedText (accumulator concat) and
+      // finalOutput (prompt's final message) diverge structurally, so report streamedText
+      // == finalOutput on an UNCORRECTED turn (the live stream already said it); on a
+      // CORRECTED turn keep them divergent so the corrected reply is spoken.
+      const streamedOut = corrected ? turn.streamedText : finalOutput
+      return { finalOutput, streamedText: streamedOut, corrected, toolCalls: ledger }
     } catch (e) {
       log(`openCodeBrain: run failed: ${String((e as Error)?.message ?? e)}`)
       return { finalOutput: "", streamedText: "", corrected: false, toolCalls: [] }
@@ -207,7 +231,7 @@ export function createOpenCodeBrain(deps: OpenCodeBrainDeps) {
 
   function shutdown(): void {
     try { handle?.close() } catch { /* */ }
-    handle = null; connectPromise = null; sessions.clear(); active = null
+    handle = null; connectPromise = null; activeTurns.clear()
   }
 
   return { run, shutdown }
@@ -256,12 +280,22 @@ export async function spawnOpenCode(o: { config: any; log?: (m: string) => void 
   const { client, server } = await createOpencode({ config: o.config })
   log(`opencode serve up at ${server.url}`)
   let handler: (raw: any) => void = () => {}
-  // Background: pump the global SSE stream → handler.
+  let closed = false
+  // Background: pump the global SSE stream → handler, in a RECONNECT loop (review HIGH).
+  // If the stream ends/throws (server hiccup, socket drop, idle timeout), we must
+  // re-establish it — otherwise every subsequent turn silently receives zero events.
   void (async () => {
-    try {
-      const ev = await client.global.event()
-      for await (const e of ev.stream) handler(e)
-    } catch (e) { log(`opencode event stream ended: ${String((e as Error)?.message ?? e)}`) }
+    let backoff = 200
+    while (!closed) {
+      try {
+        const ev = await client.global.event()
+        backoff = 200
+        for await (const e of ev.stream) { if (closed) return; handler(e) }
+      } catch (e) { log(`opencode event stream error: ${String((e as Error)?.message ?? e)}`) }
+      if (closed) return
+      await new Promise((r) => setTimeout(r, backoff))
+      backoff = Math.min(backoff * 2, 5000)
+    }
   })()
   return {
     createSession: async () => {
@@ -281,8 +315,10 @@ export async function spawnOpenCode(o: { config: any; log?: (m: string) => void 
     abort: async (sessionID) => { try { await client.session.abort({ path: { id: sessionID } } as any) } catch { /* */ } },
     onEvent: (h) => { handler = h },
     respondPermission: async (sessionID, permissionID) => {
-      await (client.session as any).postSessionIdPermissionsPermissionId({ path: { id: sessionID, permissionID }, body: { response: "always" } })
+      // The permission-respond method lives on the ROOT client, NOT client.session
+      // (review HIGH — the old client.session.* call threw, silently stalling the turn).
+      await (client as any).postSessionIdPermissionsPermissionId({ path: { id: sessionID, permissionID }, body: { response: "always" } })
     },
-    close: () => { try { server.close() } catch { /* */ } },
+    close: () => { closed = true; try { server.close() } catch { /* */ } },
   }
 }

@@ -41,8 +41,10 @@ export function stripMcpPrefix(name: string, serverName: string): string {
 }
 
 /** Unwrap opencode's event envelope. Real event is at .payload; tolerate an already
- *  unwrapped {type, properties}. Sync-wrapped events expose the inner via syncEvent. */
-function unwrap(raw: any): { type?: string; properties?: any } {
+ *  unwrapped {type, properties}. Sync-wrapped events expose the inner via syncEvent.
+ *  EXPORTED so the brain's router uses the SAME unwrap (sync-wrapped permission.updated
+ *  / terminal events must be seen consistently — review HIGH). */
+export function unwrapOpenCodeEvent(raw: any): { type?: string; properties?: any } {
   const p = raw?.payload ?? raw
   if (p && p.type === "sync" && p.syncEvent) return { type: p.syncEvent.type, properties: p.syncEvent.data ?? p.syncEvent }
   return { type: p?.type, properties: p?.properties }
@@ -58,8 +60,12 @@ export function createOpenCodeTurnAccumulator(opts: {
   sessionID: string
   mcpServerName: string
   emit: (e: LoopEvent) => void
+  /** Fired ONCE when this session reaches a terminal state (session.idle | session.error).
+   *  Lets the driver race terminal state so an errored/idle turn can't hang run(). */
+  onTerminal?: (status: "idle" | "error") => void
 }) {
   const state: OpenCodeTurnState = { finalText: "", streamedText: "", toolCalls: [] }
+  let closed = false       // set when the turn ends — a late event can't mutate finished state
   // Per-part cumulative text seen so far (text parts), to compute deltas.
   const textByPart = new Map<string, string>()
   const textOrder: string[] = []
@@ -87,9 +93,9 @@ export function createOpenCodeTurnAccumulator(opts: {
       textByPart.set(id, full)
       if (delta) opts.emit({ kind: "assistant_delta", text: delta })
     } else if (full !== prev) {
-      // non-append rewrite (rare) — emit the whole new text as the delta
+      // non-append rewrite (rare) — update the accumulated text but do NOT re-emit to
+      // live TTS (re-speaking the whole text would double it); finalText carries it.
       textByPart.set(id, full)
-      if (full) opts.emit({ kind: "assistant_delta", text: full })
     }
     recomputeFinal()
   }
@@ -120,14 +126,19 @@ export function createOpenCodeTurnAccumulator(opts: {
   }
 
   function handle(raw: any): void {
-    const { type, properties } = unwrap(raw)
+    if (closed) return
+    const { type, properties } = unwrapOpenCodeEvent(raw)
     if (!type) return
     switch (type) {
       case "message.updated": {
         // Record role per messageID (opencode sends this BEFORE the message's parts),
-        // so onTextPart can drop the user message's echoed prompt.
+        // so onTextPart can drop the user message's echoed prompt. opencode's real shape
+        // is EventMessageUpdated.properties = { info: Message } — sessionID + role live on
+        // `info`, NOT top-level (review CRITICAL #3). Read from info (fall back to a
+        // top-level sessionID defensively).
         const info = properties?.info
-        if (properties?.sessionID === opts.sessionID && info?.id) roleByMsg.set(String(info.id), String(info.role ?? ""))
+        const sid = info?.sessionID ?? properties?.sessionID
+        if (sid === opts.sessionID && info?.id) roleByMsg.set(String(info.id), String(info.role ?? ""))
         return
       }
       case "message.part.updated": {
@@ -140,12 +151,13 @@ export function createOpenCodeTurnAccumulator(opts: {
         return
       }
       case "session.idle":
-        if (properties?.sessionID === opts.sessionID) state.status = "idle"
+        if (properties?.sessionID === opts.sessionID && !state.status) { state.status = "idle"; opts.onTerminal?.("idle") }
         return
       case "session.error":
-        if (properties?.sessionID === opts.sessionID) {
+        if (properties?.sessionID === opts.sessionID && !state.status) {
           state.status = "error"
           state.errorMessage = String(properties?.error?.message ?? properties?.error ?? "session error")
+          opts.onTerminal?.("error")
         }
         return
       default:
@@ -157,5 +169,7 @@ export function createOpenCodeTurnAccumulator(opts: {
     handle,
     isTerminal: () => state.status === "idle" || state.status === "error",
     state: () => state,
+    /** Stop accepting events — the turn is over (defense-in-depth vs late events). */
+    close: () => { closed = true },
   }
 }

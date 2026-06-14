@@ -32,6 +32,7 @@ function fakeHandle(script: (o: any, push: Push, sent: any) => Promise<void> | v
 // event builders (opencode wraps in payload)
 const part = (p: any, sessionID: string) => ({ payload: { type: "message.part.updated", properties: { part: { sessionID, ...p } } } })
 const idle = (sessionID: string) => ({ payload: { type: "session.idle", properties: { sessionID } } })
+const sessionErr = (sessionID: string) => ({ payload: { type: "session.error", properties: { sessionID, error: { message: "upstream 500" } } } })
 const permission = (sessionID: string) => ({ payload: { type: "permission.updated", properties: { sessionID, id: "perm1" } } })
 
 // A normal turn: stream a delta, run a tool, finalize, go idle.
@@ -84,17 +85,59 @@ describe("openCodeBrain — lifecycle against a fake opencode handle", () => {
       return { finalText: "Clean final answer." } as any
     })
     const res = await brain(() => f.handle).run("x", { tools: [], instructions: "" })
-    expect(res.finalOutput).toBe("Clean final answer.")
-    expect(res.streamedText).toBe("streamed messy text across steps")   // streaming still reflects what was spoken live
+    expect(res.finalOutput).toBe("Clean final answer.")                 // prompt()'s clean final preferred
+    expect(res.streamedText).toBe("Clean final answer.")                // uncorrected → reconciled to finalOutput (no double-speak)
   })
 
-  test("same conversationId reuses ONE session across two turns", async () => {
+  test("FRESH session per turn (review CRITICAL #1 — airtight sessionID isolation)", async () => {
     const f = fakeHandle(normalTurn())
     const b = brain(() => f.handle)
     await b.run("one", { tools: [], instructions: "", conversationId: "A" } as any)
     await b.run("two", { tools: [], instructions: "", conversationId: "A" } as any)
-    expect(f.sent.sessions).toBe(1)
+    expect(f.sent.sessions).toBe(2)            // a new session per turn, not reused
     expect(f.sent.prompts).toHaveLength(2)
+  })
+
+  test("session.error mid-turn ends run() promptly — no watchdog hang (LESSON #2)", async () => {
+    // prompt() never resolves (the real opencode contract on error); session.error must end it.
+    const f = fakeHandle((o: any, push: Push) => new Promise<void>(() => { push(sessionErr(o.sessionID)) }))
+    const t0 = Date.now()
+    const res = await brain(() => f.handle, { turnTimeoutMs: 5000 }).run("x", { tools: [], instructions: "" })
+    expect(Date.now() - t0).toBeLessThan(1500)   // terminated via session.error, NOT the 5s watchdog
+    expect(f.sent.aborts).toBeGreaterThan(0)
+    expect(res.corrected).toBeFalsy()
+  })
+
+  test("uncorrected read turn: streamedText === finalOutput (no read-tier double-speak)", async () => {
+    // accumulator streams "On it. All set." but finalOutput comes from prompt()'s clean final;
+    // when NOT corrected, the brain reports streamedText == finalOutput so the conductor won't re-speak.
+    const f = fakeHandle((o: any, push: Push) => { normalTurn("All set.")(o, push); return { finalText: "All set." } as any })
+    const res = await brain(() => f.handle).run("x", { tools: [], instructions: "" })
+    expect(res.corrected).toBeFalsy()
+    expect(res.streamedText).toBe(res.finalOutput)
+    expect(res.finalOutput).toBe("All set.")
+  })
+
+  test("a superseded (aborted) turn's trailing events do NOT pollute the next turn (CRITICAL #1)", async () => {
+    // Turn A hangs after streaming a fragment; we abort it, then run Turn B (fresh session).
+    let pushA: Push | null = null
+    let sidA = ""
+    const f = fakeHandle((o: any, push: Push) => {
+      if (!pushA) { pushA = push; sidA = o.sessionID; return new Promise<void>(() => { push(part({ type: "text", id: "ta", text: "STALE-FROM-A " }, o.sessionID)) }) }
+      // Turn B: stream its own answer, then idle.
+      push(part({ type: "text", id: "tb", text: "Clean B answer." }, o.sessionID)); push(idle(o.sessionID))
+    })
+    const b = brain(() => f.handle)
+    const ctrl = new AbortController()
+    const pA = b.run("A", { tools: [], instructions: "", signal: ctrl.signal, conversationId: "C" } as any)
+    await new Promise((r) => setTimeout(r, 20))
+    ctrl.abort(); await pA
+    // While B runs, fire a trailing event for A's OLD session — must NOT reach B.
+    const eventsB: LoopEvent[] = []
+    const resB = await b.run("B", { tools: [], instructions: "", conversationId: "C", onEvent: (e: LoopEvent) => eventsB.push(e) } as any)
+    if (sidA) (pushA as Push | null)?.(part({ type: "text", id: "ta2", text: "MORE-STALE-A" }, sidA))
+    expect(resB.finalOutput).toBe("Clean B answer.")
+    expect(eventsB.every((e: any) => !String(e.text ?? "").includes("STALE"))).toBe(true)
   })
 
   test("permission.updated is auto-responded (unattended)", async () => {
