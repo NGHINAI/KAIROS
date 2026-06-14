@@ -2434,7 +2434,52 @@ async function main(): Promise<void> {
     // backbone for cross-turn replay. Shares the daemon's SQLite DB (state.db).
     const conversationMessageStore = new ConversationMessageStore(db)
 
+    // ── B4: opencode agentic brain (flag-gated, default OFF) ──────────────────
+    // KAIROS_BRAIN=opencode routes the smart/deep planner through OpenCodeBrain — a
+    // warm `opencode serve` driven via @opencode-ai/sdk that exposes KAIROS's tools
+    // (the daemon's /mcp) as FLAT function tools, so ANY OpenRouter model (minimax)
+    // can call them (the codex Responses-namespace blocker is gone; docs 17/18).
+    // Unset → the in-house defaultPlannerRunner (behavior unchanged). The conductor's
+    // onEvent/verifier/persistence wiring is identical (same PlannerRunner contract).
+    let openCodeRunPlanner: ((input: string, o: any) => Promise<any>) | undefined
+    let openCodeBrainShutdown: (() => void) | undefined
+    if (process.env.KAIROS_BRAIN === 'opencode') {
+      if (!brainKey) {
+        log('[opencode-brain] KAIROS_BRAIN=opencode but KAIROS_BRAIN_KEY unset — using the in-house loop', 'warn')
+      } else {
+        try {
+          const { createOpenCodeBrain, spawnOpenCode, buildOpenCodeConfig } = await import('./opencode/openCodeBrain')
+          const { buildDestructiveVerifier } = await import('./agents/loop/verifier')
+          const { verifyModel } = await import('./agents/types')
+          const verifyAdapter = new OpenRouterAdapter({ defaultModel: verifyModel(), disableThinking: true, usageLabel: 'verify' })
+          const ocVerifier = buildDestructiveVerifier({ llm: { complete: (b: any) => verifyAdapter.complete(b) } })
+          const ocModelID = process.env.KAIROS_BRAIN_MODEL_SMART || process.env.KAIROS_BRAIN_MODEL || 'minimax/minimax-m3'
+          const ocConfig = buildOpenCodeConfig({
+            brainKey, baseURL: 'https://openrouter.ai/api/v1',
+            modelProviderID: 'kairosbrain', modelID: ocModelID,
+            mcpServerName: 'kairos', mcpUrl: `http://127.0.0.1:${wrapApiPort}/mcp`, mcpToken: process.env.KAIROS_MCP_TOKEN!,
+          })
+          const ocBrain = createOpenCodeBrain({
+            connect: () => spawnOpenCode({ config: ocConfig, log: (m) => log(`[opencode] ${m}`) }),
+            modelProviderID: 'kairosbrain', modelID: ocModelID, mcpServerName: 'kairos',
+            baseInstructions: 'You are KAIROS, a witty, concise voice assistant.',
+            verifier: ocVerifier, log: (m) => log(`[opencode-brain] ${m}`),
+          })
+          openCodeRunPlanner = (input, o) => ocBrain.run(input, o)
+          openCodeBrainShutdown = ocBrain.shutdown
+          log(`[opencode-brain] ENABLED — smart/deep route via opencode (model=${ocModelID}, tools via /mcp)`)
+        } catch (e) {
+          log(`[opencode-brain] init failed, using the in-house loop: ${String((e as Error)?.message ?? e)}`, 'warn')
+        }
+      }
+    }
+    // Best-effort teardown of the warm opencode server when the daemon exits.
+    if (openCodeBrainShutdown) {
+      for (const sig of ['SIGTERM', 'SIGINT'] as const) process.once(sig, () => { try { openCodeBrainShutdown?.() } catch { /* */ } })
+    }
+
     const agentConductor = new Conductor({
+      runPlanner: openCodeRunPlanner as any,   // undefined → in-house defaultPlannerRunner
       classifyLlm: buildAgentLlmCompleter('fast'),
       fastLlm:     buildAgentLlmCompleter('fast'),
       smartLlm:    buildAgentLlmCompleter('smart'),
