@@ -126,6 +126,21 @@ describe("openCodeEvents — per-session accumulator", () => {
     expect(a.state().errorMessage).toContain("upstream 500")
   })
 
+  test("captures token usage from assistant message.updated, latest-per-message summed across steps (D3)", () => {
+    const { a } = acc()
+    const asst = (id: string, cost: number, input: number, output: number, reasoning: number) =>
+      ({ payload: { type: "message.updated", properties: { info: { id, sessionID: SID, role: "assistant", modelID: "minimax/minimax-m3", cost, tokens: { input, output, reasoning, cache: { read: 0, write: 0 } } } } } })
+    a.handle(asst("m1", 0.01, 100, 50, 20))      // step 1
+    a.handle(asst("m1", 0.02, 120, 80, 30))      // same msg UPDATED — latest wins, not summed with the prior
+    a.handle(asst("m2", 0.01, 40, 30, 10))       // step 2 (distinct message) — summed
+    const u = a.state().usage!
+    expect(u.tokensIn).toBe(160)                 // 120 (latest m1) + 40 (m2)
+    expect(u.tokensOut).toBe(110)                // 80 + 30
+    expect(u.reasoningTokens).toBe(40)           // 30 + 10
+    expect(u.model).toBe("minimax/minimax-m3")
+    expect(u.cost).toBeCloseTo(0.03)             // 0.02 + 0.01
+  })
+
   test("onTerminal fires once on idle (and on error) — lets the driver race terminal state", () => {
     const fired: string[] = []
     const a = createOpenCodeTurnAccumulator({ sessionID: SID, mcpServerName: "kairos", emit: () => {}, onTerminal: (s) => fired.push(s) })

@@ -23,12 +23,22 @@ export interface OpenCodeToolCall {
   error?: string
 }
 
+export interface OpenCodeTurnUsage {
+  model?: string
+  tokensIn: number
+  tokensOut: number
+  reasoningTokens: number
+  cost: number
+}
+
 export interface OpenCodeTurnState {
   finalText: string
   streamedText: string
   toolCalls: OpenCodeToolCall[]
   status?: "idle" | "error"
   errorMessage?: string
+  /** Token/cost usage for the turn (summed across assistant messages) — for metering (D3). */
+  usage?: OpenCodeTurnUsage
 }
 
 /** Strip the known MCP server prefix from an opencode tool name. opencode namespaces
@@ -72,6 +82,14 @@ export function createOpenCodeTurnAccumulator(opts: {
   // messageID → role (from message.updated). Lets us drop the USER message's echoed
   // text part — opencode streams the prompt back as a text part too (prompt-echo bug).
   const roleByMsg = new Map<string, string>()
+  // messageID → latest usage snapshot (message.updated repeats; keep the latest per msg,
+  // sum across distinct assistant messages for the turn total — D3 metering).
+  const usageByMsg = new Map<string, { tokensIn: number; tokensOut: number; reasoningTokens: number; cost: number; model?: string }>()
+  function recomputeUsage() {
+    let tokensIn = 0, tokensOut = 0, reasoningTokens = 0, cost = 0, model: string | undefined
+    for (const u of usageByMsg.values()) { tokensIn += u.tokensIn; tokensOut += u.tokensOut; reasoningTokens += u.reasoningTokens; cost += u.cost; model = u.model ?? model }
+    state.usage = { tokensIn, tokensOut, reasoningTokens, cost, model }
+  }
   // Tool parts: id → ledger entry; started set guards a single tool_call_start.
   const toolById = new Map<string, OpenCodeToolCall>()
   const started = new Set<string>()
@@ -138,7 +156,17 @@ export function createOpenCodeTurnAccumulator(opts: {
         // top-level sessionID defensively).
         const info = properties?.info
         const sid = info?.sessionID ?? properties?.sessionID
-        if (sid === opts.sessionID && info?.id) roleByMsg.set(String(info.id), String(info.role ?? ""))
+        if (sid === opts.sessionID && info?.id) {
+          roleByMsg.set(String(info.id), String(info.role ?? ""))
+          // AssistantMessage carries per-message token usage + cost — capture latest.
+          if (info.role === "assistant" && info.tokens) {
+            usageByMsg.set(String(info.id), {
+              tokensIn: Number(info.tokens.input ?? 0), tokensOut: Number(info.tokens.output ?? 0),
+              reasoningTokens: Number(info.tokens.reasoning ?? 0), cost: Number(info.cost ?? 0), model: info.modelID,
+            })
+            recomputeUsage()
+          }
+        }
         return
       }
       case "message.part.updated": {

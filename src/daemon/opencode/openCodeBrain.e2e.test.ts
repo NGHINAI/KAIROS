@@ -9,6 +9,7 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { resolve } from "node:path"
 import { createKairosMcpServer } from "../codex/mcpServer"
+import { createBrainProxy } from "../codex/brainProxy"
 import { createOpenCodeBrain, spawnOpenCode, buildOpenCodeConfig } from "./openCodeBrain"
 import type { ActionToolDeps } from "../agents/buildActionToolset"
 import type { LoopEvent } from "../agents/loop/types"
@@ -37,19 +38,28 @@ describe.skipIf(!RUN || !BRAIN_KEY)("OpenCodeBrain LIVE E2E — real opencode + 
     })
     const mcpToken = "e2e-oc-" + Math.floor(performance.now())
     const mcp = createKairosMcpServer({ deps, bearerToken: mcpToken })
+    // D4: the PRODUCTION path — opencode talks to our hidden /brain proxy with the model
+    // ALIAS "kairos-smart" (the proxy maps it to the real slug + injects the upstream key),
+    // so nothing in opencode's config/requests names OpenRouter or the real model.
+    const proxy = createBrainProxy({ upstreamKey: BRAIN_KEY, expectedBearer: BRAIN_KEY, aliasMap: { "kairos-smart": "minimax/minimax-m3" } })
     const httpd = Bun.serve({
       port: 0, idleTimeout: 0,
-      fetch: (req) => { const u = new URL(req.url); return u.pathname === "/mcp" ? mcp.handleRequest(req) : new Response("nf", { status: 404 }) },
+      fetch: (req) => {
+        const u = new URL(req.url)
+        if (u.pathname === "/mcp") return mcp.handleRequest(req)
+        if (u.pathname.startsWith("/brain/")) return proxy.handleRequest(req, u.pathname.slice("/brain".length) + u.search)
+        return new Response("nf", { status: 404 })
+      },
     })
     servers.push(httpd)
     const mcpUrl = `http://127.0.0.1:${httpd.port}/mcp`
-    console.log(`[e2e] KAIROS /mcp at ${mcpUrl}`)
+    console.log(`[e2e] KAIROS /mcp + /brain at 127.0.0.1:${httpd.port}`)
 
     const config = buildOpenCodeConfig({
       brainKey: BRAIN_KEY,
-      baseURL: "https://openrouter.ai/api/v1",
+      baseURL: `http://127.0.0.1:${httpd.port}/brain/v1`,   // hidden proxy, not OpenRouter directly
       modelProviderID: "kairosbrain",
-      modelID: "minimax/minimax-m3",
+      modelID: "kairos-smart",                               // alias → resolved by the proxy
       mcpServerName: "kairos",
       mcpUrl,
       mcpToken,
@@ -57,7 +67,7 @@ describe.skipIf(!RUN || !BRAIN_KEY)("OpenCodeBrain LIVE E2E — real opencode + 
     const brain = createOpenCodeBrain({
       connect: () => spawnOpenCode({ config, log: (m) => console.log(`[oc] ${m}`) }),
       modelProviderID: "kairosbrain",
-      modelID: "minimax/minimax-m3",
+      modelID: "kairos-smart",
       mcpServerName: "kairos",
       baseInstructions:
         "You are KAIROS. You can see the user's screen ONLY by calling the read_screen tool. " +

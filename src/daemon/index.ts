@@ -2453,9 +2453,16 @@ async function main(): Promise<void> {
           const { verifyModel } = await import('./agents/types')
           const verifyAdapter = new OpenRouterAdapter({ defaultModel: verifyModel(), disableThinking: true, usageLabel: 'verify' })
           const ocVerifier = buildDestructiveVerifier({ llm: { complete: (b: any) => verifyAdapter.complete(b) } })
-          const ocModelID = process.env.KAIROS_BRAIN_MODEL_SMART || process.env.KAIROS_BRAIN_MODEL || 'minimax/minimax-m3'
+          // D4 — route opencode through the hidden /brain proxy by DEFAULT (the shipped
+          // app never names OpenRouter/the real model: opencode sends the alias
+          // "kairos-smart", the proxy maps it to KAIROS_BRAIN_MODEL_SMART + injects the
+          // upstream key). KAIROS_BRAIN_DIRECT=1 bypasses to OpenRouter directly (debug).
+          const viaProxy = process.env.KAIROS_BRAIN_DIRECT !== '1'
+          const realModel = process.env.KAIROS_BRAIN_MODEL_SMART || process.env.KAIROS_BRAIN_MODEL || 'minimax/minimax-m3'
+          const ocModelID = viaProxy ? 'kairos-smart' : realModel
+          const ocBaseURL = viaProxy ? `http://127.0.0.1:${wrapApiPort}/brain/v1` : 'https://openrouter.ai/api/v1'
           const ocConfig = buildOpenCodeConfig({
-            brainKey, baseURL: 'https://openrouter.ai/api/v1',
+            brainKey, baseURL: ocBaseURL,
             modelProviderID: 'kairosbrain', modelID: ocModelID,
             mcpServerName: 'kairos', mcpUrl: `http://127.0.0.1:${wrapApiPort}/mcp`, mcpToken: process.env.KAIROS_MCP_TOKEN!,
           })
@@ -2464,10 +2471,14 @@ async function main(): Promise<void> {
             modelProviderID: 'kairosbrain', modelID: ocModelID, mcpServerName: 'kairos',
             baseInstructions: 'You are KAIROS, a witty, concise voice assistant.',
             verifier: ocVerifier, log: (m) => log(`[opencode-brain] ${m}`),
+            // D3: opencode bypasses OpenRouterAdapter — feed its usage into the same ledger.
+            onUsage: (u) => {
+              try { (globalThis as any).__kairosLlmUsage?.({ label: 'planner_opencode', model: u.model ?? ocModelID, tokensIn: u.tokensIn, tokensOut: u.tokensOut, estimated: false, latencyMs: u.latencyMs }) } catch { /* */ }
+            },
           })
           openCodeRunPlanner = (input, o) => ocBrain.run(input, o)
           openCodeBrainShutdown = ocBrain.shutdown
-          log(`[opencode-brain] ENABLED — smart/deep route via opencode (model=${ocModelID}, tools via /mcp)`)
+          log(`[opencode-brain] ENABLED — via=${viaProxy ? `/brain proxy (hidden → ${realModel})` : `OpenRouter direct (${realModel})`}, tools via /mcp`)
         } catch (e) {
           log(`[opencode-brain] init failed, using the in-house loop: ${String((e as Error)?.message ?? e)}`, 'warn')
         }

@@ -19,6 +19,34 @@ import { createOpenCodeTurnAccumulator, unwrapOpenCodeEvent, type OpenCodeToolCa
 import { isDestructiveCall } from "../agents/loop/verifier"
 import type { LoopEvent, LoopMsg } from "../agents/loop/types"
 
+// ── history → system (D2 cross-turn memory + D5 cacheable prefix) ──────────────
+
+/** Render durable replay history (LoopMsg[]) into a compact transcript for the per-turn
+ *  system. FRESH session per turn means opencode has no cross-turn memory of its own, so
+ *  this is KAIROS's authoritative continuity channel (D2 — "reply to that email" chaining).
+ *  Skips system messages (the live system prompt is separate); caps to the most RECENT. */
+export function renderHistoryForOpenCode(history: LoopMsg[] | undefined, maxChars = 8000): string {
+  if (!history?.length) return ""
+  const lines: string[] = []
+  for (const m of history) {
+    if (m.role === "system") continue
+    if (m.role === "user") lines.push(`User: ${m.content ?? ""}`)
+    else if (m.role === "assistant") {
+      const calls = m.tool_calls?.map((c) => c.function?.name).filter(Boolean) ?? []
+      lines.push(`Assistant: ${m.content ?? ""}${calls.length ? ` [called: ${calls.join(", ")}]` : ""}`)
+    } else if (m.role === "tool") lines.push(`Tool result: ${String(m.content ?? "").slice(0, 600)}`)
+  }
+  const text = lines.join("\n")
+  return text.length > maxChars ? text.slice(text.length - maxChars) : text
+}
+
+/** Build the per-turn system: STABLE instructions FIRST (a cacheable prefix the provider
+ *  can prompt-cache across turns — D5), then the VOLATILE recent-conversation block. */
+export function buildTurnSystem(instructions: string, history: LoopMsg[] | undefined): string {
+  const hist = renderHistoryForOpenCode(history)
+  return hist ? `${instructions}\n\n## Recent conversation (for context)\n${hist}` : instructions
+}
+
 // ── the SDK seam (injected for tests; real impl = spawnOpenCode below) ─────────
 
 export interface OpenCodeHandle {
@@ -58,6 +86,9 @@ export interface OpenCodeBrainDeps {
   /** Per-turn watchdog deadline (ms). A turn that neither completes nor goes idle by
    *  then is aborted + returns a best-effort final, so the loop can't wedge. */
   turnTimeoutMs?: number
+  /** Metering sink (D3) — opencode makes the model calls (bypassing OpenRouterAdapter),
+   *  so the brain reports each turn's token/cost usage here → the daemon's llm_call_log. */
+  onUsage?: (u: { model?: string; tokensIn: number; tokensOut: number; cost: number; latencyMs: number }) => void
 }
 
 export interface OpenCodeRunOpts {
@@ -132,6 +163,7 @@ export function createOpenCodeBrain(deps: OpenCodeBrainDeps) {
     })
     const myTurn: ActiveTurn = { sessionID, acc }
     activeTurns.add(myTurn)
+    const t0 = Date.now()
 
     // Construct the terminal + abort racers BEFORE dispatching the prompt: events can
     // arrive synchronously during prompt() (the SSE pump / tests), so resolveTerminal +
@@ -159,6 +191,8 @@ export function createOpenCodeBrain(deps: OpenCodeBrainDeps) {
     activeTurns.delete(myTurn)
     acc.close()   // a late trailing event can't mutate this finished turn
     const st = acc.state()
+    // D3 metering — report this opencode turn's token/cost spend (it bypasses OpenRouterAdapter).
+    if (st.usage && deps.onUsage) { try { deps.onUsage({ ...st.usage, latencyMs: Date.now() - t0 }) } catch { /* never break the turn */ } }
     // finalText: prefer prompt()'s returned FINAL message text (a single clean answer)
     // whenever prompt resolved, over the streamed concatenation; else the accumulator.
     const finalText = promptResult?.finalText || st.finalText
@@ -178,7 +212,10 @@ export function createOpenCodeBrain(deps: OpenCodeBrainDeps) {
       // stays warm; only the (cheap) session is new. Cross-turn memory is KAIROS-
       // authoritative (history injection is a tracked follow-up; opts.history not yet sent).
       const sessionID = await h.createSession()
-      const system = opts.instructions && opts.instructions.length ? opts.instructions : deps.baseInstructions
+      // STABLE instructions prefix + VOLATILE history block (D2 cross-turn memory via the
+      // fresh session, D5 cacheable-prefix ordering for provider-side prompt caching).
+      const baseSystem = opts.instructions && opts.instructions.length ? opts.instructions : deps.baseInstructions
+      const system = buildTurnSystem(baseSystem, opts.history)
 
       const turn = await runOneTurn(h, sessionID, input, system, opts)
       let finalOutput = turn.finalText

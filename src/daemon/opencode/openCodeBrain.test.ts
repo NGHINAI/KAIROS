@@ -5,9 +5,9 @@
 // abort + the per-turn WATCHDOG (the codex hang lesson). Events route by sessionID
 // (the codex stale-turn lesson, enforced in the accumulator).
 import { describe, expect, test } from "bun:test"
-import { createOpenCodeBrain, type OpenCodeHandle } from "./openCodeBrain"
+import { createOpenCodeBrain, renderHistoryForOpenCode, buildTurnSystem, type OpenCodeHandle } from "./openCodeBrain"
 import { setToolNature } from "../agents/loop/verifier"
-import type { LoopEvent } from "../agents/loop/types"
+import type { LoopEvent, LoopMsg } from "../agents/loop/types"
 
 // A scripted fake OpenCodeHandle. `script(promptOpts, push, sent)` pushes the turn's
 // opencode events (wrapped) via `push` then resolves (= prompt() returns). push calls
@@ -61,7 +61,46 @@ function brain(connect: () => OpenCodeHandle, extra: any = {}) {
   })
 }
 
+describe("openCodeBrain — history rendering + system construction (D2/D5)", () => {
+  test("renderHistoryForOpenCode produces a compact transcript (user/assistant/tool), skips system", () => {
+    const h: LoopMsg[] = [
+      { role: "system", content: "ignore me" },
+      { role: "user", content: "send an email to bob" },
+      { role: "assistant", content: "Done.", tool_calls: [{ id: "1", type: "function", function: { name: "GMAIL_SEND", arguments: "{}" } }] },
+      { role: "tool", tool_call_id: "1", content: "sent ok" },
+    ]
+    const out = renderHistoryForOpenCode(h)
+    expect(out).not.toContain("ignore me")            // system skipped (the live system is separate)
+    expect(out).toContain("send an email to bob")
+    expect(out).toContain("Done.")
+    expect(out).toContain("GMAIL_SEND")               // tool-call names surfaced
+    expect(out).toContain("sent ok")
+  })
+
+  test("buildTurnSystem puts the STABLE instructions prefix BEFORE the volatile history (prompt-cache friendly, D5)", () => {
+    const sys = buildTurnSystem("PERSONA-AND-DOCTRINE", [{ role: "user", content: "earlier ask" }])
+    expect(sys.startsWith("PERSONA-AND-DOCTRINE")).toBe(true)              // cacheable prefix first
+    expect(sys).toContain("earlier ask")
+    expect(sys.indexOf("PERSONA-AND-DOCTRINE")).toBeLessThan(sys.indexOf("earlier ask"))
+  })
+
+  test("buildTurnSystem with no history is just the instructions (stable bytes → cacheable)", () => {
+    expect(buildTurnSystem("PERSONA", [])).toBe("PERSONA")
+    expect(buildTurnSystem("PERSONA", undefined)).toBe("PERSONA")
+  })
+})
+
 describe("openCodeBrain — lifecycle against a fake opencode handle", () => {
+  test("opts.history is injected into the per-turn system (cross-turn memory; D2)", async () => {
+    const f = fakeHandle(normalTurn())
+    const history: LoopMsg[] = [{ role: "user", content: "send an email to bob" }, { role: "assistant", content: "Sent it." }]
+    await brain(() => f.handle).run("reply to that", { tools: [], instructions: "BASEINSTR", history })
+    const sys: string = f.sent.prompts[0].system
+    expect(sys).toContain("BASEINSTR")
+    expect(sys).toContain("send an email to bob")
+    expect(sys.indexOf("BASEINSTR")).toBeLessThan(sys.indexOf("send an email to bob"))  // stable prefix first
+  })
+
   test("run() creates a session, prompts (model+system+text), returns the final answer + streams events", async () => {
     const f = fakeHandle(normalTurn("All set."))
     const events: LoopEvent[] = []
@@ -138,6 +177,19 @@ describe("openCodeBrain — lifecycle against a fake opencode handle", () => {
     if (sidA) (pushA as Push | null)?.(part({ type: "text", id: "ta2", text: "MORE-STALE-A" }, sidA))
     expect(resB.finalOutput).toBe("Clean B answer.")
     expect(eventsB.every((e: any) => !String(e.text ?? "").includes("STALE"))).toBe(true)
+  })
+
+  test("reports token usage via onUsage post-turn (D3 metering)", async () => {
+    const f = fakeHandle((o: any, push: Push) => {
+      const sid = o.sessionID
+      push({ payload: { type: "message.updated", properties: { info: { id: "m1", sessionID: sid, role: "assistant", modelID: "minimax/minimax-m3", cost: 0.005, tokens: { input: 200, output: 90, reasoning: 15, cache: { read: 0, write: 0 } } } } } })
+      push(part({ type: "text", id: "t1", text: "Hi." }, sid)); push(idle(sid))
+    })
+    const usages: any[] = []
+    await brain(() => f.handle, { onUsage: (u: any) => usages.push(u) }).run("x", { tools: [], instructions: "" })
+    expect(usages).toHaveLength(1)
+    expect(usages[0]).toMatchObject({ tokensIn: 200, tokensOut: 90, model: "minimax/minimax-m3" })
+    expect(typeof usages[0].latencyMs).toBe("number")
   })
 
   test("permission.updated is auto-responded (unattended)", async () => {
