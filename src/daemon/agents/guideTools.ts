@@ -39,11 +39,12 @@ const ACT_PROTOCOL =
 
 /** The walkthrough contract, repeated on every guide tool so the model can't miss it. */
 const WALKTHROUGH_PROTOCOL =
-  "WALKTHROUGH LOOP (for 'teach me / walk me through X'): (1) read_screen to see what's REALLY there — never guess section names; " +
-  "(2) guide_user the first element and SPEAK that one step; (3) wait_for_screen for what appears AFTER the user does it; " +
-  "(4) when it appears, speak the next step and repeat. If the wait times out, end your turn with ONE gentle check-in line — " +
-  "the highlight STAYS on screen and the lesson AUTO-RESUMES the moment the user acts, so never nag and never abandon the goal. " +
-  "When the goal is fully achieved, call end_lesson and wrap up warmly."
+  "WALKTHROUGH (for 'teach me / walk me through X') — VOICE-PACED, one step per turn, like a patient teacher: " +
+  "(1) read_screen to see what's REALLY there — never guess section names. " +
+  "(2) guide_user the element for the CURRENT step, then speak ONE short instruction that ENDS by asking the user to tell you when they're ready — e.g. \"Click Sound, then say 'continue' (or 'I'm ready') and I'll show you the next step.\" " +
+  "(3) STOP — end your turn now. Do NOT call wait_for_screen, do NOT narrate what you're doing, do NOT guess or jump to the next step. WAIT for the user. " +
+  "(4) When the user says continue / I'm ready / next / okay / go ahead, read_screen again and guide the NEXT step the same way (point, one short instruction, ask them to say continue, stop). " +
+  "When the goal is fully done, call end_lesson and wrap up warmly. NEVER advance on your own or rush them — the user paces every step by voice."
 
 export function buildGuideTools(deps: GuideToolsDeps): ToolDef[] {
   // Unchanged-screen detector for read_screen (see the short-circuit below).
@@ -112,8 +113,9 @@ export function buildGuideTools(deps: GuideToolsDeps): ToolDef[] {
         "THEN choose by what the user ASKED:\n" +
         `• LOCATE ("where is…", "show me…", "find…"): pointing at "${label}" IS the answer — say it's right there and END the turn. ` +
         "Do NOT call wait_for_screen, do NOT read_screen again, do NOT invent a next step. The single point completes a locate.\n" +
-        "• WALKTHROUGH (\"how do I…\", \"walk me through…\", a multi-step task): call wait_for_screen with what should APPEAR after they act, then guide the next step. " +
-        "Only wait for a step the user actually needs — never an invented one. When the goal is reached, call end_lesson."
+        `• WALKTHROUGH ("how do I…", "walk me through…", multi-step): give ONE short instruction that ENDS by asking them to say when ready ` +
+        `(\"click ${label}, then say 'continue' or 'I'm ready' and I'll show you the next step\"), then END your turn. ` +
+        "Do NOT call wait_for_screen and do NOT guess the next step — the user paces it BY VOICE. When they say continue, read_screen and guide the next step. Call end_lesson when the goal's done."
       )
     },
   }
@@ -153,10 +155,10 @@ export function buildGuideTools(deps: GuideToolsDeps): ToolDef[] {
         return "The on-screen arrow isn't available right now (HUD not running) — tell the user verbally to scroll " + direction + ", then call read_screen again."
       }
       return (
-        `Showing a "scroll ${direction}" arrow now. In THIS SAME response: say ONE short line telling the user to scroll ${direction} ` +
-        `("scroll ${direction} a little — I'll point it out the moment it's visible"), then call wait_for_screen with the TARGET's label as \`until\`. ` +
-        "wait_for_screen returns the MOMENT the user scrolls the target into view — only THEN call read_screen once and guide_user at the target's NUMBER. " +
-        "Do NOT call read_screen or guide_scroll again right now: the screen will NOT change until the user actually scrolls, and re-checking immediately just loops you back here. Wait for them."
+        `Showing a "scroll ${direction}" arrow now. Say ONE short line asking the user to scroll AND to tell you when ready — ` +
+        `e.g. "scroll ${direction} a little, then say 'continue' (or 'I'm ready') and I'll point it out." Then END your turn and WAIT. ` +
+        "Do NOT call read_screen or guide_scroll again now — the screen won't change until the user scrolls, and re-checking immediately just loops. " +
+        "When the user says continue / I'm ready, read_screen again; once the target is no longer off-screen, guide_user at its NUMBER."
       )
     },
   }
@@ -483,7 +485,14 @@ export function buildGuideTools(deps: GuideToolsDeps): ToolDef[] {
     },
   }
 
-  const tools = [guideUser, readScreen, waitForScreen]
+  const tools = [guideUser, readScreen]
+  // VOICE-PACED by default (HeyClicky model): OMIT wait_for_screen so a walkthrough can't
+  // BLOCK the turn auto-detecting a screen change — the brain must instead end the turn and
+  // ask the user to say "continue"/"I'm ready", then resume on their word. (Leaving the tool
+  // in tempted the model to busy-wait + overshoot within one turn.) The between-turns
+  // armAutoContinue still advances on action as a bonus (it uses a different bridge method).
+  // Opt back into the old in-turn auto-advance with KAIROS_GUIDE_AUTO_ADVANCE=1.
+  if (process.env.KAIROS_GUIDE_AUTO_ADVANCE === "1") tools.push(waitForScreen)
   if (deps.bridge.requestScroll) tools.push(guideScroll)
   if (deps.openApp) tools.push(openApp)
   if (deps.lesson) tools.push(endLesson)

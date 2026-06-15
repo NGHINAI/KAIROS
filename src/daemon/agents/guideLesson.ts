@@ -185,11 +185,11 @@ export class GuideLessonManager {
         : ""
       const note = l.stepNote ? `The step you gave them: "${l.stepNote}". ` : ""
       return (
-        `## Active walkthrough (resume it — do NOT start over, do NOT answer from memory)\n` +
+        `## Active walkthrough (VOICE-PACED — resume it; do NOT start over or answer from memory)\n` +
         `Goal: ${l.goal}. ${pointed}${note}` +
-        `Call read_screen to see where the user is NOW, then speak the NEXT step and point at its element ` +
-        `(if they ask to see the last one again, guide_user it again). ` +
-        `When the goal is complete, say so warmly and call end_lesson.`
+        `The user just told you they're ready for the next step (e.g. "continue" / "I'm ready" / "okay"). ` +
+        `Call read_screen to see where they are NOW, then point at the NEXT step's element and give ONE short instruction that ENDS by asking them to say "continue" / "I'm ready" when done — then STOP and wait for them. ` +
+        `(If they ask to see the last one again, guide_user it again.) When the goal is complete, say so warmly and call end_lesson.`
       )
     }
     if (this.standalone && Date.now() - this.standalone.at < 5 * 60_000) {

@@ -3,6 +3,21 @@ import { test, expect } from "bun:test"
 import { GuideBridge } from "./guideBridge"
 import { buildGuideTools } from "./guideTools"
 
+// wait_for_screen is now OPT-IN (voice-paced is the default). Enable it for the
+// behavior tests below; a dedicated test verifies the voice-paced default separately.
+process.env.KAIROS_GUIDE_AUTO_ADVANCE = "1"
+
+test("wait_for_screen is OFF by default (voice-paced walkthroughs ask the user to say 'continue')", () => {
+  const prev = process.env.KAIROS_GUIDE_AUTO_ADVANCE
+  delete process.env.KAIROS_GUIDE_AUTO_ADVANCE
+  try {
+    const names = buildGuideTools({ bridge: { request: async () => null, requestWatch: async () => ({ found: true }) } as any }).map((t) => t.name)
+    expect(names).not.toContain("wait_for_screen")   // no in-turn blocking; the user paces by voice
+    expect(names).toContain("guide_user")
+    expect(names).toContain("read_screen")
+  } finally { if (prev !== undefined) process.env.KAIROS_GUIDE_AUTO_ADVANCE = prev }
+})
+
 function bridgeWith(timeoutMs = 200) {
   const sent: any[] = []
   const bridge = new GuideBridge({ broadcast: (e) => sent.push(e), timeoutMs })
@@ -311,6 +326,8 @@ test("open_app surfaces launch failures with the app name", async () => {
 })
 
 test("open_app is absent when no launcher is wired (HUD-less environments)", () => {
-  const tools = buildGuideTools({ bridge: { request: async () => null } })
-  expect(tools.map((t) => t.name)).toEqual(["guide_user", "read_screen", "wait_for_screen"])
+  const names = buildGuideTools({ bridge: { request: async () => null } }).map((t) => t.name)
+  expect(names).not.toContain("open_app")
+  expect(names).toContain("guide_user")
+  expect(names).toContain("read_screen")
 })
