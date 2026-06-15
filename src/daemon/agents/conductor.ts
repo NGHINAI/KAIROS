@@ -287,8 +287,11 @@ export class Conductor {
       await this.speakInterim(ackOnly(say) ?? nextTaskAck(), signal)
       const smartCtx = await this.deps.contextBuilder.build({ utterance, tier: "smart", conversationId })
       if (signal?.aborted) { emit({ kind: "agent_interrupted" }); return }
-      // Conservative: a tool/action turn starts at LOW effort; the brain escalates if it fails.
-      await this.handleSmart(opts, smartCtx, emit, "low")
+      // GUIDANCE NEEDS ACCURACY: a teach/guide/point walkthrough (or an active lesson) reasons
+      // at MEDIUM — at LOW, minimax fumbled the target (pointed at the wrong button, scrolled the
+      // wrong pane). A plain do/tool turn stays LOW (fast); the brain still escalates on failure.
+      const teaching = TEACH_ASK_RE.test(utterance) || GUIDE_RE.test(utterance) || !!opts.lessonContext
+      await this.handleSmart(opts, smartCtx, emit, teaching ? "medium" : "low")
       return
     }
 

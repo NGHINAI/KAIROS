@@ -11,6 +11,15 @@ test("a dangling/unclosed think tag is dropped", () => {
   expect(sanitizeSpoken("ok <think>still thinking with no close")).toBe("ok")
 })
 
+test("strips internal-process leaks (step-limit sentence + meta labels), keeps real guidance", () => {
+  const leak = "I've hit my step limit for this turn. Quick summary: What I did: Read your screen. Click the Settings button."
+  const out = sanitizeSpoken(leak)
+  expect(out.toLowerCase()).not.toContain("step limit")
+  expect(out.toLowerCase()).not.toContain("quick summary")
+  expect(out.toLowerCase()).not.toContain("what i did")
+  expect(out).toContain("Click the Settings button.")   // the real instruction survives
+})
+
 test("tool-markup-as-text NEVER spoken — replaced with a recovery line", () => {
   expect(sanitizeSpoken("<tool_call>{...}")).toMatch(/snag|try again/i)
   expect(sanitizeSpoken("functions.gmail_send{")).toMatch(/snag|try again/i)

@@ -404,7 +404,12 @@ export function buildOpenCodeConfig(o: {
     // this bounds the common case). Tunable via maxSteps. ALSO disable the built-ins at
     // the AGENT level (the "build" agent runs turns) — a top-level disable alone was not
     // honored for some tools (e.g. webfetch reappeared), so we set both.
-    agent: { build: { maxSteps: o.maxSteps ?? 6, tools: DISABLED_OPENCODE_BUILTINS } },
+    // maxSteps is a CEILING, not a target — normal turns stop when done in 2-4 steps, so a
+    // higher cap doesn't slow them. But a GUIDED WALKTHROUGH is read→point→wait→read→point→…
+    // (3+ steps PER user-step), so the old cap of 6 hit "I've hit my step limit" after ~2 steps
+    // and bailed mid-lesson (with a leaky internal summary). 20 lets a real walkthrough finish;
+    // the per-turn watchdog still bounds wall-clock. Tunable via KAIROS_BRAIN_MAX_STEPS.
+    agent: { build: { maxSteps: o.maxSteps ?? 20, tools: DISABLED_OPENCODE_BUILTINS } },
     permission: { edit: "allow", bash: "allow", webfetch: "allow" },
   }
 }

@@ -48,6 +48,11 @@ function stripSpeakableMarkdown(s: string): string {
 // ── Internal implementation names that must NEVER be voiced ──────────────────────
 // The user hears in their OWN terms (Gmail, Calendar) — never our plumbing.
 const INTERNAL_TERMS_RE = /\b(?:composio|mcp(?: server)?)\b/gi   // Composio / MCP → neutral
+// Internal-process leaks the user must never hear (these surfaced when the brain hit its
+// step cap mid-walkthrough and narrated its mechanics): the step-limit sentence + meta
+// labels. Strip the leak, keep any real guidance that follows.
+const PROCESS_LEAK_RE = /\bI'?ve\s+(?:hit|reached)\s+(?:my|the)\s+(?:step|turn|iteration|tool)\s+limit\b[^.!?]*[.!?]\s*/gi
+const PROCESS_LABEL_RE = /\b(?:quick summary|what I did|here'?s what I did)\s*:\s*/gi
 // A raw tool slug leaked into prose, e.g. "GMAIL_SEND_EMAIL" or "GOOGLECALENDAR_CREATE_EVENT".
 const TOOL_SLUG_RE = /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/g
 // Machine identifiers TTS would spell out character-by-character ("two two five d c d…").
@@ -61,6 +66,8 @@ const ORPHAN_ID_PHRASE_RE = /\b(?:with|whose|its|the)?\s*id(?:entifier)?\s*(?:is
 /** Replace internal infra names + raw tool slugs + machine ids with human words. */
 function scrubInternal(s: string): string {
   return s
+    .replace(PROCESS_LEAK_RE, "")                                       // "I've hit my step limit…" → gone
+    .replace(PROCESS_LABEL_RE, "")                                      // "Quick summary:" / "What I did:" → gone
     .replace(TOOL_SLUG_RE, (m) => m.toLowerCase().replace(/_/g, " "))   // GMAIL_SEND_EMAIL → "gmail send email"
     .replace(INTERNAL_TERMS_RE, "the integration")
     .replace(UUID_RE, "")

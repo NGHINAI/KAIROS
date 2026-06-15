@@ -2540,6 +2540,9 @@ async function main(): Promise<void> {
             brainKey, baseURL: ocBaseURL,
             modelProviderID: 'kairosbrain', modelID: ocModelID,
             mcpServerName: 'kairos', mcpUrl: `http://127.0.0.1:${wrapApiPort}/mcp`, mcpToken: process.env.KAIROS_MCP_TOKEN!,
+            // Step ceiling: high enough for a multi-step guided walkthrough to finish in one
+            // turn (read→point→wait per step). Tunable; the watchdog still bounds wall-clock.
+            maxSteps: Number(process.env.KAIROS_BRAIN_MAX_STEPS) || 20,
           })
           const ocBrain = createOpenCodeBrain({
             connect: () => spawnOpenCode({ config: ocConfig, log: (m) => log(`[opencode] ${m}`) }),

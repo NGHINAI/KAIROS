@@ -69,7 +69,7 @@ describe("openCodeBrain — buildOpenCodeConfig (latency: disable dev built-ins 
       expect(cfg.tools[t]).toBe(false)            // top-level disable
       expect(cfg.agent.build.tools[t]).toBe(false) // AND agent-level (the build agent runs turns)
     }
-    expect(cfg.agent.build.maxSteps).toBe(6)
+    expect(cfg.agent.build.maxSteps).toBe(20)   // headroom for multi-step guided walkthroughs
     expect(cfg.mcp.kairos.type).toBe("remote")     // our tools still come via /mcp
     const cfg2 = buildOpenCodeConfig({ brainKey: "k", baseURL: "u", modelProviderID: "p", modelID: "m", mcpServerName: "kairos", mcpUrl: "http://x/mcp", mcpToken: "t", maxSteps: 3 })
     expect(cfg2.agent.build.maxSteps).toBe(3)
