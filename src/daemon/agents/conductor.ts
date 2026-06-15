@@ -220,9 +220,9 @@ export class Conductor {
       if (!opts.synthetic) await this.speakInterim(nextTaskAck(), signal)
       const smartCtx = await this.deps.contextBuilder.build({ utterance, tier: "smart", conversationId })
       if (signal?.aborted) { emit({ kind: "agent_interrupted" }); return }
-      // Lessons are multi-step look→point→speak→wait protocols — give the brain MEDIUM
-      // effort (guidance quality is model-bound), still conservative + escalatable.
-      await this.handleSmart(opts, smartCtx, emit, "medium")
+      // LOW effort — lessons need SPEED between steps, and gemini-2.5-flash matches elements
+      // accurately without a big thinking budget (MEDIUM cost ~36s/step for no gain).
+      await this.handleSmart(opts, smartCtx, emit, "low")
       return
     }
 
@@ -287,11 +287,11 @@ export class Conductor {
       await this.speakInterim(ackOnly(say) ?? nextTaskAck(), signal)
       const smartCtx = await this.deps.contextBuilder.build({ utterance, tier: "smart", conversationId })
       if (signal?.aborted) { emit({ kind: "agent_interrupted" }); return }
-      // GUIDANCE NEEDS ACCURACY: a teach/guide/point walkthrough (or an active lesson) reasons
-      // at MEDIUM — at LOW, minimax fumbled the target (pointed at the wrong button, scrolled the
-      // wrong pane). A plain do/tool turn stays LOW (fast); the brain still escalates on failure.
-      const teaching = TEACH_ASK_RE.test(utterance) || GUIDE_RE.test(utterance) || !!opts.lessonContext
-      await this.handleSmart(opts, smartCtx, emit, teaching ? "medium" : "low")
+      // LOW effort — fast. Accuracy comes from the capable brain MODEL (gemini-2.5-flash),
+      // NOT from a big thinking budget: at MEDIUM, gemini spent ~36s/step THINKING about a
+      // trivial "pick the row labeled Sound" — all latency, no benefit. Element-matching +
+      // light step-sequencing don't need deep reasoning; the brain still escalates on failure.
+      await this.handleSmart(opts, smartCtx, emit, "low")
       return
     }
 

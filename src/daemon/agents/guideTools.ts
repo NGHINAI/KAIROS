@@ -108,10 +108,12 @@ export function buildGuideTools(deps: GuideToolsDeps): ToolDef[] {
       // persist until the user speaks or acts. (No-op when the manager isn't wired.)
       try { deps.lesson?.notePoint({ label, find: find || undefined, element, app }) } catch { /* */ }
       return (
-        `Pointing at "${label}" now — the user can see the highlight (it STAYS on screen until they act). ` +
-        `In THIS SAME response: say one short line naming it ("I'm highlighting ${label} — click that") ` +
-        "AND call wait_for_screen with what should APPEAR once they've done it. " +
-        "Speaking without the wait_for_screen call strands the user mid-walkthrough."
+        `Pointing at "${label}" now — the user sees the highlight (it STAYS on screen until they act). Say ONE short line naming it. ` +
+        "THEN choose by what the user ASKED:\n" +
+        `• LOCATE ("where is…", "show me…", "find…"): pointing at "${label}" IS the answer — say it's right there and END the turn. ` +
+        "Do NOT call wait_for_screen, do NOT read_screen again, do NOT invent a next step. The single point completes a locate.\n" +
+        "• WALKTHROUGH (\"how do I…\", \"walk me through…\", a multi-step task): call wait_for_screen with what should APPEAR after they act, then guide the next step. " +
+        "Only wait for a step the user actually needs — never an invented one. When the goal is reached, call end_lesson."
       )
     },
   }
@@ -151,9 +153,10 @@ export function buildGuideTools(deps: GuideToolsDeps): ToolDef[] {
         return "The on-screen arrow isn't available right now (HUD not running) — tell the user verbally to scroll " + direction + ", then call read_screen again."
       }
       return (
-        `Showing a "scroll ${direction}" arrow now. In THIS SAME response: say one short line telling the user to scroll ${direction} ` +
-        `("scroll ${direction} a little — I'll point it out the moment it's visible"). ` +
-        "Then call read_screen AGAIN to re-check; when the target is no longer marked off-screen, guide_user at its NUMBER."
+        `Showing a "scroll ${direction}" arrow now. In THIS SAME response: say ONE short line telling the user to scroll ${direction} ` +
+        `("scroll ${direction} a little — I'll point it out the moment it's visible"), then call wait_for_screen with the TARGET's label as \`until\`. ` +
+        "wait_for_screen returns the MOMENT the user scrolls the target into view — only THEN call read_screen once and guide_user at the target's NUMBER. " +
+        "Do NOT call read_screen or guide_scroll again right now: the screen will NOT change until the user actually scrolls, and re-checking immediately just loops you back here. Wait for them."
       )
     },
   }

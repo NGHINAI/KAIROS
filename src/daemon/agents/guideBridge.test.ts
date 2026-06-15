@@ -105,13 +105,15 @@ test("endIfActive broadcasts guide_end once and flushes outstanding requests", a
 
 // ── guide_user tool ──
 
-test("guide_user reports success with the resolved label and prompts the next step", async () => {
+test("guide_user reports success + distinguishes LOCATE (point+stop) from WALKTHROUGH (wait+continue)", async () => {
   const [tool] = buildGuideTools({ bridge: { request: async () => ({ found: true, label: "Export…" }) } })
   expect(tool!.name).toBe("guide_user")
   const out = await tool!.execute({ find: "the Export button" })
   expect(out).toContain('Pointing at "Export…"')
-  expect(out).toContain("say one short line")     // voice-sync contract: name what's highlighted
-  expect(out).toContain("wait_for_screen")        // the loop: watch for the click's effect
+  expect(out).toContain("ONE short line")          // voice-sync contract: name what's highlighted
+  expect(out).toContain("LOCATE")                  // "where is X" → point IS the answer, END
+  expect(out).toContain("END the turn")
+  expect(out).toContain("wait_for_screen")         // WALKTHROUGH branch: watch for the next step
 })
 
 test("guide_user teaches recovery when the element isn't found", async () => {
