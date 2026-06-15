@@ -76,6 +76,87 @@ describe("openCodeBrain — buildOpenCodeConfig (latency: disable dev built-ins 
   })
 })
 
+describe("openCodeBrain — DYNAMIC per-turn reasoning effort + escalate-retry", () => {
+  const { effortModelID } = require("./openCodeBrain")
+
+  test("effortModelID maps effort→kairos-<effort> only for proxy aliases (direct model untouched)", () => {
+    expect(effortModelID("kairos-smart", "medium")).toBe("kairos-medium")
+    expect(effortModelID("kairos-smart", "high")).toBe("kairos-high")
+    expect(effortModelID("kairos-smart", undefined)).toBe("kairos-smart")  // no effort → base
+    expect(effortModelID("minimax/minimax-m3", "high")).toBe("minimax/minimax-m3") // direct → untouched
+  })
+
+  test("run({effort}) sends the per-turn effort alias as the model", async () => {
+    const f = fakeHandle(normalTurn())
+    await brain(() => f.handle, { modelID: "kairos-smart" }).run("dark mode", { tools: [], instructions: "", effort: "medium" } as any)
+    expect(f.sent.prompts[0].model.modelID).toBe("kairos-medium")
+  })
+
+  test("no effort → the base alias (env-default lane) is used", async () => {
+    const f = fakeHandle(normalTurn())
+    await brain(() => f.handle, { modelID: "kairos-smart" }).run("hi", { tools: [], instructions: "" } as any)
+    expect(f.sent.prompts[0].model.modelID).toBe("kairos-smart")
+  })
+
+  test("verifier flag → the corrective retry ESCALATES to kairos-high", async () => {
+    const flagging = { verify: async () => ({ ok: false, retryable: true, concern: "re-check" }) }
+    const f = fakeHandle(normalTurn())
+    await brain(() => f.handle, { modelID: "kairos-smart", verifier: flagging }).run("x", { tools: [], instructions: "", effort: "low" } as any)
+    expect(f.sent.prompts[0].model.modelID).toBe("kairos-low")   // first attempt at the chosen (low) effort
+    expect(f.sent.prompts[1].model.modelID).toBe("kairos-high")  // correction escalates
+  })
+
+  test("a FAILED low/medium turn auto-retries once at high effort (the 'try again on high' path)", async () => {
+    // First prompt errors; the brain should re-attempt the SAME input at kairos-high.
+    const f = fakeHandle((o: any, push: Push, sent: any) => {
+      if (sent.prompts.length === 1) { push(sessionErr(o.sessionID)) }      // attempt 1 fails
+      else { normalTurn("Recovered.")(o, push) }                            // attempt 2 (high) succeeds
+    })
+    const res = await brain(() => f.handle, { modelID: "kairos-smart" }).run("hard one", { tools: [], instructions: "", effort: "low" } as any)
+    expect(f.sent.prompts.length).toBe(2)
+    expect(f.sent.prompts[1].model.modelID).toBe("kairos-high")
+    expect(res.finalOutput).toContain("Recovered.")
+  })
+
+  test("escalation uses the HIGH attempt's ledger as authoritative (no abandoned failed-attempt calls)", async () => {
+    // Attempt 1 errors after a FAILED tool; attempt 2 (high) succeeds with a different tool.
+    const f = fakeHandle((o: any, push: Push, sent: any) => {
+      const sid = o.sessionID
+      if (sent.prompts.length === 1) {
+        push(part({ type: "tool", id: "x", tool: "kairos_read_screen", state: { status: "error", input: {}, error: "boom" } }, sid))
+        push(sessionErr(sid))
+      } else {
+        push(part({ type: "tool", id: "y", tool: "kairos_web_search", state: { status: "completed", input: {}, output: "ok" } }, sid))
+        push(part({ type: "text", id: "t", text: "Recovered." }, sid))
+        push(idle(sid))
+      }
+    })
+    const res = await brain(() => f.handle, { modelID: "kairos-smart" }).run("x", { tools: [], instructions: "", effort: "low" } as any)
+    const names = res.toolCalls.map((c) => c.name)
+    expect(names).toContain("web_search")        // the authoritative high-attempt tool
+    expect(names).not.toContain("read_screen")   // the abandoned failed-attempt tool is NOT in the ledger
+  })
+
+  test("escalation is SKIPPED if the failed attempt already completed a destructive action (no double-do)", async () => {
+    const f = fakeHandle((o: any, push: Push) => {
+      const sid = o.sessionID
+      push(part({ type: "tool", id: "c", tool: "connect_service", state: { status: "completed", input: {}, output: "connected" } }, sid))
+      push(sessionErr(sid))   // errored AFTER the destructive action succeeded
+    })
+    await brain(() => f.handle, { modelID: "kairos-smart" }).run("connect linear", { tools: [], instructions: "", effort: "low" } as any)
+    expect(f.sent.prompts.length).toBe(1)        // did NOT escalate (would risk a duplicate connect)
+  })
+
+  test("buildOpenCodeConfig declares the effort-alias models (so opencode accepts them per turn)", () => {
+    const { buildOpenCodeConfig } = require("./openCodeBrain")
+    const cfg = buildOpenCodeConfig({ brainKey: "k", baseURL: "u", modelProviderID: "kairosbrain", modelID: "kairos-smart", mcpServerName: "kairos", mcpUrl: "http://x/mcp", mcpToken: "t" })
+    const models = cfg.provider.kairosbrain.models
+    for (const m of ["kairos-smart", "kairos-low", "kairos-medium", "kairos-high"]) {
+      expect(models[m]?.tool_call).toBe(true)
+    }
+  })
+})
+
 describe("openCodeBrain — history rendering + system construction (D2/D5)", () => {
   test("renderHistoryForOpenCode produces a compact transcript (user/assistant/tool), skips system", () => {
     const h: LoopMsg[] = [

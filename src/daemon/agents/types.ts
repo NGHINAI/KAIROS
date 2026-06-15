@@ -27,6 +27,9 @@ export interface IntentDecision {
   tier: Tier
   reason: string         // why this tier
   confidence: number     // 0..1
+  /** Conservative per-task reasoning effort for the smart/deep brain (low default;
+   *  the brain auto-escalates on failure). Maps to a per-turn proxy reasoning budget. */
+  effort?: "low" | "medium" | "high"
 }
 
 export interface ToolDef {

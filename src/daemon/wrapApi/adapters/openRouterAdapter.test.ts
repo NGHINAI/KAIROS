@@ -34,6 +34,28 @@ test('stream() emits tool_use event when LLM returns tool_calls', async () => {
   expect(toolUse.args_json).toBe('{"loc":"NYC"}')
 })
 
+test('reasoningEffort → reasoning:{exclude,effort} when thinking is ON (per-task effort budget)', async () => {
+  let sentBody: any = null
+  const mockFetch = async (_url: string, init: any): Promise<Response> => {
+    sentBody = JSON.parse(String(init.body))
+    return new Response(`data: [DONE]\n`, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+  }
+  const adapter = new OpenRouterAdapter({ apiKey: 'sk-test', defaultModel: 'x', reasoningEffort: 'high', fetchImpl: mockFetch as any })
+  for await (const _ of adapter.stream({ messages: [{ role: 'user', content: 'hi' }] })) { /* drain */ }
+  expect(sentBody.reasoning).toEqual({ exclude: true, effort: 'high' })  // think at the chosen effort, CoT hidden
+})
+
+test('reasoningEffort is ignored when disableThinking wins (thinking OFF)', async () => {
+  let sentBody: any = null
+  const mockFetch = async (_url: string, init: any): Promise<Response> => {
+    sentBody = JSON.parse(String(init.body))
+    return new Response(`data: [DONE]\n`, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+  }
+  const adapter = new OpenRouterAdapter({ apiKey: 'sk-test', defaultModel: 'x', disableThinking: true, reasoningEffort: 'high', fetchImpl: mockFetch as any })
+  for await (const _ of adapter.stream({ messages: [{ role: 'user', content: 'hi' }] })) { /* drain */ }
+  expect(sentBody.reasoning).toEqual({ exclude: true, max_tokens: 0 })   // OFF takes precedence
+})
+
 test('stream() strips inline <think> reasoning from spoken content (tag split across chunks)', async () => {
   const sse = [
     `data: {"choices":[{"delta":{"content":"Hello. <thi"}}]}\n`,

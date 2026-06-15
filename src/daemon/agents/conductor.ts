@@ -33,6 +33,10 @@ export interface PlannerRunner {
      *  before the user turn so the model can chain off what it already did (e.g. a
      *  gmail threadId from an earlier send). Empty/omitted = no replay. */
     history?: LoopMsg[]
+    /** DYNAMIC per-task reasoning effort chosen by the router. The brain maps it to a
+     *  per-turn proxy alias (kairos-<effort>) → reasoning budget, and auto-escalates to
+     *  high on failure. Omitted = the brain's env-default lane. */
+    effort?: "low" | "medium" | "high"
   }): Promise<{
     finalOutput: string
     /** The model's raw final answer that was STREAMED live (pre-verify-gate).
@@ -188,8 +192,8 @@ export class Conductor {
       await this.handleFast(utterance, ctx, emit, signal, conversationId)
     } else {
       // smart / vision / deep all need tools → the planner.
-      console.log(`[conductor] -> handleSmart (${decision.tier})`)
-      await this.handleSmart(opts, ctx, emit)
+      console.log(`[conductor] -> handleSmart (${decision.tier}, effort=${decision.effort ?? "low"})`)
+      await this.handleSmart(opts, ctx, emit, decision.effort)
     }
   }
 
@@ -216,7 +220,9 @@ export class Conductor {
       if (!opts.synthetic) await this.speakInterim(nextTaskAck(), signal)
       const smartCtx = await this.deps.contextBuilder.build({ utterance, tier: "smart", conversationId })
       if (signal?.aborted) { emit({ kind: "agent_interrupted" }); return }
-      await this.handleSmart(opts, smartCtx, emit)
+      // Lessons are multi-step look→point→speak→wait protocols — give the brain MEDIUM
+      // effort (guidance quality is model-bound), still conservative + escalatable.
+      await this.handleSmart(opts, smartCtx, emit, "medium")
       return
     }
 
@@ -281,7 +287,8 @@ export class Conductor {
       await this.speakInterim(ackOnly(say) ?? nextTaskAck(), signal)
       const smartCtx = await this.deps.contextBuilder.build({ utterance, tier: "smart", conversationId })
       if (signal?.aborted) { emit({ kind: "agent_interrupted" }); return }
-      await this.handleSmart(opts, smartCtx, emit)
+      // Conservative: a tool/action turn starts at LOW effort; the brain escalates if it fails.
+      await this.handleSmart(opts, smartCtx, emit, "low")
       return
     }
 
@@ -291,8 +298,9 @@ export class Conductor {
       if (signal?.aborted) { emit({ kind: "agent_interrupted" }); return }
       if (!this.deps.thinkLlm) {
         // No dedicated thinking model wired → the planner is the next-best reasoner.
+        // The fast-front judged this HARD reasoning, so the brain runs at HIGH effort.
         await this.speakInterim(ackOnly(say), signal)
-        await this.handleSmart(opts, smartCtx, emit)
+        await this.handleSmart(opts, smartCtx, emit, "high")
         return
       }
       // smartCtx carries the TOOLS (spawn_background_task for the timeout conversion /
@@ -511,8 +519,9 @@ export class Conductor {
       emit({ kind: "agent_done", text: line })
       if (this.deps.speakBackend && !signal?.aborted) { try { await this.deps.speakBackend.speak(line) } catch { /* */ } }
     } else {
-      // No background lane available → planner is the last resort.
-      await this.handleSmart(opts, ctx, emit)
+      // No background lane available → planner is the last resort. This was a HARD
+      // reasoning turn that already exceeded the think budget, so retry at HIGH effort.
+      await this.handleSmart(opts, ctx, emit, "high")
     }
   }
 
@@ -575,6 +584,10 @@ export class Conductor {
     opts: ConductorOpts,
     ctx: { system: string; tools: ToolDef[] },
     emit: AgentEventHandler,
+    // DYNAMIC per-task reasoning effort, decided by the router (classifier/fast-front)
+    // and handed to the brain. Conservative: omitted/low for routine turns, high only
+    // when the task clearly needs deep reasoning. The brain auto-escalates on failure.
+    effort?: "low" | "medium" | "high",
   ): Promise<void> {
     emit({ kind: "agent_planning", tier: "smart" })
 
@@ -670,6 +683,7 @@ export class Conductor {
       signal: opts.signal,
       onEvent,
       history,
+      effort,
     })
 
     try { opts.signal?.removeEventListener?.("abort", onAbort) } catch { /* */ }
@@ -947,7 +961,7 @@ function ackOnly(say: string | undefined): string | undefined {
  *  so handleSmart and the conductor tests are unaffected. */
 async function defaultPlannerRunner(
   input: string,
-  opts: { tools: ToolDef[]; instructions: string; signal?: AbortSignal; onEvent?: (e: LoopEvent) => void; history?: LoopMsg[] },
+  opts: { tools: ToolDef[]; instructions: string; signal?: AbortSignal; onEvent?: (e: LoopEvent) => void; history?: LoopMsg[]; effort?: "low" | "medium" | "high" },
 ): Promise<{
   finalOutput: string
   streamedText?: string
@@ -979,13 +993,19 @@ async function defaultPlannerRunner(
   // but its instructions carry the lesson block — it IS a teaching turn (thinking
   // on, walkthrough-sized turn budget).
   const teachingTurn = TEACHING_RE.test(input) || opts.instructions.includes("## Active walkthrough")
-  const disableThinking = teachingTurn
-    ? process.env.KAIROS_GUIDE_THINKING === "0"
-    : process.env.KAIROS_SMART_DISABLE_THINKING !== "0"
+  // DYNAMIC per-task effort (the in-house brain's equivalent of the opencode proxy
+  // alias): medium/high → THINK at that budget (overrides the default thinking-off,
+  // reasoning still EXCLUDED from the spoken content); low/undefined → keep the fast
+  // thinking-off path. So the conductor's per-task decision shapes this loop too.
+  const wantThink = opts.effort === "high" || opts.effort === "medium"
+  const disableThinking = wantThink
+    ? false
+    : (teachingTurn ? process.env.KAIROS_GUIDE_THINKING === "0" : process.env.KAIROS_SMART_DISABLE_THINKING !== "0")
   const smart = new OpenRouterAdapter({
     defaultModel: TIER_MODELS.smart(),
     defaultMaxTokens: Number(process.env.KAIROS_SMART_MAX_TOKENS) || 4096,
     disableThinking,
+    reasoningEffort: wantThink ? opts.effort : undefined,
     usageLabel: "planner_smart",
   })
   // Cheap model for compaction summaries.

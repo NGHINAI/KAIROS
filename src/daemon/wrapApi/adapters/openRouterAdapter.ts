@@ -103,6 +103,11 @@ export type OpenRouterAdapterDeps = {
    *  on pure non-thinking models (the param is ignored). Leave false for the DEEP tier,
    *  which we WANT to reason. */
   disableThinking?: boolean
+  /** DYNAMIC reasoning budget for this adapter's calls — the per-task effort the
+   *  conductor chose. When set (and thinking isn't disabled), the model THINKS at this
+   *  effort but the reasoning tokens stay EXCLUDED from the spoken content. Lets the
+   *  in-house planner honor per-task effort, mirroring the opencode proxy aliases. */
+  reasoningEffort?: "low" | "medium" | "high"
   /** Spend-attribution label for the daemon-wide usage ledger (e.g. 'voice_fast',
    *  'planner_smart', 'subagent'). Every call reports to the global usage hook
    *  (record-only metering — never gates/blocks the call). */
@@ -117,6 +122,7 @@ export class OpenRouterAdapter {
   private appName: string
   private fetchImpl: typeof fetch
   private disableThinking: boolean
+  private reasoningEffort?: "low" | "medium" | "high"
   private usageLabel: string
 
   constructor(deps: OpenRouterAdapterDeps = {}) {
@@ -127,6 +133,7 @@ export class OpenRouterAdapter {
     this.appName = deps.appName ?? 'KAIROS'
     this.fetchImpl = (deps.fetchImpl ?? fetch) as typeof fetch
     this.disableThinking = deps.disableThinking ?? false
+    this.reasoningEffort = deps.reasoningEffort
     this.usageLabel = deps.usageLabel ?? 'agent'
   }
 
@@ -172,7 +179,11 @@ export class OpenRouterAdapter {
       // exclude:true HIDES reasoning tokens; for a thinking model on the spoken tier
       // we also DISABLE thinking entirely via max_tokens:0 (→ Gemini thinkingBudget:0)
       // so the answer can't come back empty because thinking burned the budget.
-      reqBody.reasoning = this.disableThinking ? { exclude: true, max_tokens: 0 } : { exclude: true }
+      reqBody.reasoning = this.disableThinking
+        ? { exclude: true, max_tokens: 0 }                                   // thinking OFF
+        : this.reasoningEffort
+          ? { exclude: true, effort: this.reasoningEffort }                  // THINK at the chosen effort (CoT still hidden)
+          : { exclude: true }
     }
     if (body.temperature !== undefined) reqBody.temperature = body.temperature
     if (body.tools && body.tools.length > 0) {

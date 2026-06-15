@@ -55,7 +55,14 @@ function safeEqual(a: string, b: string): boolean {
 export function defaultAliasMap(env: Record<string, string | undefined> = process.env): Record<string, string> {
   const smart = env.KAIROS_BRAIN_MODEL_SMART || env.KAIROS_BRAIN_MODEL || "minimax/minimax-m3"
   const deep = env.KAIROS_BRAIN_MODEL_DEEP || env.KAIROS_BRAIN_MODEL || smart
-  return { kairos: smart, "kairos-smart": smart, "kairos-deep": deep }
+  return {
+    kairos: smart, "kairos-smart": smart, "kairos-deep": deep,
+    // Per-turn EXPLICIT-effort aliases the conductor selects dynamically. All run on
+    // the same capable smart model; only the reasoning budget differs (set in
+    // defaultReasoningFor). This is how per-task effort reaches the proxy through
+    // opencode (which only lets the model field vary per turn).
+    "kairos-low": smart, "kairos-medium": smart, "kairos-high": smart, "kairos-none": smart,
+  }
 }
 
 /** Build the per-task-type reasoning-effort resolver from env. The opencode brain
@@ -80,6 +87,13 @@ export function defaultReasoningFor(
   const smart = map(env.KAIROS_BRAIN_REASONING_EFFORT ?? "low")
   const deep = map(env.KAIROS_BRAIN_REASONING_EFFORT_DEEP ?? "high")
   return (alias: string) => {
+    // EXPLICIT per-turn effort aliases (the conductor's dynamic decision) — these
+    // ALWAYS resolve to their own effort, ignoring env. This is the per-task knob.
+    if (alias === "kairos-low") return map("low")
+    if (alias === "kairos-medium") return map("medium")
+    if (alias === "kairos-high") return map("high")
+    if (alias === "kairos-none") return map("none")
+    // Generic lanes — env-defaulted fallback (used when no per-turn effort was chosen).
     if (alias === "kairos-deep") return deep
     if (alias === "kairos" || alias === "kairos-smart") return smart
     return undefined // unknown / explicitly-named model → don't touch

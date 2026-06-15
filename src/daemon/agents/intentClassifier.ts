@@ -6,7 +6,12 @@ import { fastMax } from "./tokenBudget"
 
 const CLASSIFIER_SYSTEM = `You are KAIROS's intent router. KAIROS is a voice-first AI coworker. Read ONE user utterance and pick the cheapest tier that can fully handle it. This runs on every turn, so latency matters — be decisive.
 
-Return STRICT JSON only, nothing else: {"tier":"fast"|"smart"|"deep"|"vision","reason":"<=8 words","confidence":0..1}
+Return STRICT JSON only, nothing else: {"tier":"fast"|"smart"|"deep"|"vision","reason":"<=8 words","confidence":0..1,"effort":"low"|"medium"|"high"}
+
+"effort" = how much REASONING the smart/deep brain should spend on this turn. BE CONSERVATIVE — most turns are routine and should be "low" (it's faster); the brain auto-retries at higher effort if a cheap pass fails, so under-shooting is cheap and over-shooting wastes time:
+- "low": routine — a single clear tool/action, a direct answer, a confirmation. DEFAULT.
+- "medium": a few chained steps, light judgment, mild ambiguity to resolve.
+- "high": ONLY genuinely hard — open-ended planning, multi-step debugging, careful trade-off reasoning, or the user explicitly asks to think hard. "deep" tier is usually "high".
 
 CRITICAL: only the "smart" tier can call tools or take actions. "fast" can ONLY talk — it has no tools. So ANY request that requires DOING something in the outside world (connecting/disconnecting an integration, sending, creating, scheduling, reminding, reading email/calendar/messages, controlling an app, looking something up via a service) MUST be "smart", even if it's a single step.
 
@@ -52,19 +57,24 @@ export async function classifyIntent(utterance: string, opts: ClassifyOpts): Pro
         { role: "system", content: CLASSIFIER_SYSTEM },
         { role: "user", content: userContent },
       ],
-      max_tokens: fastMax(50),  // floor via KAIROS_FAST_MAX_TOKENS for reasoning models
+      max_tokens: fastMax(64),  // floor via KAIROS_FAST_MAX_TOKENS for reasoning models
       temperature: 0,
     })
     const parsed = JSON.parse(extractJson(resp.text))
     if (!parsed.tier || !["fast", "smart", "deep", "vision"].includes(parsed.tier)) {
       throw new Error("invalid tier")
     }
+    // Conservative effort: trust the model when valid, else default by tier (deep→high,
+    // everything else→low). The brain auto-escalates on failure, so a low default is safe.
+    const effRaw = String(parsed.effort ?? "").toLowerCase()
+    const effort = (["low", "medium", "high"].includes(effRaw) ? effRaw : (parsed.tier === "deep" ? "high" : "low")) as "low" | "medium" | "high"
     return {
       tier: parsed.tier as Tier,
       reason: String(parsed.reason ?? "unspecified"),
       confidence: Number(parsed.confidence ?? 0.5),
+      effort,
     }
   } catch {
-    return { tier: "fast", reason: "classifier fallback", confidence: 0.3 }
+    return { tier: "fast", reason: "classifier fallback", confidence: 0.3, effort: "low" }
   }
 }

@@ -174,6 +174,27 @@ describe("reasoning-effort injection (per-task-type via the alias)", () => {
     await p.handleRequest(post({ model: "kairos-smart", input: "x" }), "/v1/responses")
     expect(JSON.parse(String(calls[0]!.init.body)).reasoning).toBeUndefined()
   })
+
+  test("EXPLICIT per-turn effort aliases override env (dynamic, not env-set)", () => {
+    // Even with env forcing 'high' on the generic lanes, the explicit effort aliases
+    // the brain sends per-turn resolve to THEIR own effort — that's the dynamic knob.
+    const def = defaultReasoningFor({ KAIROS_BRAIN_REASONING_EFFORT: "high" })
+    expect(def("kairos-low")).toEqual({ effort: "low" })
+    expect(def("kairos-medium")).toEqual({ effort: "medium" })
+    expect(def("kairos-high")).toEqual({ effort: "high" })
+    expect(def("kairos-none")).toEqual({ enabled: false })
+    // generic alias still follows env (the fallback default)
+    expect(def("kairos-smart")).toEqual({ effort: "high" })
+  })
+
+  test("defaultAliasMap resolves the effort aliases to the smart model", () => {
+    const m = defaultAliasMap({ KAIROS_BRAIN_MODEL_SMART: "a/smart", KAIROS_BRAIN_MODEL_DEEP: "c/deep" })
+    expect(m["kairos-low"]).toBe("a/smart")
+    expect(m["kairos-medium"]).toBe("a/smart")
+    expect(m["kairos-high"]).toBe("a/smart")
+    expect(m["kairos-none"]).toBe("a/smart")
+    expect(m["kairos-deep"]).toBe("c/deep")
+  })
 })
 
 describe("defaultAliasMap", () => {

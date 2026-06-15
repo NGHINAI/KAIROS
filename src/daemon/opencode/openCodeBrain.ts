@@ -98,6 +98,23 @@ export interface OpenCodeRunOpts {
   onEvent?: (e: LoopEvent) => void
   history?: LoopMsg[]
   conversationId?: string
+  /** DYNAMIC per-task reasoning effort, chosen by the CALLER (the conductor) per turn —
+   *  not an env knob. Conservative by default (the conductor leans low/medium); the
+   *  brain auto-escalates to high if a low/medium attempt fails. Maps to a per-turn
+   *  proxy alias (kairos-<effort>) the /brain proxy turns into a reasoning budget. */
+  effort?: "low" | "medium" | "high"
+}
+
+/** The opencode brain conveys per-turn effort to the /brain proxy through the only
+ *  field that can vary per turn — the model id. For a proxy alias (kairos-*), map the
+ *  effort to kairos-<effort> (the proxy decodes it to a reasoning budget). For a direct
+ *  real-model id (KAIROS_BRAIN_DIRECT=1) there's no proxy to decode it, so leave it. */
+export function supportsEffortAlias(baseModelID: string): boolean {
+  return typeof baseModelID === "string" && baseModelID.startsWith("kairos")
+}
+export function effortModelID(baseModelID: string, effort?: string): string {
+  if (!effort || !supportsEffortAlias(baseModelID)) return baseModelID
+  return `kairos-${effort}`
 }
 
 export interface OpenCodeRunResult {
@@ -146,7 +163,7 @@ export function createOpenCodeBrain(deps: OpenCodeBrainDeps) {
   }
 
   /** Drive ONE turn to completion / abort / timeout, streaming events live. */
-  async function runOneTurn(h: OpenCodeHandle, sessionID: string, text: string, system: string, opts: OpenCodeRunOpts): Promise<{
+  async function runOneTurn(h: OpenCodeHandle, sessionID: string, text: string, system: string, opts: OpenCodeRunOpts, modelID: string = deps.modelID): Promise<{
     finalText: string; streamedText: string; toolCalls: OpenCodeToolCall[]; outcome: "completed" | "timeout" | "aborted" | "error"
   }> {
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -177,7 +194,7 @@ export function createOpenCodeBrain(deps: OpenCodeBrainDeps) {
     const watchdogP = new Promise<"timeout">((res) => { timer = setTimeout(() => res("timeout"), turnTimeoutMs); (timer as any)?.unref?.() })
 
     let promptResult: { finalText?: string } | undefined
-    const promptP = h.prompt({ sessionID, text, system, model: { providerID: deps.modelProviderID, modelID: deps.modelID } })
+    const promptP = h.prompt({ sessionID, text, system, model: { providerID: deps.modelProviderID, modelID } })
       .then((r) => { promptResult = r; return "completed" as const })
       .catch((e) => { log(`openCodeBrain: prompt error: ${String((e as Error)?.message ?? e)}`); return "error" as const })
 
@@ -217,19 +234,50 @@ export function createOpenCodeBrain(deps: OpenCodeBrainDeps) {
       const baseSystem = opts.instructions && opts.instructions.length ? opts.instructions : deps.baseInstructions
       const system = buildTurnSystem(baseSystem, opts.history)
 
-      const turn = await runOneTurn(h, sessionID, input, system, opts)
-      let finalOutput = turn.finalText
-      let ledger = turn.toolCalls
+      // DYNAMIC per-turn effort: run at the caller's chosen (conservative) effort.
+      const turnModelID = effortModelID(deps.modelID, opts.effort)
+      let turn = await runOneTurn(h, sessionID, input, system, opts, turnModelID)
       let corrected = false
 
       // Quiet-abort: a superseded/aborted turn ends without a verifier pass.
       if (turn.outcome === "aborted" || opts.signal?.aborted) {
-        return { finalOutput, streamedText: turn.streamedText, corrected: false, toolCalls: ledger }
+        return { finalOutput: turn.finalText, streamedText: turn.streamedText, corrected: false, toolCalls: turn.toolCalls }
       }
-      // Error/timeout: best-effort partial — no verifier (the answer is incomplete), but
-      // return cleanly (never hang). The conductor speaks the partial or its fallback.
+
+      // ESCALATE-AND-RETRY (the user's "if it doesn't work on low/medium, try high"):
+      // a low/medium attempt that FAILED (error/timeout) or finished EMPTY gets ONE
+      // re-attempt of the same input at HIGH reasoning effort — a bigger thinking budget
+      // often recovers what the cheap pass missed. Conservative: only failures pay this;
+      // a good cheap answer stays fast. Skipped in direct mode (no proxy to decode effort).
+      // "empty" = completed but produced NOTHING (no text AND no tool work) — a turn that
+      // did real tool work but didn't narrate is a SUCCESS, not a failure, so don't escalate it.
+      const emptyNoWork = turn.outcome === "completed" && !turn.finalText && (turn.toolCalls?.length ?? 0) === 0
+      if (
+        (turn.outcome === "error" || turn.outcome === "timeout" || emptyNoWork) &&
+        supportsEffortAlias(deps.modelID) && opts.effort !== "high" && !opts.signal?.aborted &&
+        // Don't re-run the input if the failed attempt ALREADY completed a destructive
+        // action (send/delete/pay) — escalating would risk doing it twice.
+        !destructiveAlreadySucceeded(turn.toolCalls ?? [])
+      ) {
+        log(`escalating reasoning effort (attempt failed at ${opts.effort ?? "default"}) → high`)
+        opts.onEvent?.({ kind: "self_correct", concern: "retrying at higher reasoning effort" })
+        const hi = await runOneTurn(h, sessionID, input, system, opts, effortModelID(deps.modelID, "high"))
+        if (hi.outcome === "completed" && (hi.finalText || (hi.toolCalls?.length ?? 0) > 0) && !opts.signal?.aborted) {
+          // The escalation is AUTHORITATIVE: use ITS ledger only. Concatenating the
+          // failed attempt's tool calls would feed the verifier abandoned errored-write
+          // calls it can't see were superseded → false flags + double-counted activity.
+          turn = hi
+          corrected = true
+        }
+      }
+
+      let finalOutput = turn.finalText
+      let ledger = turn.toolCalls
+
+      // Error/timeout (even after an escalation attempt): best-effort partial — no
+      // verifier (the answer is incomplete), but return cleanly (never hang).
       if (turn.outcome === "error" || turn.outcome === "timeout") {
-        return { finalOutput, streamedText: finalOutput, corrected: false, toolCalls: ledger }
+        return { finalOutput, streamedText: finalOutput, corrected, toolCalls: ledger }
       }
 
       // POST-TURN verifier gate (ported). Only on a CLEAN completion. Corrective retry =
@@ -240,7 +288,9 @@ export function createOpenCodeBrain(deps: OpenCodeBrainDeps) {
           if (!v.ok && v.retryable && !destructiveAlreadySucceeded(ledger) && !opts.signal?.aborted) {
             opts.onEvent?.({ kind: "self_correct", concern: v.concern ?? "" })
             const followUp = `[automatic check] ${v.concern ?? "re-check your last answer against what the tools actually returned and correct it."}`
-            const corr = await runOneTurn(h, sessionID, followUp, system, opts)
+            // The correction ESCALATES to high effort — the cheap pass produced a flagged
+            // answer, so give the re-check a bigger thinking budget.
+            const corr = await runOneTurn(h, sessionID, followUp, system, opts, effortModelID(deps.modelID, "high"))
             if (corr.outcome === "completed" && !opts.signal?.aborted) {   // only adopt a clean correction
               if (corr.finalText) finalOutput = corr.finalText
               ledger = ledger.concat(corr.toolCalls)
@@ -303,7 +353,19 @@ export function buildOpenCodeConfig(o: {
         npm: "@ai-sdk/openai-compatible",
         name: "KAIROS Brain",
         options: { baseURL: o.baseURL, apiKey: o.brainKey },
-        models: { [o.modelID]: { name: o.modelID, tool_call: true } },
+        // Declare the base model PLUS the per-turn effort aliases the brain selects
+        // dynamically (kairos-low/medium/high/none) — opencode only routes a model id
+        // it knows. All run on the same upstream model; the proxy decodes the alias to a
+        // reasoning budget. (For a direct real-model id, only the base is declared.)
+        models: supportsEffortAlias(o.modelID)
+          ? {
+              [o.modelID]: { name: o.modelID, tool_call: true },
+              "kairos-low": { name: "kairos-low", tool_call: true },
+              "kairos-medium": { name: "kairos-medium", tool_call: true },
+              "kairos-high": { name: "kairos-high", tool_call: true },
+              "kairos-none": { name: "kairos-none", tool_call: true },
+            }
+          : { [o.modelID]: { name: o.modelID, tool_call: true } },
       },
     },
     mcp: {
