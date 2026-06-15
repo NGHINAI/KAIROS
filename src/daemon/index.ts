@@ -176,6 +176,7 @@ import { buildWebTools } from './agents/webTools'
 import { GuideBridge } from './agents/guideBridge'
 import { buildGuideTools } from './agents/guideTools'
 import { buildActionToolset, type ActionToolDeps } from './agents/buildActionToolset'
+import { makeScreencaptureCapture, makeVisionLocate, makeCliclickClick } from './agents/cuaTool'
 import { createKairosMcpServer } from './codex/mcpServer'
 import { createBrainProxy, defaultAliasMap } from './codex/brainProxy'
 import { GuideLessonManager, LESSON_CONTINUE_SENTINEL, LESSON_CONTINUE_TEXT } from './agents/guideLesson'
@@ -1907,6 +1908,16 @@ async function main(): Promise<void> {
       memoryInjector: (globalThis as any).__kairosMemoryInjector,
       guideBridge: (globalThis as any).__kairosGuideBridge,
       guideLesson: (globalThis as any).__kairosGuideLesson,
+      // CUA vision/pixel backup (additive on AX). Needs KAIROS_BRAIN_KEY (vision call via
+      // the hidden /brain proxy). Off with KAIROS_CUA=0. capture/click degrade gracefully
+      // headless (return "couldn't capture" → the model uses the AX tools). Vision model
+      // via KAIROS_CUA_VISION_MODEL (a vision-capable OpenRouter slug; default gpt-4o-mini).
+      cua: (brainKey && process.env.KAIROS_CUA !== '0') ? {
+        capture: makeScreencaptureCapture({ log: (m) => log('[cua] ' + m, 'warn') }),
+        locate: makeVisionLocate({ baseURL: `http://127.0.0.1:${wrapApiPort}/brain/v1`, apiKey: brainKey, model: process.env.KAIROS_CUA_VISION_MODEL || 'openai/gpt-4o-mini', log: (m) => log('[cua] ' + m, 'warn') }),
+        click: makeCliclickClick({ log: (m) => log('[cua] ' + m, 'warn') }),
+        log: (m) => log('[cua] ' + m, 'warn'),
+      } : undefined,
       webSearchEnabled: process.env.KAIROS_WEB_SEARCH !== '0',
       hotToolsN: Number(process.env.KAIROS_HOT_TOOLS) || 5,
       openApp: async (name: string) => {

@@ -53,6 +53,9 @@ const LOCAL_TOOLS = new Set([
   // every foreground "switch to dark mode" on a pointless approval.
   "guide_user", "read_screen", "wait_for_screen", "open_app", "end_lesson",
   "click_element", "type_text",
+  // cua_click acts on the USER'S screen at their spoken request (vision/pixel fallback for
+  // click_element) — OUR tool, never an external/destructive write.
+  "cua_click",
 ])
 
 /** The real action name — unwrapping execute_tool's wrapped tool_name. */

@@ -14,6 +14,7 @@ import { buildBackgroundTools } from "./loop/backgroundTools"
 import { buildRecallTool } from "./recallTool"
 import { buildWebTools } from "./webTools"
 import { buildGuideTools } from "./guideTools"
+import { buildCuaTools } from "./cuaTool"
 
 /** Live daemon singletons + knobs the toolset needs. All optional — a missing
  *  dep just omits its tools (matching the original closure's graceful degradation). */
@@ -27,6 +28,9 @@ export interface ActionToolDeps {
   memoryInjector?: any
   guideBridge?: any
   guideLesson?: any
+  /** CUA (vision/pixel) computer-use backup — additive on AX. Wired by the daemon
+   *  (screencapture + vision-via-/brain + cliclick). Omitted → no cua_click tool. */
+  cua?: import("./cuaTool").CuaDeps
   /** Launch a macOS app by name (argv-only `open -a`); wired by the daemon. */
   openApp?: (name: string) => Promise<{ ok: boolean; error?: string }>
   /** false disables web_search/read_webpage (KAIROS_WEB_SEARCH=0). Default true. */
@@ -109,6 +113,13 @@ export async function buildActionToolset(deps: ActionToolDeps): Promise<ToolDef[
         openApp: deps.openApp,
       }))
     } catch (e) { log("[actionTools] guide tools failed: " + String(e), "warn") }
+  }
+
+  // 7. CUA vision/pixel backup: cua_click — additive on AX (used only when AX can't
+  //    resolve an element). Screenshot → vision-locate → pixel click.
+  if (deps.cua) {
+    try { out.push(...buildCuaTools(deps.cua)) }
+    catch (e) { log("[actionTools] cua tools failed: " + String(e), "warn") }
   }
 
   const seen = new Set<string>()
