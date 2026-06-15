@@ -35,12 +35,10 @@ const MODE_PREFS: Record<KairosMode, ModePrefs> = {
     ],
     mid: [
       { provider: 'openrouter',    model: process.env.KAIROS_SMART_MODEL ?? 'moonshotai/kimi-k2' },
-      { provider: 'codex_cli',     model: 'gpt-4o' },
       { provider: 'openai',        model: 'gpt-4o-mini' },
     ],
     heavy: [
       { provider: 'openrouter',    model: process.env.KAIROS_DEEP_MODEL  ?? 'moonshotai/kimi-k2-thinking' },
-      { provider: 'codex_cli',     model: 'o1' },
       { provider: 'openai',        model: 'gpt-4o-mini' },
     ],
   },

@@ -5,7 +5,6 @@ import type { Database } from 'bun:sqlite'
 import { loadProviderConfig } from './config'
 import { CostTracker } from './costTracker'
 import { ModelRouter } from './router'
-import { CodexCliProvider } from './providers/codexCli'
 import { GeminiProvider } from './providers/gemini'
 import { OpenAIProvider } from './providers/openai'
 import { OpenRouterProvider } from './providers/openrouter'
@@ -25,10 +24,10 @@ export function buildRouter(db: Database, configPath: string, mode?: KairosMode)
     // OpenRouter is FIRST so the daemon logs it at the head of "configured
     // providers" — its model menu is set entirely from env vars.
     // NO claude: anthropic_cli / anthropic_api are deliberately NOT registered —
-    // the runtime must never invoke a claude model, not even as a ModelRouter
-    // fallback. codex_cli runs OpenAI models (gpt-4o/o1), not claude.
+    // the runtime must never invoke a claude model, not even as a ModelRouter fallback.
+    // codex_cli is also dropped: we pivoted off codex, and it errored when the router
+    // fell to it (config.toml HooksToml mismatch) — a broken fallback is worse than none.
     openrouter:    new OpenRouterProvider({ enabled: true }),
-    codex_cli:     new CodexCliProvider(cfg.providers.codex_cli),
     gemini:        new GeminiProvider(cfg.providers.gemini),
     openai:        new OpenAIProvider('openai', cfg.providers.openai),
     kimi:          new OpenAIProvider('kimi',   cfg.providers.kimi),

@@ -162,7 +162,7 @@ import { TriggerSchemaCache } from './connectors/triggers/schemaCache'
 import { TriggerInstanceManager } from './connectors/triggers/instanceManager'
 import { TriggerMetrics } from './connectors/triggers/metrics'
 import { ConnectGuard } from './connectors/triggers/connectGuard'
-import { Conductor } from './agents/conductor'
+import { Conductor, defaultPlannerRunner } from './agents/conductor'
 import { ContextBuilder } from './agents/contextBuilder'
 import { SoulDigestLoader } from './agents/loaders/soulDigestLoader'
 import { buildIntrospectionTools } from './agents/introspectionTools'
@@ -2505,6 +2505,19 @@ async function main(): Promise<void> {
     // onEvent/verifier/persistence wiring is identical (same PlannerRunner contract).
     let openCodeRunPlanner: ((input: string, o: any) => Promise<any>) | undefined
     let openCodeBrainShutdown: (() => void) | undefined
+    // Make locally-installed CLIs (the `opencode` brain) resolvable no matter HOW the
+    // daemon was launched. `bun run <script>` puts node_modules/.bin on PATH, but the
+    // voice-hud/voice-live launcher starts the daemon via `bun <file.ts>`, which does
+    // NOT — so the opencode SDK's `launch("opencode")` failed with "Executable not found
+    // in $PATH" and the brain returned empty on every smart turn (guide + memory looked
+    // broken). Prepending the local bin dir fixes it launcher-independently.
+    try {
+      const localBin = join(config.sandboxDir, 'node_modules', '.bin')
+      if (existsSync(localBin) && !(process.env.PATH ?? '').split(':').includes(localBin)) {
+        process.env.PATH = `${localBin}:${process.env.PATH ?? ''}`
+        log(`[boot] prepended ${localBin} to PATH (local CLIs like opencode now resolvable)`)
+      }
+    } catch { /* PATH munging is best-effort */ }
     if (process.env.KAIROS_BRAIN === 'opencode') {
       if (!brainKey) {
         log('[opencode-brain] KAIROS_BRAIN=opencode but KAIROS_BRAIN_KEY unset — using the in-house loop', 'warn')
@@ -2538,7 +2551,26 @@ async function main(): Promise<void> {
               try { (globalThis as any).__kairosLlmUsage?.({ label: 'planner_opencode', model: u.model ?? ocModelID, tokensIn: u.tokensIn, tokensOut: u.tokensOut, estimated: false, latencyMs: u.latencyMs }) } catch { /* */ }
             },
           })
-          openCodeRunPlanner = (input, o) => ocBrain.run(input, o)
+          // GRACEFUL DEGRADATION: if the opencode brain yields nothing for a turn that
+          // wasn't interrupted — e.g. `opencode` can't spawn (not on PATH), the serve
+          // died, or an upstream error — fall back to the IN-HOUSE planner so the user
+          // still gets a real answer instead of "I wasn't able to finish that". (Root
+          // cause we hit: the launcher started the daemon without node_modules/.bin on
+          // PATH, so the SDK's `opencode` spawn failed and every smart turn returned
+          // empty. The PATH is now fixed at boot too; this is the belt.)
+          openCodeRunPlanner = async (input: string, o: any) => {
+            let r: any
+            try { r = await ocBrain.run(input, o) } catch (e) {
+              log(`[opencode-brain] run threw (${String((e as Error)?.message ?? e)}) → in-house planner`, 'warn')
+              return defaultPlannerRunner(input, o)
+            }
+            const empty = !o?.signal?.aborted && !(r?.finalOutput && r.finalOutput.trim()) && !(r?.toolCalls?.length)
+            if (empty) {
+              log('[opencode-brain] produced no output (brain unavailable?) → in-house planner', 'warn')
+              return defaultPlannerRunner(input, o)
+            }
+            return r
+          }
           openCodeBrainShutdown = ocBrain.shutdown
           void ocBrain.warmUp()   // pre-spawn `opencode serve` so the first real turn isn't cold
           log(`[opencode-brain] ENABLED — via=${viaProxy ? `/brain proxy (hidden → ${realModel})` : `OpenRouter direct (${realModel})`}, tools via /mcp`)

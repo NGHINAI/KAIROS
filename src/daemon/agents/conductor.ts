@@ -959,7 +959,7 @@ function ackOnly(say: string | undefined): string | undefined {
  *  the old @openai/agents run() so we get tool-error self-correction, max-turns,
  *  empty-output guard, and (Phase 3) live narration. Same return shape as before
  *  so handleSmart and the conductor tests are unaffected. */
-async function defaultPlannerRunner(
+export async function defaultPlannerRunner(
   input: string,
   opts: { tools: ToolDef[]; instructions: string; signal?: AbortSignal; onEvent?: (e: LoopEvent) => void; history?: LoopMsg[]; effort?: "low" | "medium" | "high" },
 ): Promise<{
