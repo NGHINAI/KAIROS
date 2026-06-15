@@ -83,6 +83,20 @@ final class DaemonClient {
         }
     }
 
+    /// Answer a scroll_request: the directional arrow is shown (or why it couldn't be).
+    func sendScrollResult(id: String, found: Bool, reason: String?, newSummary: String?) {
+        var obj: [String: Any] = ["cmd": "scroll_result", "id": id, "found": found]
+        if let reason { obj["reason"] = reason }
+        if let newSummary { obj["newSummary"] = newSummary }
+        guard let data = try? JSONSerialization.data(withJSONObject: obj),
+              let json = String(data: data, encoding: .utf8) else { return }
+        task?.send(.string(json)) { error in
+            if let error {
+                FileHandle.standardError.write("scroll_result SEND FAILED: \(error.localizedDescription)\n".data(using: .utf8)!)
+            }
+        }
+    }
+
     /// CONNECTION GENERATION: each connect() mints a new generation; callbacks from
     /// an OLDER socket (its receive failure, its keepalive send error) are ignored.
     /// Without this, a stale task's pending failure callback fired AFTER a reconnect
@@ -237,10 +251,14 @@ final class DaemonClient {
         case "agent_intent":
             turnActive = true
             if !speaking { model.transition(to: .thinking) }
+            // The conductor's per-turn tier rides on this event — deep ⇒ "Thinking deeper"
+            // on the notch pill. transition(to:.thinking) above preserves the flag we set here.
+            model.setEffort(deep: (payload["tier"] as? String) == "deep")
             activity?.intent(tier: payload["tier"] as? String ?? "")
         case "agent_planning":
             turnActive = true
             if !speaking { model.transition(to: .thinking) }
+            model.setEffort(deep: (payload["tier"] as? String) == "deep")
         case "agent_status":
             activity?.setStatus(payload["text"] as? String ?? "")
         case "agent_tool_call":
@@ -337,6 +355,14 @@ final class DaemonClient {
             guide?.handleWatchChange(id: payload["id"] as? String ?? "",
                                      app: payload["app"] as? String,
                                      timeoutMs: payload["timeoutMs"] as? Double ?? 120_000)
+        // guide_scroll: a target sits off the visible viewport — show a directional arrow
+        // + "scroll down/up" cue at the scroll area's edge. ARROW-ONLY: the user scrolls.
+        case "scroll_request":
+            FileHandle.standardError.write("scroll_request dir=\(payload["direction"] as? String ?? "down") element=\((payload["targetElement"] as? NSNumber)?.stringValue ?? "-") app=\(payload["app"] as? String ?? "frontmost")\n".data(using: .utf8)!)
+            guide?.handleScroll(id: payload["id"] as? String ?? "",
+                                direction: payload["direction"] as? String ?? "down",
+                                targetElement: (payload["targetElement"] as? NSNumber)?.intValue,
+                                app: payload["app"] as? String)
         case "guide_end":
             guide?.end()
 

@@ -28,11 +28,19 @@ final class GuideModel: ObservableObject {
     @Published var target: GuideTarget? = nil
     @Published var cometPos: CGPoint = .zero
     @Published var eyesOpen = true
+    /// Dynamic scroll cue: "down"/"up" while a scroll arrow is shown, nil otherwise.
+    /// The USER scrolls — KAIROS never actuates the scroll; this is a directional hint.
+    @Published var scrollDirection: String? = nil
+    /// The scroll area's rect in OVERLAY coords — the arrow anchors to its edge. nil ⇒
+    /// the view falls back to a screen-edge default.
+    @Published var scrollAnchorRect: CGRect? = nil
 
     /// Answers a guide_request back to the daemon: (id, found, label, reason).
     var resultHandler: ((String, Bool, String?, String?) -> Void)? = nil
     /// Answers a screen_request back to the daemon: (id, ok, summary, reason).
     var screenResultHandler: ((String, Bool, String?, String?) -> Void)? = nil
+    /// Answers a scroll_request back to the daemon: (id, found, reason, newSummary).
+    var scrollResultHandler: ((String, Bool, String?, String?) -> Void)? = nil
     /// The orb's current center in OVERLAY coordinates — comet launch + return point.
     var orbCenterProvider: (() -> CGPoint)? = nil
     /// Overlay/orb visibility hook for the panel manager (true = guide owns the screen).
@@ -275,8 +283,42 @@ final class GuideModel: ObservableObject {
         }
     }
 
+    /// guide_scroll: show a directional arrow + "scroll down/up" cue at the scroll area
+    /// that holds the off-screen target. ARROW-ONLY — KAIROS never auto-scrolls; the user
+    /// does. Resolves the target's scroll viewport from the cached read_screen snapshot
+    /// for the anchor; falls back to the element frame, then a screen-edge default.
+    /// Always replies found:true immediately — the cue is purely advisory, never blocks.
+    func handleScroll(id: String, direction: String, targetElement: Int?, app: String?) {
+        var anchor: CGRect? = nil
+        if let element = targetElement, element >= 1, element <= snapshot.count {
+            let entry = snapshot[element - 1]
+            // Prefer the scroll area's rect (the arrow hugs the viewport edge); fall back
+            // to the element's own frame when the viewport wasn't resolvable at snapshot.
+            if let viewport = entry.scrollViewport {
+                anchor = overlayRect(fromAppKit: viewport)
+            } else {
+                anchor = overlayRect(fromAppKit: entry.frame)
+            }
+        }
+        FileHandle.standardError.write("scroll_request dir=\(direction) element=\(targetElement.map(String.init) ?? "-") anchor=\(anchor != nil ? "viewport" : "edge-default")\n".data(using: .utf8)!)
+
+        scrollDirection = direction
+        scrollAnchorRect = anchor
+        // Reveal the overlay if it's hidden (mirrors point(at:)'s reveal) so the arrow is
+        // visible even without an active comet. Keeps any in-flight comet logic intact.
+        if phase != .active {
+            endWorkItem?.cancel(); endWorkItem = nil
+            cometPos = orbCenterProvider?() ?? CGPoint(x: 90, y: overlayHeight() - 90)
+            phase = .active
+            onActiveChange?(true)         // orb dissolves, overlay appears
+            startBlinking()
+        }
+        scrollResultHandler?(id, true, nil, "arrow-shown")
+    }
+
     func end() {
         watchGeneration += 1            // cancel any pending step-watch
+        scrollDirection = nil; scrollAnchorRect = nil   // drop any scroll cue
         guard phase == .active else { return }
         phase = .returning
         target = nil
@@ -301,6 +343,7 @@ final class GuideModel: ObservableObject {
 
     private func point(at match: AXMatch) {
         endWorkItem?.cancel(); endWorkItem = nil
+        scrollDirection = nil; scrollAnchorRect = nil   // a real on-screen target supersedes the scroll cue
         let rect = overlayRect(fromAppKit: match.frame)
         let wasHidden = (phase != .active)
         if wasHidden {

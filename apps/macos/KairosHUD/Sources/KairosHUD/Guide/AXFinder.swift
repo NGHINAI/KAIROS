@@ -23,13 +23,22 @@ struct AXMatch {
     let pid: pid_t?
     /// AX role — actuation strategy depends on it (rows/cells SELECT, buttons PRESS).
     let role: String?
+    /// "down"/"up" when the element lives in a scroll area but is scrolled OUT of view
+    /// (must scroll that way to reveal it); nil when on-screen or not in a scroll area.
+    let scrollDirection: String?
+    /// The enclosing scroll area's frame (AppKit coords) — the dynamic-scroll arrow
+    /// anchors to its bottom/top edge. nil when there's no resolvable scroll ancestor.
+    let scrollViewport: CGRect?
 
-    init(title: String, frame: CGRect, node: AXUIElement? = nil, pid: pid_t? = nil, role: String? = nil) {
+    init(title: String, frame: CGRect, node: AXUIElement? = nil, pid: pid_t? = nil, role: String? = nil,
+         scrollDirection: String? = nil, scrollViewport: CGRect? = nil) {
         self.title = title
         self.frame = frame
         self.node = node
         self.pid = pid
         self.role = role
+        self.scrollDirection = scrollDirection
+        self.scrollViewport = scrollViewport
     }
 }
 
@@ -43,6 +52,19 @@ struct AXInventoryEntry {
     let label: String
     let role: String
     let frame: CGRect   // AppKit coords, resolved at snapshot time
+    /// "down"/"up" when this entry is in a scroll area but scrolled OUT of view; nil otherwise.
+    let scrollDirection: String?
+    /// The enclosing scroll area's frame (AppKit coords) — the scroll-arrow anchor; nil if none.
+    let scrollViewport: CGRect?
+
+    init(label: String, role: String, frame: CGRect,
+         scrollDirection: String? = nil, scrollViewport: CGRect? = nil) {
+        self.label = label
+        self.role = role
+        self.frame = frame
+        self.scrollDirection = scrollDirection
+        self.scrollViewport = scrollViewport
+    }
 }
 
 enum AXInventoryResult {
@@ -119,8 +141,12 @@ enum AXFinder {
                 }
                 if score > 0, let frame = resolvedFrame(of: element) {
                     if best == nil || score > best!.score {
+                        // Best-effort scroll context (nil is fine): lets the comet/arrow
+                        // know if a matched element is parked off the visible viewport.
+                        let off = offscreenDirection(of: element, frame: frame)
                         best = (score, AXMatch(title: label, frame: frame, node: element,
-                                               pid: app.processIdentifier, role: roleOf(element)))
+                                               pid: app.processIdentifier, role: roleOf(element),
+                                               scrollDirection: off?.dir, scrollViewport: off?.viewport))
                     }
                 }
             }
@@ -206,8 +232,14 @@ enum AXFinder {
                     seen.insert(key)
                     let bucket = bucketName(for: role)
                     if bucket != "Other" {
-                        entries.append(AXInventoryEntry(label: label, role: role, frame: frame))
-                        buckets[bucket, default: []].append("\(entries.count) \(label)")
+                        // Off-screen marker: if this element lives in a scroll area but is
+                        // scrolled out of view, the brain reads the " [off-screen ↓/↑]" cue
+                        // in the summary text and calls guide_scroll to reveal it.
+                        let off = offscreenDirection(of: element, frame: frame)
+                        entries.append(AXInventoryEntry(label: label, role: role, frame: frame,
+                                                        scrollDirection: off?.dir, scrollViewport: off?.viewport))
+                        buckets[bucket, default: []].append("\(entries.count) \(label)"
+                            + (off?.dir == "down" ? " [off-screen ↓]" : off?.dir == "up" ? " [off-screen ↑]" : ""))
                         total += 1
                     }
                 }
@@ -327,6 +359,35 @@ enum AXFinder {
             current = (parentRef as! AXUIElement)
         }
         return nil
+    }
+
+    /// Climb up to 8 parents looking for the enclosing scroll area — the viewport an
+    /// off-screen element lives in. nil when the element isn't inside any scroll area.
+    private static func scrollableAncestor(of element: AXUIElement) -> AXUIElement? {
+        var current: AXUIElement = element
+        for _ in 0..<8 {
+            var parentRef: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(current, kAXParentAttribute as CFString, &parentRef) == .success,
+                  CFGetTypeID(parentRef) == AXUIElementGetTypeID() else { return nil }
+            let parent = parentRef as! AXUIElement
+            if roleOf(parent) == kAXScrollAreaRole { return parent }
+            current = parent
+        }
+        return nil
+    }
+
+    /// Is `element` (at `frame`, AppKit bottom-left origin) scrolled OUT of its scroll
+    /// area's viewport? Returns the direction the user must scroll to reveal it plus the
+    /// viewport rect. AppKit y grows UPWARD: an element BELOW the viewport (off the
+    /// bottom) needs a scroll DOWN; one ABOVE it (off the top) needs a scroll UP.
+    /// Defensive: nil whenever the ancestor frame can't be read, or the element overlaps
+    /// the viewport (visible). kAXVisibleChildrenAttribute is unreliable and unused.
+    private static func offscreenDirection(of element: AXUIElement, frame: CGRect) -> (dir: String, viewport: CGRect)? {
+        guard let ancestor = scrollableAncestor(of: element),
+              let viewport = resolvedFrame(of: ancestor) else { return nil }
+        if frame.maxY < viewport.minY - 4 { return ("down", viewport) }   // below the viewport
+        if frame.minY > viewport.maxY + 4 { return ("up", viewport) }     // above the viewport
+        return nil                                                        // visible / overlapping
     }
 
     /// Element frame → AppKit screen coordinates (bottom-left origin). AX reports

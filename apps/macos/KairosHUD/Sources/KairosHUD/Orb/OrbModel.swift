@@ -60,6 +60,11 @@ enum OrbState {
 
 final class OrbModel: ObservableObject {
     @Published private(set) var state: OrbState = .idle
+    /// Whether the CURRENT thinking turn is a DEEP/high-effort one (conductor tier=="deep").
+    /// Drives the notch pill's "Thinking deeper" word; the orb motion is unchanged (still
+    /// .thinking). Tightly turn-scoped — set on a deep agent_intent/agent_planning, cleared
+    /// when speech starts or the turn ends, so a shallow mid-turn pause never reads "deeper".
+    @Published private(set) var effortDeep: Bool = false
 
     // Mutated every frame (read by the renderer); no need to publish.
     private(set) var smoothed: Double = 0
@@ -88,5 +93,11 @@ final class OrbModel: ObservableObject {
         state = s
         motionTarget = s.motion
         rotTarget = s.sweepRotation
+        // Deep-effort only colors a thinking turn; clear it the moment we leave thinking
+        // (speaking/idle/listening/error) so "Thinking deeper" can't linger.
+        if s != .thinking { effortDeep = false }
     }
+
+    /// Set by DaemonClient from the conductor's per-turn tier (deep ⇒ "Thinking deeper").
+    func setEffort(deep: Bool) { effortDeep = deep }
 }

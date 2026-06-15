@@ -15,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let hud = HUDState()                    // console open / which agent is expanded
     let guide = GuideModel()                // Guide Mode — the orb morphs into the on-screen guide
     private var orbManager: OrbPanelManager?
+    private var notch: NotchStatePanel?     // word-bearing status pill under the menu bar
     private var mock: MockDriver?
     private var daemon: DaemonClient?
 
@@ -26,6 +27,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                       approval: approval, hud: hud, guide: guide)
         manager.show()
         orbManager = manager
+
+        // The word-bearing status pill (top-center, under the menu bar) projects the SAME
+        // OrbModel — "Listening" / "Thinking[ deeper]" / "Speaking", fading out when idle.
+        let notchPanel = NotchStatePanel(model: model)
+        notchPanel.show()
+        notch = notchPanel
 
         if CommandLine.arguments.contains("--mock") {
             // Daemon-free dev: scripted state/level + Lane A turn + Lane B agents + a mock approval.
@@ -42,6 +49,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             guide.screenResultHandler = { [weak client] id, ok, summary, reason in
                 client?.sendScreenResult(id: id, ok: ok, summary: summary, reason: reason)
+            }
+            guide.scrollResultHandler = { [weak client] id, found, reason, newSummary in
+                client?.sendScrollResult(id: id, found: found, reason: reason, newSummary: newSummary)
             }
             client.connect()
             daemon = client
