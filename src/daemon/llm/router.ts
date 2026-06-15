@@ -25,23 +25,23 @@ const MODE_PREFS: Record<KairosMode, ModePrefs> = {
     // crystallizer). When unset, OpenRouter.isConfigured() returns false and
     // the router silently falls through to whatever the user has configured
     // (anthropic_cli / ollama / openai-direct).
+    // NO claude: the byo fallback chain is OpenRouter-first with non-claude
+    // fallbacks only (the runtime must never invoke a claude model — the old
+    // anthropic_cli/anthropic_api fallbacks were removed).
     ultra_cheap: [
       { provider: 'openrouter',    model: process.env.KAIROS_FAST_MODEL  ?? 'openai/gpt-4o-mini' },
-      { provider: 'anthropic_cli', model: 'claude-haiku-4-5-20251001' },
       { provider: 'ollama',        model: 'qwen3:8b' },
       { provider: 'openai',        model: 'gpt-4o-mini' },
     ],
     mid: [
       { provider: 'openrouter',    model: process.env.KAIROS_SMART_MODEL ?? 'moonshotai/kimi-k2' },
-      { provider: 'anthropic_cli', model: 'claude-sonnet-4-6' },
       { provider: 'codex_cli',     model: 'gpt-4o' },
       { provider: 'openai',        model: 'gpt-4o-mini' },
     ],
     heavy: [
       { provider: 'openrouter',    model: process.env.KAIROS_DEEP_MODEL  ?? 'moonshotai/kimi-k2-thinking' },
-      { provider: 'anthropic_cli', model: 'claude-opus-4-7' },
       { provider: 'codex_cli',     model: 'o1' },
-      { provider: 'anthropic_api', model: 'claude-sonnet-4-6' },
+      { provider: 'openai',        model: 'gpt-4o-mini' },
     ],
   },
   hosted: {

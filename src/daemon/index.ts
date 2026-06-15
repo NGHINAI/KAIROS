@@ -177,7 +177,7 @@ import { buildGuideTools } from './agents/guideTools'
 import { buildActionToolset, type ActionToolDeps } from './agents/buildActionToolset'
 import { makeScreencaptureCapture, makeVisionLocate, makeCliclickClick } from './agents/cuaTool'
 import { createKairosMcpServer } from './codex/mcpServer'
-import { createBrainProxy, defaultAliasMap } from './codex/brainProxy'
+import { createBrainProxy, defaultAliasMap, defaultReasoningFor } from './codex/brainProxy'
 import { GuideLessonManager, LESSON_CONTINUE_SENTINEL, LESSON_CONTINUE_TEXT } from './agents/guideLesson'
 import { TEACHING_RE } from './agents/loop/verifier'
 import { ToolUsageTracker } from './agents/toolUsageTracker'
@@ -1670,6 +1670,11 @@ async function main(): Promise<void> {
         upstreamKey: brainKey,
         expectedBearer: brainKey,
         aliasMap: defaultAliasMap(),
+        // Per-task-type reasoning effort: routine smart turns think LOW (fast),
+        // deep-lane turns think HIGH (capable). Keeps the capable model but bounds
+        // its thinking on the common case — the real latency lever. Tune via
+        // KAIROS_BRAIN_REASONING_EFFORT / _DEEP (set 'off' to defer to the provider).
+        reasoningFor: defaultReasoningFor(),
         log: (m: string) => log(m),
       })
     : null

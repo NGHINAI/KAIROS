@@ -23,10 +23,10 @@
   },
 
   "models": {
-    "_comment": "Haiku for tick decisions (cheap), Sonnet for real work and dreams.",
-    "tick": "claude-haiku-4-5",
-    "work": "claude-sonnet-4-6",
-    "dream": "claude-sonnet-4-6"
+    "_comment": "NON-claude OpenRouter ids — the runtime never invokes a claude model. These are record/label values; the actual per-call model comes from the KAIROS_*_MODEL env vars (tickModel/workModel/memoryModel/visionModel in index.ts).",
+    "tick": "openai/gpt-4o-mini",
+    "work": "minimax/minimax-m3",
+    "dream": "openai/gpt-4o-mini"
   },
 
   "dream": {

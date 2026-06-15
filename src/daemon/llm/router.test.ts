@@ -138,10 +138,13 @@ function createTestRouter(opts: { mode: KairosMode; available: ProviderId[] }) {
 }
 
 describe('ModelRouter mode preferences', () => {
-  it('byo mode: prefers Anthropic CLI when available', () => {
+  it('byo mode: NEVER selects claude — falls through to a non-claude provider', () => {
+    // anthropic_cli is no longer a byo candidate (no claude at runtime). Even when
+    // it's "available", the router skips it and picks the next non-claude provider.
     const router = createTestRouter({ mode: 'byo', available: ['anthropic_cli', 'openai'] })
     const chosen = router.pickProviderForTask({ task_type: 'agency_judge' as any })
-    expect(chosen.provider).toBe('anthropic_cli')
+    expect(chosen.provider).toBe('openai')
+    expect(chosen.provider).not.toBe('anthropic_cli')
   })
 
   it('hosted mode: prefers gpt-5-nano for cheap tier', () => {

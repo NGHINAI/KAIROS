@@ -24,6 +24,12 @@ export interface BrainProxyOptions {
   upstreamBase?: string
   /** alias → real model slug. Unknown models pass through unchanged. */
   aliasMap?: Record<string, string>
+  /** Per-turn REASONING effort, keyed by the INCOMING alias (the task-type signal:
+   *  kairos-smart vs kairos-deep). Returns the value to set as the request's
+   *  `reasoning` field (e.g. {effort:'low'} or {enabled:false}), or undefined to
+   *  leave it to the provider default. An explicit `reasoning` in the request is
+   *  never overridden. Defaults to defaultReasoningFor(). */
+  reasoningFor?: (alias: string) => unknown | undefined
   /** Max retries on 429/5xx (default 2). */
   maxRetries?: number
   /** Per-attempt connect/non-stream timeout ms (default 120000). Streaming bodies
@@ -52,6 +58,34 @@ export function defaultAliasMap(env: Record<string, string | undefined> = proces
   return { kairos: smart, "kairos-smart": smart, "kairos-deep": deep }
 }
 
+/** Build the per-task-type reasoning-effort resolver from env. The opencode brain
+ *  sends one alias per turn (kairos-smart for routine agentic turns, kairos-deep for
+ *  hard planning) — that alias IS the task type, so we map each to an effort:
+ *    KAIROS_BRAIN_REASONING_EFFORT       (smart lane, default 'low')
+ *    KAIROS_BRAIN_REASONING_EFFORT_DEEP  (deep  lane, default 'high')
+ *  Values: 'low'|'medium'|'high' → {effort}; 'none'|'minimal'|'disabled' →
+ *  {enabled:false} (thinking off, fastest); 'off'|'default' → undefined (no
+ *  injection, provider decides). Keeping a capable model but bounding its thinking
+ *  on routine turns is the latency lever (vs downgrading the model on every turn). */
+export function defaultReasoningFor(
+  env: Record<string, string | undefined> = process.env,
+): (alias: string) => unknown | undefined {
+  const map = (level: string | undefined): unknown | undefined => {
+    const l = (level ?? "").toLowerCase().trim()
+    if (l === "" || l === "off" || l === "default" || l === "provider") return undefined
+    if (l === "none" || l === "minimal" || l === "disabled" || l === "false" || l === "0") return { enabled: false }
+    if (l === "low" || l === "medium" || l === "high") return { effort: l }
+    return undefined
+  }
+  const smart = map(env.KAIROS_BRAIN_REASONING_EFFORT ?? "low")
+  const deep = map(env.KAIROS_BRAIN_REASONING_EFFORT_DEEP ?? "high")
+  return (alias: string) => {
+    if (alias === "kairos-deep") return deep
+    if (alias === "kairos" || alias === "kairos-smart") return smart
+    return undefined // unknown / explicitly-named model → don't touch
+  }
+}
+
 export interface BrainProxy {
   /** Route a /brain/* (or root) request here. `subpath` is the path AFTER the
    *  mount prefix, e.g. "/v1/responses". */
@@ -62,6 +96,7 @@ export function createBrainProxy(opts: BrainProxyOptions): BrainProxy {
   const log = opts.log ?? (() => {})
   const upstreamBase = (opts.upstreamBase ?? DEFAULT_UPSTREAM).replace(/\/$/, "")
   const aliasMap = opts.aliasMap ?? {}
+  const reasoningFor = opts.reasoningFor   // undefined → no injection (back-compat)
   const maxRetries = opts.maxRetries ?? 2
   const timeoutMs = opts.timeoutMs ?? 120_000
   const doFetch = opts.fetchImpl ?? fetch
@@ -84,6 +119,12 @@ export function createBrainProxy(opts: BrainProxyOptions): BrainProxy {
         try {
           const parsed = JSON.parse(bodyText)
           modelBefore = parsed.model
+          // Per-task-type reasoning effort, keyed by the INCOMING alias — BEFORE the
+          // alias is rewritten away. Never override a reasoning the caller set itself.
+          if (reasoningFor && parsed.reasoning === undefined) {
+            const r = reasoningFor(parsed.model)
+            if (r !== undefined) parsed.reasoning = r
+          }
           if (parsed.model && aliasMap[parsed.model]) parsed.model = aliasMap[parsed.model]
           streaming = parsed.stream === true
           bodyText = JSON.stringify(parsed)

@@ -3,7 +3,7 @@
 // from the client, streaming passthrough, retry/backoff (429 + Retry-After),
 // 5xx exhaustion, network error, non-JSON body.
 import { describe, expect, test } from "bun:test"
-import { createBrainProxy, defaultAliasMap } from "./brainProxy"
+import { createBrainProxy, defaultAliasMap, defaultReasoningFor } from "./brainProxy"
 
 type Call = { url: string; init: RequestInit }
 function mockFetch(responder: (call: Call, attempt: number) => Response | Promise<Response>) {
@@ -135,6 +135,44 @@ describe("GET passthrough (codex hits /models etc.)", () => {
     expect(calls[0]!.url).toBe("https://openrouter.ai/api/v1/models")
     expect((calls[0]!.init.headers as any).authorization).toBe(`Bearer ${UPSTREAM_KEY}`)
     expect(calls[0]!.init.body).toBeUndefined()   // no body on GET
+  })
+})
+
+describe("reasoning-effort injection (per-task-type via the alias)", () => {
+  test("defaultReasoningFor maps env effort per lane; smart=low / deep=high by default", () => {
+    const def = defaultReasoningFor({})
+    expect(def("kairos-smart")).toEqual({ effort: "low" })
+    expect(def("kairos-deep")).toEqual({ effort: "high" })
+    expect(def("openai/gpt-5")).toBeUndefined()          // unknown/explicit model → untouched
+
+    const med = defaultReasoningFor({ KAIROS_BRAIN_REASONING_EFFORT: "medium" })
+    expect(med("kairos-smart")).toEqual({ effort: "medium" })
+
+    const none = defaultReasoningFor({ KAIROS_BRAIN_REASONING_EFFORT: "none" })
+    expect(none("kairos-smart")).toEqual({ enabled: false })   // fastest — thinking off
+
+    const off = defaultReasoningFor({ KAIROS_BRAIN_REASONING_EFFORT: "off" })
+    expect(off("kairos-smart")).toBeUndefined()          // injection disabled → provider default
+  })
+
+  test("the proxy injects reasoning for a known alias (the smart lane)", async () => {
+    const { p, calls } = proxy({ reasoningFor: defaultReasoningFor({ KAIROS_BRAIN_REASONING_EFFORT: "low" }) })
+    await p.handleRequest(post({ model: "kairos-smart", input: "x" }), "/v1/responses")
+    const sent = JSON.parse(String(calls[0]!.init.body))
+    expect(sent.model).toBe("minimax/minimax-m3")        // alias still rewritten
+    expect(sent.reasoning).toEqual({ effort: "low" })    // effort injected by lane
+  })
+
+  test("an explicit reasoning in the request is NEVER overridden", async () => {
+    const { p, calls } = proxy({ reasoningFor: defaultReasoningFor({ KAIROS_BRAIN_REASONING_EFFORT: "high" }) })
+    await p.handleRequest(post({ model: "kairos-smart", reasoning: { effort: "minimal" } }), "/v1/responses")
+    expect(JSON.parse(String(calls[0]!.init.body)).reasoning).toEqual({ effort: "minimal" })
+  })
+
+  test("no reasoningFor option → body unchanged (back-compat)", async () => {
+    const { p, calls } = proxy()  // default proxy() has no reasoningFor
+    await p.handleRequest(post({ model: "kairos-smart", input: "x" }), "/v1/responses")
+    expect(JSON.parse(String(calls[0]!.init.body)).reasoning).toBeUndefined()
   })
 })
 
