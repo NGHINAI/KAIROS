@@ -39,9 +39,13 @@ const DEFAULTS: Config = {
     timeoutMs: 30 * 60 * 1000,
   },
   models: {
-    tick: 'claude-haiku-4-5',
-    work: 'claude-sonnet-4-6',
-    dream: 'claude-sonnet-4-6',
+    // NON-claude OpenRouter ids. The runtime never invokes a claude model — every
+    // background path (tick, work, dream, vision) routes through an injected
+    // OpenRouter completer. Overridable per-task via the KAIROS_*_MODEL env vars
+    // resolved in index.ts (tickModel / workModel / memoryModel / visionModel).
+    tick: process.env.KAIROS_TICK_MODEL ?? process.env.KAIROS_FAST_MODEL ?? 'openai/gpt-4o-mini',
+    work: process.env.KAIROS_WORK_MODEL ?? process.env.KAIROS_BRAIN_MODEL_SMART ?? process.env.KAIROS_DEEP_MODEL ?? 'minimax/minimax-m3',
+    dream: process.env.KAIROS_MEMORY_MODEL ?? process.env.KAIROS_FAST_MODEL ?? 'openai/gpt-4o-mini',
   },
   dream: {
     minIntervalMinutes: 15,

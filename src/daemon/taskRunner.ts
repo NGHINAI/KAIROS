@@ -1,7 +1,12 @@
-// Task runner: spawns `claude -p` subprocesses to execute WORK decisions.
-// Each task gets its own subprocess with the system prompt + work prompt.
+// Task runner: executes proactive WORK decisions through KAIROS's OWN in-house
+// agent runner (runWork — the background sub-agent: our deep model on OpenRouter,
+// with the user's memory/skills/Composio tools + approval gating). It used to
+// spawn `claude -p` subprocesses; that path is GONE — the runtime must never call
+// a claude model. runWork is injected (see index.ts → backgroundSub.manager
+// .spawnAndWait), so the lane stays testable without booting the daemon.
 
-import { existsSync, mkdirSync, readFileSync } from 'fs'
+import { mkdirSync } from 'fs'
+import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import type { Database } from 'bun:sqlite'
 import * as queries from './db'
@@ -16,24 +21,29 @@ export type TaskResult = {
   costCents: number
 }
 
+/** Runs a goal to completion on KAIROS's own agent loop (deep model + tools +
+ *  approval), returning the final spoken-style report. Wired to the background
+ *  sub-agent manager's spawnAndWait. costCents is metered in the LLM ledger via
+ *  the sub-agent's adapter, so it is not returned here (returns 0 below). */
+export type RunWorkFn = (
+  goal: string,
+  opts: { conversationId?: string | null },
+) => Promise<{ finalText: string; ok: boolean }>
+
+export interface TaskRunnerDeps {
+  runWork?: RunWorkFn
+}
+
 export class TaskRunner {
   private runningCount = 0
-  private systemPrompt: string
+  private runWork?: RunWorkFn
 
   constructor(
     private db: Database,
     private config: Config,
+    deps: TaskRunnerDeps = {},
   ) {
-    const sysPath = join(config.sandboxDir, 'src', 'prompts', 'system.md')
-    this.systemPrompt = existsSync(sysPath)
-      ? readFileSync(sysPath, 'utf8')
-      : 'You are KAIROS, an autonomous assistant.'
-
-    // Load memory if available
-    const memPath = join(config.sandboxDir, 'state', 'MEMORY.md')
-    if (existsSync(memPath)) {
-      this.systemPrompt += '\n\n# Your memory\n\n' + readFileSync(memPath, 'utf8')
-    }
+    this.runWork = deps.runWork
   }
 
   getRunningCount(): number {
@@ -53,13 +63,25 @@ export class TaskRunner {
       return { taskId, status: 'failed', summary: 'Concurrency limit reached', costCents: 0 }
     }
 
+    if (!this.runWork) {
+      // No in-house runner wired — fail loudly. We deliberately do NOT fall back
+      // to a `claude -p` subprocess: the runtime must never invoke a claude model.
+      logError(`Task ${taskId} cannot run — no work runner (background sub-agent) configured`)
+      queries.updateTaskStatus(this.db, taskId, 'failed', {
+        completedAt: Date.now(),
+        resultSummary: 'No work runner configured',
+      })
+      return { taskId, status: 'failed', summary: 'No work runner configured — background agent unavailable', costCents: 0 }
+    }
+
     // Mark as running
     queries.updateTaskStatus(this.db, taskId, 'running', {
       startedAt: Date.now(),
     })
     this.runningCount++
 
-    // Build work prompt
+    // Build the work goal (the sub-agent's system prompt — persona/memory/skills —
+    // is assembled by buildContext inside the runner, so we pass only the framing).
     const workPromptTemplate = this.loadWorkPrompt()
     const workPrompt = workPromptTemplate
       .replace('{{TASK_DESCRIPTION}}', task.description)
@@ -69,83 +91,34 @@ export class TaskRunner {
 
     // Ensure task log directory
     const taskLogDir = join(this.config.sandboxDir, 'state', 'tasks', taskId)
-    mkdirSync(taskLogDir, { recursive: true })
+    try { mkdirSync(taskLogDir, { recursive: true }) } catch { /* */ }
 
     log(`Starting task ${taskId}: "${task.description.slice(0, 60)}"`)
 
     try {
-      // Spawn claude -p
-      const args = [
-        'claude', '-p',
-        '--model', this.config.models.work,
-        '--output-format', 'json',
-      ]
+      // Run on KAIROS's OWN agent loop (deep model on OpenRouter + tools + approval
+      // gating). A soft timeout bounds the wait; the sub-agent has its own lifecycle
+      // (caps + cancel) so a slow run self-reports later rather than hanging the lane.
+      const timeoutMs = this.config.task.timeoutMs
+      let timedOut = false
+      const work = this.runWork(workPrompt, { conversationId: task.session_id })
+      const result = await Promise.race([
+        work,
+        new Promise<{ finalText: string; ok: boolean }>((resolve) =>
+          setTimeout(() => { timedOut = true; resolve({ finalText: `Task exceeded ${Math.round(timeoutMs / 60000)}m and was left running in the background.`, ok: false }) }, timeoutMs),
+        ),
+      ])
 
-      // Permission mode mapping
-      const modeMap: Record<string, string> = {
-        auto: 'auto',
-        bypass: 'bypassPermissions',
-        trusted: 'dangerouslySkipPermissions',
-      }
-      const permFlag = modeMap[task.permission_mode] ?? 'auto'
-      if (permFlag === 'bypassPermissions') {
-        args.push('--permission-mode', 'bypassPermissions')
-      } else if (permFlag === 'dangerouslySkipPermissions') {
-        args.push('--dangerously-skip-permissions')
-      }
+      const resultText = result.finalText ?? ''
+      // Spend is metered in the LLM ledger by the sub-agent's adapter, not returned here.
+      const costCents = 0
+      const exitCode = result.ok && !timedOut ? 0 : 1
 
-      const fullPrompt = `${this.systemPrompt}\n\n---\n\n${workPrompt}`
-
-      // Write prompt to temp file — Blob stdin doesn't reliably pipe to claude -p
-      const promptFile = join(this.config.sandboxDir, 'runtime', `work-prompt-${taskId}.txt`)
-      const { writeFileSync: writeSync } = await import('fs')
-      writeSync(promptFile, fullPrompt)
-
-      const proc = Bun.spawn(args, {
-        cwd: task.working_dir,
-        stdin: Bun.file(promptFile),
-        stdout: 'pipe',
-        stderr: 'pipe',
-        env: {
-          ...process.env,
-          KAIROS_SUBPROCESS: '1',  // Prevent recursive MCP loading
-          KAIROS_TASK_ID: taskId,
-          KAIROS_SANDBOX_DIR: this.config.sandboxDir,
-        },
-      })
-
-      // Update subprocess PID
-      queries.updateTaskStatus(this.db, taskId, 'running', {
-        subprocessPid: proc.pid,
-      })
-
-      // Set up timeout
-      const timeoutHandle = setTimeout(() => {
-        log(`Task ${taskId} timed out after ${this.config.task.timeoutMs}ms`, 'warn')
-        proc.kill('SIGTERM')
-      }, this.config.task.timeoutMs)
-
-      // Wait for completion
-      const stdout = await new Response(proc.stdout).text()
-      const stderr = await new Response(proc.stderr).text()
-      const exitCode = await proc.exited
-      clearTimeout(timeoutHandle)
-
-      // Save logs
-      await Bun.write(join(taskLogDir, 'stdout.log'), stdout)
-      await Bun.write(join(taskLogDir, 'stderr.log'), stderr)
-      await Bun.write(join(taskLogDir, 'prompt.txt'), fullPrompt)
-
-      // Parse result
-      let resultText = stdout
-      let costCents = 0
+      // Save a log of what was produced (debugging parity with the old stdout.log).
       try {
-        const parsed = JSON.parse(stdout)
-        resultText = (parsed.result ?? '') as string
-        costCents = Math.round(((parsed.total_cost_usd ?? parsed.cost_usd ?? 0) as number) * 100)
-      } catch {
-        // Raw text output
-      }
+        await Bun.write(join(taskLogDir, 'goal.txt'), workPrompt)
+        await Bun.write(join(taskLogDir, 'result.txt'), resultText)
+      } catch { /* logging must never break the lane */ }
 
       // Check for blocked sentinel
       const blockedMatch = resultText.match(/STOP_NEEDS_APPROVAL:([\w-]+)/)
@@ -258,16 +231,19 @@ export class TaskRunner {
         this.runningCount--
         return { taskId, status: 'success', summary: resultText, costCents }
       } else {
+        // The sub-agent didn't complete cleanly (ok:false or it timed out). Its
+        // finalText is the human-readable reason.
+        const reason = resultText.slice(0, 500) || 'The task did not complete.'
         queries.updateTaskStatus(this.db, taskId, 'failed', {
           completedAt: Date.now(),
-          resultSummary: `Exit code ${exitCode}: ${stderr.slice(0, 500)}`,
+          resultSummary: reason,
         })
         queries.createMessage(this.db, {
           sessionId: task.session_id,
           taskId,
           kind: 'error',
           priority: 'proactive',
-          body: `✗ Task "${task.description.slice(0, 50)}" failed (exit ${exitCode}). Check logs: state/tasks/${taskId}/`,
+          body: `✗ Task "${task.description.slice(0, 50)}" didn't complete. ${reason}`,
         })
         // Discord notification on failure
         const { notifyTaskResult } = await import('./notify')
@@ -275,11 +251,11 @@ export class TaskRunner {
           taskId,
           description: task.description.slice(0, 60),
           status: 'failed',
-          summary: `Exit code ${exitCode}.\n\nstderr:\n${stderr.slice(0, 1500)}`,
+          summary: reason,
         })
-        log(`Task ${taskId} failed with exit code ${exitCode}`, 'warn')
+        log(`Task ${taskId} failed: ${reason.slice(0, 120)}`, 'warn')
         this.runningCount--
-        return { taskId, status: 'failed', summary: stderr.slice(0, 500), costCents }
+        return { taskId, status: 'failed', summary: reason, costCents }
       }
     } catch (err) {
       logError(`Task ${taskId} exception`, err)
@@ -299,39 +275,19 @@ export class TaskRunner {
 
   async investigate(topic: string): Promise<void> {
     log(`Investigating: ${topic}`)
-    // Spawn a lightweight read-only subprocess
+    if (!this.runWork) {
+      logError('Investigate skipped — no work runner (background sub-agent) configured')
+      return
+    }
+    // Run a lightweight, read-only investigation on KAIROS's own agent loop.
     try {
       const prompt = `You are KAIROS investigating something briefly. Topic: ${topic}
 
-Look into this quickly. Read files, check git status, run non-destructive commands.
+Look into this quickly. Read files, check git status, run non-destructive (read-only) commands.
 Don't modify anything. Report what you find in 2-3 sentences.`
 
-      // Write prompt to temp file (Blob stdin unreliable with claude -p)
-      const invFile = join(this.config.sandboxDir, 'runtime', 'investigate-prompt.txt')
-      const { writeFileSync: ws } = await import('fs')
-      ws(invFile, `${this.systemPrompt}\n\n---\n\n${prompt}`)
-
-      const proc = Bun.spawn([
-        'claude', '-p',
-        '--output-format', 'json',
-      ], {
-        stdin: Bun.file(invFile),
-        stdout: 'pipe',
-        stderr: 'pipe',
-        env: {
-          ...process.env,
-          KAIROS_SUBPROCESS: '1',  // Prevent recursive MCP loading
-        },
-      })
-
-      const stdout = await new Response(proc.stdout).text()
-      await proc.exited
-
-      let result = stdout
-      try {
-        const parsed = JSON.parse(stdout)
-        result = (parsed.result ?? '') as string
-      } catch { /* raw text */ }
+      const { finalText } = await this.runWork(prompt, { conversationId: null })
+      const result = finalText ?? ''
 
       // Store as memory candidate
       this.db.run(

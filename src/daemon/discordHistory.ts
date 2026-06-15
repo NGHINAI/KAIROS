@@ -84,6 +84,9 @@ export class DiscordHistory {
   constructor(
     private db: Database,
     private config: Config,
+    // Summarization brain. Injected OpenRouter completer (fast model) — replaces
+    // the old `claude -p` Haiku subprocess. No claude at runtime.
+    private llm?: { complete: (body: any) => Promise<{ text: string }> },
   ) {
     this.db.exec(DISCORD_HISTORY_SCHEMA)
   }
@@ -247,24 +250,12 @@ SUMMARY: <2-4 sentence summary>
 Transcript:
 ${transcript}`
 
-      const proc = Bun.spawn([
-        'claude', '-p',
-        '--model', 'claude-haiku-4-5',
-        '--output-format', 'json',
-      ], {
-        stdin: new TextEncoder().encode(prompt),
-        stdout: 'pipe',
-        stderr: 'pipe',
-      })
-
-      const stdout = await new Response(proc.stdout).text()
-      await proc.exited
-
-      let result = stdout
-      try {
-        const parsed = JSON.parse(stdout)
-        result = (parsed.result ?? '') as string
-      } catch { /* raw text */ }
+      if (!this.llm) {
+        log('Discord summarization skipped — no LLM configured', 'warn')
+        return
+      }
+      const resp = await this.llm.complete({ messages: [{ role: 'user', content: prompt }], max_tokens: 300 })
+      const result = resp.text ?? ''
 
       const topicMatch = result.match(/TOPIC:\s*(.+)/)
       const summaryMatch = result.match(/SUMMARY:\s*([\s\S]+)/)

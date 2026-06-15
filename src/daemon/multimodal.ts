@@ -46,7 +46,12 @@ Reply naturally, in KAIROS's voice (witty, concise, no corporate filler).`
 export class MultiModalAnalyzer {
   private cacheDir: string
 
-  constructor(private config: Config) {
+  constructor(
+    private config: Config,
+    // The vision brain. Injected OpenRouter completer pointed at a vision-capable
+    // model — replaces the old `claude -p` Sonnet subprocess. No claude at runtime.
+    private llm?: { complete: (body: any) => Promise<{ text: string }> },
+  ) {
     this.cacheDir = join(config.sandboxDir, 'state', 'multimodal-cache')
     mkdirSync(this.cacheDir, { recursive: true })
   }
@@ -81,51 +86,37 @@ export class MultiModalAnalyzer {
       .replace('{{PROMPT}}', req.prompt)
       .replace('{{DETAIL_INSTRUCTION}}', detailInstruction)
 
-    // claude -p doesn't take image flags directly via CLI in all versions,
-    // but we can pass file references in the prompt that Claude reads.
-    // Format: include the image path as a reference, Claude's tool will
-    // read it. For raw image data we'd need to use the API directly.
-    const promptWithImageRef = `${fullPrompt}\n\nImage to analyze: ${imagePath}\n\nRead the image at that path and respond.`
+    // Send the image inline as a base64 data-URL via the standard OpenAI/OpenRouter
+    // multimodal `image_url` content part — the vision model sees the pixels directly
+    // (no Read-tool round-trip, no claude). For raw bytes we read the resolved local
+    // file; remote URLs are fetched to cache by resolveImagePath first.
+    if (!this.llm) {
+      return { ok: false, description: '', cost_cents: 0, model: 'n/a', duration_ms: Date.now() - startMs, error: 'No vision LLM configured' }
+    }
+    const dataUrl = await this.toDataUrl(imagePath, req.image.mime_type)
+    if (!dataUrl) {
+      return { ok: false, description: '', cost_cents: 0, model: 'n/a', duration_ms: Date.now() - startMs, error: 'Could not read image bytes' }
+    }
 
     try {
-      const proc = Bun.spawn([
-        'claude', '-p',
-        '--model', this.config.models.work,  // Sonnet has vision
-        '--output-format', 'json',
-        '--permission-mode', 'bypassPermissions',
-      ], {
-        stdin: new TextEncoder().encode(promptWithImageRef),
-        stdout: 'pipe',
-        stderr: 'pipe',
+      const resp = await this.llm.complete({
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: fullPrompt },
+            { type: 'image_url', image_url: { url: dataUrl } },
+          ],
+        }],
       })
 
-      const stdout = await new Response(proc.stdout).text()
-      const exitCode = await proc.exited
-
-      if (exitCode !== 0) {
-        return {
-          ok: false,
-          description: '',
-          cost_cents: 0,
-          model: this.config.models.work,
-          duration_ms: Date.now() - startMs,
-          error: `Subprocess exited ${exitCode}`,
-        }
-      }
-
-      let description = stdout.trim()
-      let costCents = 0
-      try {
-        const parsed = JSON.parse(stdout)
-        description = ((parsed.result ?? '') as string).trim()
-        costCents = Math.round(((parsed.cost_usd ?? 0) as number) * 100)
-      } catch { /* raw text fallback */ }
+      const description = (resp.text ?? '').trim()
+      const costCents = 0  // spend metered in the LLM ledger via the completer's adapter
 
       return {
         ok: true,
         description,
         cost_cents: costCents,
-        model: this.config.models.work,
+        model: 'vision',
         duration_ms: Date.now() - startMs,
       }
     } catch (err) {
@@ -133,15 +124,38 @@ export class MultiModalAnalyzer {
         ok: false,
         description: '',
         cost_cents: 0,
-        model: this.config.models.work,
+        model: 'vision',
         duration_ms: Date.now() - startMs,
         error: err instanceof Error ? err.message : String(err),
       }
     }
   }
 
+  /** Read a resolved local image file into a base64 data-URL for the vision model. */
+  private async toDataUrl(path: string, mimeHint?: string): Promise<string | null> {
+    try {
+      const bytes = new Uint8Array(await Bun.file(path).arrayBuffer())
+      if (bytes.byteLength === 0) return null
+      const mime = mimeHint || this.guessMime(path)
+      const b64 = Buffer.from(bytes).toString('base64')
+      return `data:${mime};base64,${b64}`
+    } catch (err) {
+      logError('Failed to read image bytes for vision', err)
+      return null
+    }
+  }
+
+  /** Best-effort mime from a file extension (defaults to image/png). */
+  private guessMime(path: string): string {
+    const p = path.toLowerCase()
+    if (p.endsWith('.jpg') || p.endsWith('.jpeg')) return 'image/jpeg'
+    if (p.endsWith('.gif')) return 'image/gif'
+    if (p.endsWith('.webp')) return 'image/webp'
+    return 'image/png'
+  }
+
   /**
-   * Convert any ImageInput to a file path Claude can read.
+   * Convert any ImageInput to a local file path.
    * - URL → download to cache dir
    * - file → return as is (with safety check)
    * - base64 → decode to cache dir

@@ -39,7 +39,6 @@ import { ConversationMessageStore } from './voice/conversationMessageStore'
 import { ActivityStore } from './activity/activityStore'
 import { coalesceFragment } from './voice/utteranceCoalesce'
 import { startWrapApi, type WrapApiServer } from './wrapApi/server'
-import { LLMAdapter } from './wrapApi/adapters/llmAdapter'
 import { VoiceAdapter } from './wrapApi/adapters/voiceAdapter'
 import { OpenRouterAdapter } from './wrapApi/adapters/openRouterAdapter'
 import { TIER_MODELS, type Tier } from './agents/types'
@@ -224,6 +223,23 @@ function buildMemoryLlmCompleter(): { complete: (body: any) => Promise<{ text: s
   return buildLlmCompleterForModel(memoryModel(), 'memory')
 }
 
+/** The "work" model for heavy background generation (proactive task framing,
+ *  skill code-gen, source patches). Resolution:
+ *    KAIROS_WORK_MODEL → KAIROS_BRAIN_MODEL_SMART → KAIROS_DEEP_MODEL → minimax-m3
+ *  Never a claude id — the runtime must not invoke a claude model. */
+function workModel(): string {
+  return process.env.KAIROS_WORK_MODEL
+    ?? process.env.KAIROS_BRAIN_MODEL_SMART
+    ?? process.env.KAIROS_DEEP_MODEL
+    ?? 'minimax/minimax-m3'
+}
+
+/** The vision model for image analysis. Resolution:
+ *    KAIROS_VISION_MODEL → KAIROS_CUA_VISION_MODEL → openai/gpt-4o-mini (has vision) */
+function visionModel(): string {
+  return process.env.KAIROS_VISION_MODEL ?? process.env.KAIROS_CUA_VISION_MODEL ?? 'openai/gpt-4o-mini'
+}
+
 /** Shared OpenRouter completer for an exact model id ({messages}→{text}).
  *  usageLabel attributes the spend in the ledger (record-only metering). */
 function buildLlmCompleterForModel(model: string, usageLabel = 'agent'): { complete: (body: any) => Promise<{ text: string }> } {
@@ -360,8 +376,18 @@ async function main(): Promise<void> {
   // NOT the unauthenticated `claude -p` CLI that 401'd on every tick.
   const tickModel = process.env.KAIROS_TICK_MODEL ?? process.env.KAIROS_FAST_MODEL ?? 'openai/gpt-4o-mini'
   const decisionEngine = new DecisionEngine(db, config, buildLlmCompleterForModel(tickModel))
-  const taskRunner = new TaskRunner(db, config)
-  const memoryStore = new MemoryStore(db, config)
+  // The proactive WORK lane runs on KAIROS's OWN background sub-agent (deep model on
+  // OpenRouter + memory/skills/Composio + approval gating) — NOT a `claude -p` CLI.
+  // The manager is constructed later in boot (10b), so resolve it lazily at call time;
+  // by the time any scheduled task actually runs, boot has long completed.
+  const taskRunner = new TaskRunner(db, config, {
+    runWork: async (goal, opts) => {
+      const mgr = (globalThis as { __kairosBackgroundManager?: { spawnAndWait: (g: string, o?: { conversationId?: string | null }) => Promise<{ finalText: string; ok: boolean }> } }).__kairosBackgroundManager
+      if (!mgr) return { finalText: 'Background agent not ready.', ok: false }
+      return mgr.spawnAndWait(goal, { conversationId: opts.conversationId ?? null })
+    },
+  })
+  const memoryStore = new MemoryStore(db, config, buildMemoryLlmCompleter())
   ;(globalThis as { __kairosMemoryStore?: MemoryStore }).__kairosMemoryStore = memoryStore
   const voice = new Voice(config.sandboxDir)
 
@@ -374,7 +400,7 @@ async function main(): Promise<void> {
   // two same-named classes have different constructors and shadowing caused the
   // "{skillStore} not assignable to string" / "initialize does not exist" type errors.
   const { SkillRegistry: ManifestSkillRegistry } = await import('./skillRegistry')
-  const scheduleManager = new ScheduleManager(db, config)
+  const scheduleManager = new ScheduleManager(db, config, buildLlmCompleterForModel(tickModel, 'schedule_parse'))
   const environmentScanner = new EnvironmentScanner(db, config)
   const feedbackCollector = new FeedbackCollector(db, config)
   const skillRegistry = new ManifestSkillRegistry(config.sandboxDir)
@@ -395,7 +421,7 @@ async function main(): Promise<void> {
 
   // 6e. SkillGenerator (L2): KAIROS can write its own skills
   const { SkillGenerator } = await import('./skillGenerator')
-  const skillGenerator = new SkillGenerator(config, skillRegistry)
+  const skillGenerator = new SkillGenerator(config, skillRegistry, buildLlmCompleterForModel(workModel(), 'skillgen'))
   ;(globalThis as { __kairosSkillGenerator?: typeof skillGenerator }).__kairosSkillGenerator = skillGenerator
 
   // 6f. SkillGapDetector (L3): KAIROS notices what it can't do
@@ -420,7 +446,7 @@ async function main(): Promise<void> {
 
   // 6h. SourceEvolution (L5): KAIROS proposes source code patches to itself
   const { SourceEvolution } = await import('./sourceEvolution')
-  const sourceEvolution = new SourceEvolution(db, config)
+  const sourceEvolution = new SourceEvolution(db, config, buildLlmCompleterForModel(workModel(), 'patchgen'))
   ;(globalThis as { __kairosSourceEvolution?: typeof sourceEvolution }).__kairosSourceEvolution = sourceEvolution
 
   // 6i. SelfDebugger (B): autonomously propose fixes for recurring errors
@@ -516,6 +542,12 @@ async function main(): Promise<void> {
       botConfig,
       db,
       (event) => scheduler.triggerImmediateTick(event as TickEvent),
+      {
+        // No claude: Discord text replies + summaries on the fast model, image
+        // analysis on the vision model — all OpenRouter completers.
+        llm: buildLlmCompleterForModel(tickModel, 'discord'),
+        visionLlm: buildLlmCompleterForModel(visionModel(), 'discord_vision'),
+      },
     )
     void discordBot.start()
   } else {
@@ -1603,8 +1635,14 @@ async function main(): Promise<void> {
   // When a subsystem isn't active (e.g. Composio not configured), the adapter
   // returns a graceful "not enabled" stub.
   const wrapApiPort = Number(process.env.KAIROS_DAEMON_PORT) || 9876
-  const llmApiKey = process.env.KAIROS_ANTHROPIC_KEY ?? process.env.ANTHROPIC_API_KEY ?? ''
-  const llmAdapter = new LLMAdapter({ apiKey: llmApiKey, defaultModel: 'claude-haiku-4-5' })
+  // The wrap-API /v1/llm + voice surface runs on OpenRouter (fast model), NOT the
+  // Anthropic-SDK LLMAdapter — the runtime must never invoke a claude model. The
+  // OpenRouterAdapter.complete signature ({messages,system,model,max_tokens}→{text})
+  // is drop-in compatible with the old LLMAdapter consumers below.
+  const llmAdapter = new OpenRouterAdapter({
+    defaultModel: process.env.KAIROS_FAST_MODEL ?? 'openai/gpt-4o-mini',
+    usageLabel: 'wrap_api',
+  })
   const voiceAdapter = voiceBundle
     ? new VoiceAdapter({ llm: { complete: (b) => llmAdapter.complete(b) }, store: voiceBundle.conversationStore })
     : null

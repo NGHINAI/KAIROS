@@ -90,6 +90,9 @@ export class SourceEvolution {
   constructor(
     private db: Database,
     private config: Config,
+    // The patch-generation brain. Injected OpenRouter completer (work/deep model)
+    // — replaces the old `claude -p` Sonnet subprocess. No claude at runtime.
+    private llm?: { complete: (body: any) => Promise<{ text: string }> },
   ) {
     this.db.exec(PATCH_SCHEMA)
   }
@@ -121,30 +124,14 @@ export class SourceEvolution {
       .replace('{{REASON}}', params.reason)
       .replace('{{CURRENT_CONTENT}}', currentContent)
 
+    if (!this.llm) return { ok: false, error: 'No patch-generation LLM configured' }
     let stdout: string
-    let costCents = 0
+    const costCents = 0  // spend metered in the LLM ledger via the completer's adapter
     try {
-      const proc = Bun.spawn([
-        'claude', '-p',
-        '--model', this.config.models.work,
-        '--output-format', 'json',
-        '--permission-mode', 'bypassPermissions',
-      ], {
-        stdin: new TextEncoder().encode(prompt),
-        stdout: 'pipe',
-        stderr: 'pipe',
-      })
-      stdout = await new Response(proc.stdout).text()
-      const exitCode = await proc.exited
-      if (exitCode !== 0) return { ok: false, error: `Generation subprocess exited ${exitCode}` }
-
-      try {
-        const parsed = JSON.parse(stdout)
-        stdout = (parsed.result ?? '') as string
-        costCents = Math.round(((parsed.cost_usd ?? 0) as number) * 100)
-      } catch { /* raw text fallback */ }
+      const resp = await this.llm.complete({ messages: [{ role: 'user', content: prompt }] })
+      stdout = resp.text ?? ''
     } catch (err) {
-      return { ok: false, error: `Subprocess error: ${err instanceof Error ? err.message : String(err)}` }
+      return { ok: false, error: `Patch generation error: ${err instanceof Error ? err.message : String(err)}` }
     }
 
     // Check for rejection

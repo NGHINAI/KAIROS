@@ -12,6 +12,9 @@ export class ScheduleManager {
   constructor(
     private db: Database,
     private config: Config,
+    // The NL→cron fallback brain. Injected OpenRouter completer (the tick/fast
+    // model) — replaces the old `claude -p` Haiku subprocess. No claude at runtime.
+    private llm?: { complete: (body: any) => Promise<{ text: string }> },
   ) {}
 
   /**
@@ -43,30 +46,20 @@ export class ScheduleManager {
       return { cronParsed: humanText.trim(), nextFireAt: next.getTime(), isOneShot: false }
     }
 
-    // 4. LLM fallback: spawn Haiku to parse
+    // 4. LLM fallback: ask the injected completer (tick/fast model) to parse.
+    if (!this.llm) return { cronParsed: null, nextFireAt: null, isOneShot: false }
     try {
-      const proc = Bun.spawn([
-        'claude', '-p',
-        '--model', this.config.models.tick,
-        '--output-format', 'json',
-      ], {
-        stdin: new Blob([
-          `Convert this natural language schedule into a standard 5-field cron expression (minute hour day-of-month month day-of-week).\n\n` +
-          `Input: "${humanText}"\n\n` +
-          `Output ONLY the cron expression on a single line, nothing else. Example: 0 9 * * 1-5`,
-        ]),
-        stdout: 'pipe',
-        stderr: 'pipe',
+      const resp = await this.llm.complete({
+        messages: [{
+          role: 'user',
+          content:
+            `Convert this natural language schedule into a standard 5-field cron expression (minute hour day-of-month month day-of-week).\n\n` +
+            `Input: "${humanText}"\n\n` +
+            `Output ONLY the cron expression on a single line, nothing else. Example: 0 9 * * 1-5`,
+        }],
+        max_tokens: 32,
       })
-
-      const stdout = await new Response(proc.stdout).text()
-      await proc.exited
-
-      let result = stdout.trim()
-      try {
-        const parsed = JSON.parse(result)
-        result = ((parsed.result ?? '') as string).trim()
-      } catch { /* raw text */ }
+      const result = (resp.text ?? '').trim()
 
       // Extract cron from response (might have extra text)
       const cronMatch = result.match(/([\d\*\-\,\/]+(?:\s+[\d\*\-\,\/]+){4})/)

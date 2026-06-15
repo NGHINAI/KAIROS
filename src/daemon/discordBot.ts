@@ -57,6 +57,16 @@ type BotConfig = {
   sandboxDir: string
 }
 
+/** An OpenRouter completer ({messages}→{text}) — the no-claude replacement for the
+ *  bot's old `claude -p` subprocesses. Vision uses the same shape with image_url parts. */
+export type DiscordCompleter = { complete: (body: any) => Promise<{ text: string }> }
+export interface DiscordBotDeps {
+  /** Text replies (agent + quick chat) — the fast/tick model. */
+  llm?: DiscordCompleter
+  /** Image analysis — a vision-capable model. */
+  visionLlm?: DiscordCompleter
+}
+
 export class DiscordBot {
   private ws: WebSocket | null = null
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null
@@ -71,15 +81,22 @@ export class DiscordBot {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private history: import('./discordHistory').DiscordHistory | null = null
   private summarizationTimer: ReturnType<typeof setInterval> | null = null
+  // OpenRouter completers (text + vision) injected from index.ts — replaces every
+  // `claude -p` Haiku/Sonnet subprocess this bot used to spawn. No claude at runtime.
+  private llm?: DiscordCompleter
+  private visionLlm?: DiscordCompleter
 
   constructor(
     private config: BotConfig,
     private db: Database,
     private triggerTick: (event: { source: string; reason: string }) => void,
+    deps: DiscordBotDeps = {},
   ) {
+    this.llm = deps.llm
+    this.visionLlm = deps.visionLlm
     // Lazy-init history on first use to avoid circular deps
     void import('./discordHistory').then(({ DiscordHistory }) => {
-      this.history = new DiscordHistory(this.db, { sandboxDir: this.config.sandboxDir } as never)
+      this.history = new DiscordHistory(this.db, { sandboxDir: this.config.sandboxDir } as never, this.llm)
       // Periodic summarization every 10 minutes
       this.summarizationTimer = setInterval(() => {
         if (this.history) void this.history.maybeSummarize(this.config.channelId)
@@ -423,22 +440,19 @@ export class DiscordBot {
       skillsList,
     })
 
-    // Spawn Haiku — cheap, fast (~$0.0003, 1-2s)
-    const proc = Bun.spawn(['claude', '-p', '--model', 'claude-haiku-4-5', '--output-format', 'json'], {
-      stdin: new Blob([prompt]),
-      stdout: 'pipe',
-      stderr: 'pipe',
-    })
-
-    const stdout = await new Response(proc.stdout).text()
-    await proc.exited
-
+    // Reply via the injected OpenRouter completer (fast/tick model) — no claude.
+    if (!this.llm) {
+      await this.reply('(agent LLM not configured)')
+      return
+    }
     let raw = ''
     try {
-      const parsed = JSON.parse(stdout) as { result?: string }
-      raw = (parsed.result ?? '').trim()
-    } catch {
-      raw = stdout.trim()
+      const resp = await this.llm.complete({ messages: [{ role: 'user', content: prompt }] })
+      raw = (resp.text ?? '').trim()
+    } catch (err) {
+      logError('Discord agent reply failed', err)
+      await this.reply('(agent reply failed)')
+      return
     }
 
     if (!raw) {
@@ -1064,7 +1078,7 @@ Do NOT explain that you're using action blocks — just use them.`
         const url = parts[0]!.trim()
         const prompt = parts[1]?.trim() ?? 'Describe what you see and what is most relevant.'
         const { MultiModalAnalyzer } = await import('./multimodal')
-        const analyzer = new MultiModalAnalyzer({ sandboxDir: this.config.sandboxDir, models: { work: 'claude-sonnet-4-6' } } as never)
+        const analyzer = new MultiModalAnalyzer({ sandboxDir: this.config.sandboxDir } as never, this.visionLlm)
         const result = await analyzer.analyzeImage({
           image: { source: 'url', data: url },
           prompt,
@@ -1098,10 +1112,7 @@ Do NOT explain that you're using action blocks — just use them.`
     await this.reply(`🖼️ Looking at \`${first.filename}\`...`)
 
     const { MultiModalAnalyzer } = await import('./multimodal')
-    const analyzer = new MultiModalAnalyzer({
-      sandboxDir: this.config.sandboxDir,
-      models: { work: 'claude-sonnet-4-6' },
-    } as never)
+    const analyzer = new MultiModalAnalyzer({ sandboxDir: this.config.sandboxDir } as never, this.visionLlm)
 
     const result = await analyzer.analyzeImage({
       image: {
@@ -1377,25 +1388,15 @@ Do NOT explain that you're using action blocks — just use them.`
 
 Reply briefly. One or two sentences max. Voice: casual, witty, never corporate. Don't use "certainly", "of course", "absolutely". No greetings unless the user greeted you. If they're asking what's up or pinging you, give a quick state summary. Otherwise just reply naturally.`
 
+    if (!this.llm) {
+      await this.reply('Yo. (Chat LLM not configured.)')
+      return
+    }
     try {
-      const proc = Bun.spawn(['claude', '-p', '--model', 'claude-haiku-4-5', '--output-format', 'json'], {
-        stdin: new Blob([prompt]),
-        stdout: 'pipe',
-        stderr: 'pipe',
-      })
+      const resp = await this.llm.complete({ messages: [{ role: 'user', content: prompt }], max_tokens: 200 })
+      let reply = (resp.text ?? '').trim() || "Hey."
 
-      const stdout = await new Response(proc.stdout).text()
-      await proc.exited
-
-      let reply = "Hey."
-      try {
-        const parsed = JSON.parse(stdout) as { result?: string }
-        reply = (parsed.result ?? '').trim() || "Hey."
-      } catch {
-        // Use default
-      }
-
-      // Strip surrounding quotes if Claude wrapped its reply
+      // Strip surrounding quotes if the model wrapped its reply
       reply = reply.replace(/^["']|["']$/g, '').trim()
 
       await this.reply(reply)

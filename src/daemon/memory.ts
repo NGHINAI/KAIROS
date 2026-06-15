@@ -14,6 +14,9 @@ export class MemoryStore {
   constructor(
     private db: Database,
     private config: Config,
+    // The consolidation brain. Injected OpenRouter completer (memory/fast model)
+    // — replaces the old `claude -p` Sonnet subprocess. No claude at runtime.
+    private llm?: { complete: (body: any) => Promise<{ text: string }> },
   ) {
     this.memoryPath = join(config.sandboxDir, 'state', 'MEMORY.md')
 
@@ -87,32 +90,10 @@ export class MemoryStore {
       .replace('{{FEEDBACK_METRICS}}', feedbackMetrics ?? '(No feedback data yet — too early for learning.)')
 
     try {
-      const proc = Bun.spawn([
-        'claude', '-p',
-        '--model', this.config.models.dream,
-        '--output-format', 'json',
-      ], {
-        stdin: new Blob([prompt]),
-        stdout: 'pipe',
-        stderr: 'pipe',
-      })
-
-      const stdout = await new Response(proc.stdout).text()
-      const exitCode = await proc.exited
-
-      if (exitCode !== 0) {
-        throw new Error(`Dream subprocess exited ${exitCode}`)
-      }
-
-      let newMemory: string
-      let costCents = 0
-      try {
-        const parsed = JSON.parse(stdout)
-        newMemory = (parsed.result ?? '') as string
-        costCents = Math.round(((parsed.cost_usd ?? 0) as number) * 100)
-      } catch {
-        newMemory = stdout
-      }
+      if (!this.llm) throw new Error('No consolidation LLM configured')
+      const resp = await this.llm.complete({ messages: [{ role: 'user', content: prompt }] })
+      let newMemory: string = resp.text ?? ''
+      const costCents = 0  // spend metered in the LLM ledger via the completer's adapter
 
       // Validate: must have some structure, not be empty, under 200 lines
       const lines = newMemory.trim().split('\n')
