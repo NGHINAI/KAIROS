@@ -321,8 +321,10 @@ export function buildOpenCodeConfig(o: {
     // webfetch/websearch are off too; subagents go through KAIROS's background lane.)
     tools: DISABLED_OPENCODE_BUILTINS,
     // Cap agentic iterations so a confused turn can't spiral (the watchdog is the floor;
-    // this bounds the common case). Tunable via maxSteps.
-    agent: { build: { maxSteps: o.maxSteps ?? 6 } },
+    // this bounds the common case). Tunable via maxSteps. ALSO disable the built-ins at
+    // the AGENT level (the "build" agent runs turns) — a top-level disable alone was not
+    // honored for some tools (e.g. webfetch reappeared), so we set both.
+    agent: { build: { maxSteps: o.maxSteps ?? 6, tools: DISABLED_OPENCODE_BUILTINS } },
     permission: { edit: "allow", bash: "allow", webfetch: "allow" },
   }
 }

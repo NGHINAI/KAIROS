@@ -65,7 +65,10 @@ describe("openCodeBrain — buildOpenCodeConfig (latency: disable dev built-ins 
   test("disables opencode's coding built-ins (KAIROS /mcp tools only) and caps maxSteps", () => {
     const { buildOpenCodeConfig } = require("./openCodeBrain")
     const cfg = buildOpenCodeConfig({ brainKey: "k", baseURL: "u", modelProviderID: "p", modelID: "m", mcpServerName: "kairos", mcpUrl: "http://x/mcp", mcpToken: "t" })
-    for (const t of ["bash", "edit", "write", "read", "grep", "glob", "task", "webfetch", "websearch", "lsp"]) expect(cfg.tools[t]).toBe(false)
+    for (const t of ["bash", "edit", "write", "read", "grep", "glob", "task", "webfetch", "websearch", "lsp"]) {
+      expect(cfg.tools[t]).toBe(false)            // top-level disable
+      expect(cfg.agent.build.tools[t]).toBe(false) // AND agent-level (the build agent runs turns)
+    }
     expect(cfg.agent.build.maxSteps).toBe(6)
     expect(cfg.mcp.kairos.type).toBe("remote")     // our tools still come via /mcp
     const cfg2 = buildOpenCodeConfig({ brainKey: "k", baseURL: "u", modelProviderID: "p", modelID: "m", mcpServerName: "kairos", mcpUrl: "http://x/mcp", mcpToken: "t", maxSteps: 3 })
