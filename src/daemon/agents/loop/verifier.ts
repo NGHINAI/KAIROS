@@ -51,7 +51,7 @@ const LOCAL_TOOLS = new Set([
   // OUR tools with their own label-based confirm gate (DANGEROUS_LABEL_RE in
   // guideTools); routing them through the background approval-gate would hang
   // every foreground "switch to dark mode" on a pointless approval.
-  "guide_user", "read_screen", "wait_for_screen", "open_app", "end_lesson",
+  "guide_user", "read_screen", "wait_for_screen", "guide_scroll", "open_app", "end_lesson",
   "click_element", "type_text",
   // cua_click acts on the USER'S screen at their spoken request (vision/pixel fallback for
   // click_element) — OUR tool, never an external/destructive write.

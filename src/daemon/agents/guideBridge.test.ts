@@ -28,6 +28,58 @@ test("no HUD answer → resolves null after the timeout (tool degrades to verbal
   expect(r).toBeNull()
 })
 
+test("requestScroll broadcasts scroll_request with direction + target and resolves on the HUD ack", async () => {
+  const { bridge, sent } = bridgeWith()
+  const p = bridge.requestScroll({ app: "System Settings", direction: "down", targetElement: 7 })
+  expect(sent.length).toBe(1)
+  expect(sent[0].event).toBe("scroll_request")
+  expect(sent[0].direction).toBe("down")
+  expect(sent[0].targetElement).toBe(7)
+  expect(sent[0].app).toBe("System Settings")
+  bridge.resolve(sent[0].id, { found: false, reason: "arrow-shown", summary: "App: System Settings\nItems: General · FileVault" })
+  const r = await p
+  expect(r!.reason).toBe("arrow-shown")
+  expect(r!.summary).toContain("FileVault")
+  expect(bridge.isActive).toBe(true)   // scroll guidance marks the guide active (arrow on screen)
+})
+
+test("requestScroll resolves null on timeout (degrades to verbal 'scroll down please')", async () => {
+  const { bridge } = bridgeWith(50)
+  const r = await bridge.requestScroll({ direction: "down", timeoutMs: 50 })
+  expect(r).toBeNull()
+})
+
+test("guide_scroll tool points the scroll direction via requestScroll (USER scrolls)", async () => {
+  const calls: any[] = []
+  const tools = buildGuideTools({ bridge: {
+    request: async () => ({ found: true }),
+    requestScroll: async (req: any) => { calls.push(req); return { found: false, reason: "arrow-shown" } },
+  } as any })
+  const scroll = tools.find((t) => t.name === "guide_scroll")
+  expect(scroll).toBeDefined()
+  const r = await scroll!.execute({ direction: "down", element: 7, app: "System Settings" })
+  expect(calls[0].direction).toBe("down")
+  expect(calls[0].targetElement).toBe(7)
+  expect(String(r)).toMatch(/scroll|read_screen/i)        // tells the model: user scrolls, then re-read
+})
+
+test("guide_scroll without a direction asks for one", async () => {
+  const tools = buildGuideTools({ bridge: { request: async () => ({ found: true }), requestScroll: async () => ({ found: false }) } as any })
+  const scroll = tools.find((t) => t.name === "guide_scroll")!
+  expect(String(await scroll.execute({}))).toMatch(/direction|up.*down|which way/i)
+})
+
+test("guide_scroll degrades gracefully when the HUD doesn't answer", async () => {
+  const tools = buildGuideTools({ bridge: { request: async () => ({ found: true }), requestScroll: async () => null } as any })
+  const scroll = tools.find((t) => t.name === "guide_scroll")!
+  expect(String(await scroll.execute({ direction: "down" }))).toMatch(/scroll|verbal|manually/i)
+})
+
+test("guide_scroll is absent when the bridge can't scroll-guide", () => {
+  const tools = buildGuideTools({ bridge: { request: async () => ({ found: true }) } as any })
+  expect(tools.find((t) => t.name === "guide_scroll")).toBeUndefined()
+})
+
 test("duplicate/unknown results are ignored safely", async () => {
   const { bridge, sent } = bridgeWith()
   const p = bridge.request({ find: "x" })

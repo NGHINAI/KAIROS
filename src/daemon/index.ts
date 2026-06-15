@@ -2946,8 +2946,10 @@ async function main(): Promise<void> {
       // Guide Mode: the HUD answers a guide_request (found the element + pointing,
       // or not found + why) or a screen_request (the AX element inventory) —
       // resolves the agent's awaiting guide_user / read_screen call.
-      if ((cmd?.cmd === 'guide_result' || cmd?.cmd === 'screen_result') && typeof cmd.id === 'string') {
-        guideBridge.resolve(cmd.id, { found: !!cmd.found, label: cmd.label, reason: cmd.reason, summary: cmd.summary })
+      if ((cmd?.cmd === 'guide_result' || cmd?.cmd === 'screen_result' || cmd?.cmd === 'scroll_result') && typeof cmd.id === 'string') {
+        // scroll_result acks the directional arrow; its current inventory (if any) rides in
+        // newSummary — collapse it into the shared `summary` field the bridge resolves on.
+        guideBridge.resolve(cmd.id, { found: !!cmd.found, label: cmd.label, reason: cmd.reason, summary: cmd.summary ?? cmd.newSummary })
         return
       }
 

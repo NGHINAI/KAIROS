@@ -108,6 +108,21 @@ export class GuideBridge {
     )
   }
 
+  /** SCROLL GUIDANCE (computer use, guidance-only): show a directional arrow + a
+   *  "scroll down/up" pill at the edge of the scrollable region so the USER scrolls
+   *  the target into view. KAIROS never auto-scrolls — it points the way (the Guide-
+   *  Mode doctrine). The brain calls this when read_screen marked the target
+   *  `[off-screen ↓]`; after the user scrolls, the brain re-reads + guide_user's by
+   *  number. The HUD acks immediately (arrow shown); `summary` may carry the current
+   *  inventory. Marks the guide active (an arrow is on screen until guide_end). */
+  requestScroll(req: { app?: string; direction: "up" | "down"; targetElement?: number; timeoutMs?: number }): Promise<GuideResult | null> {
+    this.active = true
+    return this.roundTrip(
+      { event: "scroll_request", app: req.app, direction: req.direction, targetElement: req.targetElement },
+      req.timeoutMs ?? 8000,
+    )
+  }
+
   private roundTrip(payload: Record<string, unknown>, timeoutOverrideMs?: number): Promise<GuideResult | null> {
     const id = `g${++this.seq}_${Date.now().toString(36)}`
     const timeoutMs = timeoutOverrideMs ?? this.deps.timeoutMs ?? 8000

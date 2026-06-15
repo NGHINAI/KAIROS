@@ -11,7 +11,7 @@ import type { LessonPoint } from "./guideLesson"
 
 export interface GuideToolsDeps {
   bridge: Pick<GuideBridge, "request"> &
-    Partial<Pick<GuideBridge, "requestScreen" | "requestWatch" | "requestAct">>
+    Partial<Pick<GuideBridge, "requestScreen" | "requestWatch" | "requestAct" | "requestScroll">>
   /** Launch (or focus) a macOS app by name — `open -a <name>` via argv (no shell). */
   openApp?: (name: string) => Promise<{ ok: boolean; error?: string }>
   /** Guide session hooks (GuideLessonManager): successful points feed the durable
@@ -112,6 +112,48 @@ export function buildGuideTools(deps: GuideToolsDeps): ToolDef[] {
         `In THIS SAME response: say one short line naming it ("I'm highlighting ${label} — click that") ` +
         "AND call wait_for_screen with what should APPEAR once they've done it. " +
         "Speaking without the wait_for_screen call strands the user mid-walkthrough."
+      )
+    },
+  }
+
+  // ── SCROLL GUIDANCE ─────────────────────────────────────────────────────────
+  // When read_screen marks the target as off-screen (e.g. "FileVault [off-screen ↓ —
+  // scroll down]"), the element exists in the AX tree but is clipped out of the visible
+  // scroll viewport. guide_user can't point at what isn't on screen, so the model shows
+  // a directional ARROW + "scroll down/up" pill and lets the USER scroll it into view —
+  // then re-reads and points by number. KAIROS never auto-scrolls (guidance doctrine).
+  const guideScroll: ToolDef = {
+    name: "guide_scroll",
+    concurrencySafe: false,
+    description:
+      "Show the user WHICH WAY to scroll when the thing you want to point at is OFF-SCREEN. " +
+      "Call this ONLY after read_screen tagged the target '[off-screen ↓]'/'[off-screen ↑]' (it's in the app but scrolled out of view). " +
+      "The orb shows a glowing arrow + a 'scroll down'/'scroll up' cue at the edge of the scroll area — the USER scrolls, you do NOT. " +
+      "Say one short line ('scroll down a little — I'll point it out'), then call read_screen AGAIN to re-check; once the target is no longer off-screen, guide_user by its NUMBER. " +
+      WALKTHROUGH_PROTOCOL,
+    parameters: {
+      type: "object",
+      properties: {
+        direction: { type: "string", enum: ["up", "down"], description: "Which way the user should scroll to reveal the target (from read_screen's off-screen marker: ↓ = down, ↑ = up)" },
+        element: { type: "number", description: "The target's NUMBER from read_screen (so the arrow can anchor on its scroll region)" },
+        app: { type: "string", description: "App to guide in. Omit for the frontmost app." },
+      },
+      required: ["direction"],
+    },
+    execute: async (args: { direction?: string; element?: number; app?: string }) => {
+      const direction = args?.direction === "up" || args?.direction === "down" ? args.direction : undefined
+      if (!direction) return "Tell guide_scroll the DIRECTION — 'up' or 'down' (read_screen's off-screen marker shows ↑ or ↓)."
+      if (!deps.bridge.requestScroll) return "Scroll guidance isn't available right now — just tell the user out loud to scroll that way, then call read_screen again."
+      const element = Number.isFinite(args?.element) ? Math.round(args!.element!) : undefined
+      let result
+      try { result = await deps.bridge.requestScroll({ direction, targetElement: element, app: args?.app?.trim() || undefined }) } catch { result = null }
+      if (result == null) {
+        return "The on-screen arrow isn't available right now (HUD not running) — tell the user verbally to scroll " + direction + ", then call read_screen again."
+      }
+      return (
+        `Showing a "scroll ${direction}" arrow now. In THIS SAME response: say one short line telling the user to scroll ${direction} ` +
+        `("scroll ${direction} a little — I'll point it out the moment it's visible"). ` +
+        "Then call read_screen AGAIN to re-check; when the target is no longer marked off-screen, guide_user at its NUMBER."
       )
     },
   }
@@ -239,7 +281,9 @@ export function buildGuideTools(deps: GuideToolsDeps): ToolDef[] {
         "Act by NUMBER: click_element({element: N}) when the user asked you to DO it; guide_user({element: N}) when you're SHOWING them how. " +
         "Pick the element whose label matches the user's GOAL WORDS ('wallpaper' → the Wallpaper item), NOT a path you remember from other lessons. " +
         "If NOTHING here matches the goal, the path runs through a sidebar/section item — use the section that " +
-        "would CONTAIN the goal (dark mode → Appearance) and never ask the user what's on their screen:\n" +
+        "would CONTAIN the goal (dark mode → Appearance) and never ask the user what's on their screen. " +
+        "If the matching element is tagged [off-screen ↓] or [off-screen ↑], it exists but is scrolled out of view — " +
+        "call guide_scroll({direction}) to point the way, have the USER scroll, then read_screen again and guide_user by NUMBER:\n" +
         result.summary
       )
     },
@@ -437,6 +481,7 @@ export function buildGuideTools(deps: GuideToolsDeps): ToolDef[] {
   }
 
   const tools = [guideUser, readScreen, waitForScreen]
+  if (deps.bridge.requestScroll) tools.push(guideScroll)
   if (deps.openApp) tools.push(openApp)
   if (deps.lesson) tools.push(endLesson)
   if (deps.bridge.requestAct) tools.push(clickElement, typeText)
