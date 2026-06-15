@@ -2547,9 +2547,15 @@ async function main(): Promise<void> {
         }
       }
     }
-    // Best-effort teardown of the warm opencode server when the daemon exits.
+    // Best-effort teardown of the warm opencode server when the daemon exits. close()
+    // → server.close() → proc.kill() reaps the `opencode serve` child. We hook every
+    // GRACEFUL exit path (signals + process 'exit'); 'exit' is the synchronous belt for
+    // a normal/process.exit() shutdown that didn't arrive via a signal. (SIGKILL/-9 is
+    // uncatchable, so it can still orphan a serve — but that's now harmless: each boot
+    // binds a FRESH free port (findFreePort), so a stale orphan can't block startup.)
     if (openCodeBrainShutdown) {
       for (const sig of ['SIGTERM', 'SIGINT'] as const) process.once(sig, () => { try { openCodeBrainShutdown?.() } catch { /* */ } })
+      process.once('exit', () => { try { openCodeBrainShutdown?.() } catch { /* */ } })
     }
 
     const agentConductor = new Conductor({

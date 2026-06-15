@@ -15,9 +15,27 @@
 // opencode exposes MCP tools as FLAT Chat-Completions function tools, so ANY OpenRouter
 // model (minimax) can call them — the capability codex lacked (docs 17/18).
 
+import { createServer } from "node:net"
 import { createOpenCodeTurnAccumulator, unwrapOpenCodeEvent, type OpenCodeToolCall } from "./openCodeEvents"
 import { isDestructiveCall } from "../agents/loop/verifier"
 import type { LoopEvent, LoopMsg } from "../agents/loop/types"
+
+/** Pick a currently-free loopback TCP port for `opencode serve`. OPS FIX: the SDK
+ *  defaults the serve to a FIXED 4096, so a serve orphaned by a hard kill (SIGKILL,
+ *  crash) keeps holding 4096 and the next daemon boot's serve fails with ServeError.
+ *  A fresh per-boot port means a stale orphan can NEVER block startup. (Graceful
+ *  SIGTERM/SIGINT still reaps the serve via server.close()→proc.kill().) */
+export function findFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = createServer()
+    srv.once("error", reject)
+    srv.listen(0, "127.0.0.1", () => {
+      const addr = srv.address()
+      const port = typeof addr === "object" && addr ? addr.port : 0
+      srv.close(() => (port ? resolve(port) : reject(new Error("could not acquire a free port"))))
+    })
+  })
+}
 
 // ── history → system (D2 cross-turn memory + D5 cacheable prefix) ──────────────
 
@@ -400,10 +418,13 @@ const DISABLED_OPENCODE_BUILTINS: Record<string, boolean> = {
 
 /** Spawn a warm opencode (createOpencode → opencode serve + HTTP client) and adapt the
  *  SDK to OpenCodeHandle. Reads minimal config; the client talks loopback HTTP+SSE. */
-export async function spawnOpenCode(o: { config: any; log?: (m: string) => void }): Promise<OpenCodeHandle> {
+export async function spawnOpenCode(o: { config: any; log?: (m: string) => void; port?: number }): Promise<OpenCodeHandle> {
   const log = o.log ?? (() => {})
   const { createOpencode } = await import("@opencode-ai/sdk")
-  const { client, server } = await createOpencode({ config: o.config })
+  // OPS FIX: bind the serve to a FRESH free port each boot (not the SDK's fixed 4096),
+  // so a serve orphaned by a hard kill can't block this startup with a ServeError.
+  const port = o.port ?? (await findFreePort())
+  const { client, server } = await createOpencode({ config: o.config, port, hostname: "127.0.0.1" })
   log(`opencode serve up at ${server.url}`)
   let handler: (raw: any) => void = () => {}
   let closed = false

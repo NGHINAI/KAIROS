@@ -76,6 +76,23 @@ describe("openCodeBrain — buildOpenCodeConfig (latency: disable dev built-ins 
   })
 })
 
+describe("openCodeBrain — findFreePort (ops: dynamic serve port so a stale orphan can't block boot)", () => {
+  const { findFreePort } = require("./openCodeBrain")
+  test("returns a usable, currently-free TCP port", async () => {
+    const p = await findFreePort()
+    expect(typeof p).toBe("number")
+    expect(p).toBeGreaterThan(1024)
+    expect(p).toBeLessThan(65536)
+    // it must be actually bindable (i.e. it was released after probing)
+    const net = require("node:net")
+    await new Promise<void>((resolve, reject) => {
+      const s = net.createServer()
+      s.once("error", reject)
+      s.listen(p, "127.0.0.1", () => s.close(() => resolve()))
+    })
+  })
+})
+
 describe("openCodeBrain — DYNAMIC per-turn reasoning effort + escalate-retry", () => {
   const { effortModelID } = require("./openCodeBrain")
 
