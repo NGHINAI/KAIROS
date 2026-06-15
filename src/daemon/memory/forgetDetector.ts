@@ -13,10 +13,20 @@
 
 import { fastMax } from "../agents/tokenBudget"
 
+// A turn can only be a memory-forget if it contains an explicit forget/delete CUE aimed
+// at memory. This deterministic gate runs BEFORE the LLM and is the safety net against a
+// false positive that DELETES a fact: a recall QUESTION ("how do I take my coffee?",
+// "what's my favorite color?", "do you know my name?") has no cue → never a forget. (Live
+// bug: the cheap model classified "How do I take my coffee?" as forget and retired the fact.)
+const FORGET_CUE_RE =
+  /\b(forget|forgets?|delete|deletes?|erase|erases?|remove|removes?|wipe|wipes?|scrub|unlearn|disregard|purge)\b|\b(do\s?n['o]?t|stop|never|no longer)\s+(remember|recall|keep)\b|\bscratch that\b|\bnever ?mind\b/i
+
 const SYSTEM_PROMPT = `Decide if the user is asking their assistant to FORGET or DELETE something from its MEMORY (not delete a real file/project/email — those are real-world actions, not memory).
 
 Forget-memory examples: "forget what I told you about X", "delete your memory of X", "forget my favorite color", "ignore what I said about the budget".
-NOT forget-memory: "delete the Husk project", "remove that file", "cancel the meeting" (real actions → intent:"none").
+NOT forget-memory (intent:"none"):
+- real-world actions: "delete the Husk project", "remove that file", "cancel the meeting".
+- QUESTIONS / RECALL asking ABOUT a memory — these RETRIEVE, they do NOT delete: "how do I take my coffee?", "what's my favorite color?", "do you know my name?", "remind me what I said about the budget", "what do you remember about X?". A question is NEVER a forget.
 
 Return ONLY JSON:
 {
@@ -51,6 +61,10 @@ export class ForgetDetector {
   async detect(utterance: string, recentContext?: string, conversationId = "conv_default"): Promise<ForgetOutcome> {
     const u = (utterance ?? "").trim()
     if (u.length < 5) return null
+    // DETERMINISTIC GATE: no explicit forget/delete cue → it can't be a memory delete
+    // (it's a question, a statement, or a real-world action). Skips the LLM entirely —
+    // both a correctness guard (recall questions never delete facts) and a latency win.
+    if (!FORGET_CUE_RE.test(u)) return null
     let j: any
     try {
       const userContent = recentContext
