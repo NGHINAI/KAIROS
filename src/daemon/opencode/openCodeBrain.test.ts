@@ -61,6 +61,18 @@ function brain(connect: () => OpenCodeHandle, extra: any = {}) {
   })
 }
 
+describe("openCodeBrain — buildOpenCodeConfig (latency: disable dev built-ins + cap steps)", () => {
+  test("disables opencode's coding built-ins (KAIROS /mcp tools only) and caps maxSteps", () => {
+    const { buildOpenCodeConfig } = require("./openCodeBrain")
+    const cfg = buildOpenCodeConfig({ brainKey: "k", baseURL: "u", modelProviderID: "p", modelID: "m", mcpServerName: "kairos", mcpUrl: "http://x/mcp", mcpToken: "t" })
+    for (const t of ["bash", "edit", "write", "read", "grep", "glob", "task", "webfetch", "websearch", "lsp"]) expect(cfg.tools[t]).toBe(false)
+    expect(cfg.agent.build.maxSteps).toBe(6)
+    expect(cfg.mcp.kairos.type).toBe("remote")     // our tools still come via /mcp
+    const cfg2 = buildOpenCodeConfig({ brainKey: "k", baseURL: "u", modelProviderID: "p", modelID: "m", mcpServerName: "kairos", mcpUrl: "http://x/mcp", mcpToken: "t", maxSteps: 3 })
+    expect(cfg2.agent.build.maxSteps).toBe(3)
+  })
+})
+
 describe("openCodeBrain — history rendering + system construction (D2/D5)", () => {
   test("renderHistoryForOpenCode produces a compact transcript (user/assistant/tool), skips system", () => {
     const h: LoopMsg[] = [

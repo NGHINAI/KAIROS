@@ -184,6 +184,7 @@ import { ToolUsageTracker } from './agents/toolUsageTracker'
 import { TurnLogger } from './agents/turnLogger'
 import { ComposioToolCache, buildComposioSearchTool } from './agents/composioToolProvider'
 import { SelfHealConnect } from './agents/selfHealConnect'
+import { wrapComposioSelfHeal } from './agents/composioSelfHeal'
 import type { SystemBlock } from './llm/types'
 import { CostTracker } from './llm/costTracker'
 import { buildLlmUsageHook, buildVoiceUsageHook } from './llm/usageMeter'
@@ -897,10 +898,17 @@ async function main(): Promise<void> {
                     save: (c) => { try { writeFileSync(usagePath, JSON.stringify(c)) } catch {} },
                   })
                   ;(globalThis as any).__kairosToolUsage = toolUsage
-                  ;(globalThis as any).__kairosComposioExecute = (name: string, args: any) => {
-                    toolUsage.record(name)   // count real executions → ranks the hot set
-                    return composioClient.executeTool({ toolName: name, userId: composioUserId, arguments: args ?? {} })
-                  }
+                  // INLINE self-heal: on a NOT_CONNECTED result, OAuth-connect the toolkit
+                  // + retry once (daemon-side; the brain only ever sees the healed result).
+                  // Works for BOTH brains (in-house loop + opencode via /mcp → execute_tool).
+                  ;(globalThis as any).__kairosComposioExecute = wrapComposioSelfHeal({
+                    execute: (name: string, args: any) => {
+                      toolUsage.record(name)   // count real executions → ranks the hot set
+                      return composioClient.executeTool({ toolName: name, userId: composioUserId, arguments: args ?? {} })
+                    },
+                    getSelfHeal: () => (globalThis as any).__kairosSelfHealConnect,   // lazy (constructed later in boot)
+                    log: (m: string) => log('[composio] ' + m, 'warn'),
+                  })
                 }
 
                 log('[composio] subsystem ready')
@@ -2555,12 +2563,22 @@ async function main(): Promise<void> {
               return
             }
             if (typeof tw.record === 'function') {
+              // SELF-LEARNING fix: map the turn's PER-TOOL calls into per-tool steps
+              // (mirroring the background lane) so AwmWorker can cluster on the real tool
+              // SEQUENCE + pass its >N-tool threshold. Previously this emitted a single
+              // synthetic 'tier=smart' step, so foreground turns (incl. opencode) were
+              // NEVER mineable into skills. entry.toolCalls is provided by the conductor.
+              const toolSteps = (entry.toolCalls ?? []).map((c: any) => ({
+                action: String(c.name ?? 'tool'),
+                result_summary: c.error ? `error: ${String(c.error)}`.slice(0, 200) : String(c.result ?? 'ok').slice(0, 200),
+              }))
               tw.record({
                 ts: entry.at ?? Date.now(),
                 task_goal: entry.user_input ?? '',
-                intent_id: `agent_turn:${entry.intent_tier ?? 'unknown'}`,
+                // Stable intent_id so AwmWorker clusters similar turns by their tool sequence.
+                intent_id: 'agent_turn',
                 args_summary: entry.intent_reason ?? '',
-                steps: [{
+                steps: toolSteps.length ? toolSteps : [{
                   action: `tier=${entry.intent_tier ?? 'unknown'}`,
                   result_summary: (entry.agent_output ?? '').slice(0, 500),
                 }],

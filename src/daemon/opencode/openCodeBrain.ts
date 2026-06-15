@@ -294,6 +294,8 @@ export function buildOpenCodeConfig(o: {
   mcpServerName: string
   mcpUrl: string
   mcpToken: string
+  /** Max agentic iterations per turn (default 6) — latency cap. */
+  maxSteps?: number
 }): any {
   return {
     provider: {
@@ -312,8 +314,24 @@ export function buildOpenCodeConfig(o: {
         enabled: true,
       },
     },
+    // LATENCY: disable opencode's built-in coding/dev toolset — a voice assistant only
+    // needs KAIROS's own tools (the kairos_* MCP tools, enabled by default). Fewer tools
+    // = a smaller system prompt + fewer wasted reasoning steps per turn (free speed-up).
+    // (Our web access is the kairos web_search/read_webpage via /mcp, so opencode's
+    // webfetch/websearch are off too; subagents go through KAIROS's background lane.)
+    tools: DISABLED_OPENCODE_BUILTINS,
+    // Cap agentic iterations so a confused turn can't spiral (the watchdog is the floor;
+    // this bounds the common case). Tunable via maxSteps.
+    agent: { build: { maxSteps: o.maxSteps ?? 6 } },
     permission: { edit: "allow", bash: "allow", webfetch: "allow" },
   }
+}
+
+/** opencode's default coding built-ins — all OFF for the voice brain (KAIROS tools only). */
+const DISABLED_OPENCODE_BUILTINS: Record<string, boolean> = {
+  bash: false, edit: false, write: false, read: false, grep: false, glob: false,
+  list: false, patch: false, lsp: false, task: false, todowrite: false, todoread: false,
+  webfetch: false, websearch: false,
 }
 
 /** Spawn a warm opencode (createOpencode → opencode serve + HTTP client) and adapt the
