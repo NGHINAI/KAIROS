@@ -101,6 +101,15 @@ export interface ConductorDeps {
 export class Conductor {
   constructor(private deps: ConductorDeps) {}
 
+  /** Per-conversation timestamp of the last GUIDANCE turn. Guidance is STICKY: once a
+   *  user is in a guide flow, short follow-ups ("Continue", "what's next?", "okay",
+   *  "show me the next one") rarely re-match the guide regex and were bouncing to the
+   *  opencode lane (which had a tool-name bug → dead air, live 2026-06-16). Stickiness
+   *  keeps the whole flow in-house. Safe direction: in-house handles general tasks too,
+   *  so a stale-sticky general turn still works — it just isn't opencode. */
+  private recentGuidanceAt = new Map<string, number>()
+  private static readonly GUIDANCE_STICKY_MS = 180_000
+
   async handle(opts: ConductorOpts): Promise<void> {
     const { utterance, signal, conversationId } = opts
     const t0 = Date.now()
@@ -684,7 +693,12 @@ export class Conductor {
     // BRAIN-ROUTER LANE: a guidance/teaching turn (an active lesson, or a teach/locate
     // utterance) is the latency-critical, advanced-guide-tools path → keep it in-house.
     // Everything else (general agentic tasks) → opencode-first (with in-house fallback).
-    const isGuidance = !!opts.lessonContext || TEACH_ASK_RE.test(opts.utterance) || GUIDE_RE.test(opts.utterance)
+    // Sticky: a recent guidance turn in this conversation keeps short follow-ups in the
+    // guidance lane even when they don't re-match the regex ("Continue", "what's next?").
+    const cidForSticky = opts.conversationId ?? ""
+    const recentlyGuiding = Date.now() - (this.recentGuidanceAt.get(cidForSticky) ?? 0) < Conductor.GUIDANCE_STICKY_MS
+    const isGuidance =
+      !!opts.lessonContext || TEACH_ASK_RE.test(opts.utterance) || GUIDE_RE.test(opts.utterance) || recentlyGuiding
     const lane: "guidance" | "general" = isGuidance ? "guidance" : "general"
     // Lesson context rides on the INSTRUCTIONS, not the utterance — it's daemon
     // state ("you last highlighted Appearance; it's still on screen"), and the
@@ -698,6 +712,14 @@ export class Conductor {
       effort,
       lane,
     })
+
+    // Stamp guidance recency so the NEXT short follow-up stays in-house. Counts if this
+    // turn was classified guidance OR actually ran a screen-guide tool (so even a missed
+    // first-turn classification becomes sticky once it touches the screen).
+    const ranGuideTool = (result.toolCalls ?? []).some((c) =>
+      c?.name === "guide_user" || c?.name === "read_screen" || c?.name === "guide_scroll" ||
+      c?.name === "click_element" || c?.name === "type_text" || c?.name === "wait_for_screen")
+    if (cidForSticky && (isGuidance || ranGuideTool)) this.recentGuidanceAt.set(cidForSticky, Date.now())
 
     try { opts.signal?.removeEventListener?.("abort", onAbort) } catch { /* */ }
     await controller?.finish()

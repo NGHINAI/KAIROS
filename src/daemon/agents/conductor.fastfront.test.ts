@@ -137,3 +137,30 @@ test("a directive ANYWHERE except the start is treated as plain text (never spok
   const done = events.find((e) => e.kind === "agent_done")
   expect(done?.text).not.toContain("[[")                            // directive scrubbed from speech
 })
+
+test("guidance is STICKY: a follow-up after a guide turn stays in-house (lane=guidance)", async () => {
+  const lanes: string[] = []
+  const { conductor } = makeConductor({
+    fastLlm: { complete: async () => ({ text: "[[task]] one sec" }) },
+    runPlanner: async (_input: string, opts: any) => {
+      lanes.push(opts.lane)
+      return { finalOutput: "ok", toolCalls: [{ id: "1", name: "read_screen", args: {} }] }
+    },
+  })
+  await conductor.handle({ conversationId: "c", utterance: "show me where the sound settings are" })
+  await conductor.handle({ conversationId: "c", utterance: "continue" })   // misses the regex
+  expect(lanes[0]).toBe("guidance")   // GUIDE_RE hit
+  expect(lanes[1]).toBe("guidance")   // STICKY — not bounced to the (broken) opencode lane
+})
+
+test("a plain general task is NOT made sticky-guidance", async () => {
+  const lanes: string[] = []
+  const { conductor } = makeConductor({
+    fastLlm: { complete: async () => ({ text: "[[task]] sure" }) },
+    runPlanner: async (_i: string, opts: any) => { lanes.push(opts.lane); return { finalOutput: "done", toolCalls: [] } },
+  })
+  await conductor.handle({ conversationId: "c", utterance: "add milk to my shopping list" })
+  await conductor.handle({ conversationId: "c", utterance: "also add eggs" })
+  expect(lanes[0]).toBe("general")
+  expect(lanes[1]).toBe("general")
+})
