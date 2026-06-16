@@ -236,3 +236,38 @@ describe("regexes + sentinel", () => {
     expect(LESSON_CONTINUE_SENTINEL.startsWith("[[")).toBe(true)
   })
 })
+
+describe("stuck-overlay fix: a no-guidance turn retracts the stale cue (afterTurn)", () => {
+  function liveLesson() {
+    const h = harness()
+    h.mgr.setTurnContext("c1", "walk me through dark mode", true)
+    h.mgr.notePointFromTool({ label: "Appearance", app: "System Settings" }, "click Appearance")
+    h.mgr.afterTurn("c1")   // first step pointed → arms auto-continue, no retract
+    return h
+  }
+  test("a lesson turn that produced NO guidance retracts the lingering cue (lesson stays armed)", () => {
+    const h = liveLesson()
+    const before = h.retracted()
+    // next turn: user asks something unrelated → conductor answers, NO guide point
+    h.mgr.setTurnContext("c1", "what's the weather today?", false)
+    h.mgr.afterTurn("c1")
+    expect(h.retracted()).toBe(before + 1)   // stuck arrow/highlight cleared, orb re-forms
+    expect(h.mgr.active).not.toBeNull()       // lesson stays armed for a later resume
+  })
+  test("a lesson turn that DID point does NOT retract (cue is fresh)", () => {
+    const h = liveLesson()
+    h.mgr.setTurnContext("c1", "continue", false)
+    h.mgr.notePointFromTool({ label: "Dark", app: "System Settings" })
+    const before = h.retracted()
+    h.mgr.afterTurn("c1")
+    expect(h.retracted()).toBe(before)
+  })
+  test("a scroll-arrow turn (noteGuideShown) does NOT retract", () => {
+    const h = liveLesson()
+    h.mgr.setTurnContext("c1", "continue", false)
+    h.mgr.noteGuideShown()   // showed a scroll arrow (not a point) — still 'guided'
+    const before = h.retracted()
+    h.mgr.afterTurn("c1")
+    expect(h.retracted()).toBe(before)
+  })
+})

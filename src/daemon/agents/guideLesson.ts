@@ -61,6 +61,10 @@ export class GuideLessonManager {
   private turn: { conversationId: string; goal: string; teaching: boolean } | null = null
   /** Monotonic token: bumping it invalidates every in-flight between-turns watcher. */
   private watchEpoch = 0
+  /** Did the CURRENT turn actually point at something (guide_user/scroll)? Reset at turn
+   *  start, set when a point is noted. A lesson turn that ends WITHOUT pointing means the
+   *  user did something unrelated → the lingering cue is stale and must be retracted. */
+  private pointedThisTurn = false
 
   constructor(private deps: {
     /** Watch the app for ANY screen change (inventory hash differs from baseline) —
@@ -106,16 +110,22 @@ export class GuideLessonManager {
   /** Stamp who/what this turn is about so notePointFromTool can attribute points. */
   setTurnContext(conversationId: string, goal: string, teaching: boolean): void {
     this.turn = { conversationId, goal, teaching }
+    this.pointedThisTurn = false   // fresh turn — hasn't guided yet
   }
 
   /** Turn finished (and is still the CURRENT turn — caller ownership-guards).
-   *  Lesson alive → arm auto-continue. Standalone highlight up → arm the act-dismissal
-   *  watch (screen change = "they clicked it" → retract quietly). */
+   *  Lesson alive AND this turn POINTED → arm auto-continue (the fresh cue waits for the
+   *  user to act). Lesson alive but this turn produced NO guidance → the user asked
+   *  something unrelated; the old cue is stale and was lingering across turns (live bug
+   *  2026-06-16: scroll arrow stuck, orb never re-formed) → RETRACT it (lesson stays
+   *  armed so a later "continue" re-shows). Standalone up → arm the act-dismissal watch. */
   afterTurn(conversationId: string): void {
+    const pointed = this.pointedThisTurn
     this.turn = null
     const lesson = this.active
     if (lesson && lesson.conversationId === conversationId) {
-      this.armAutoContinue()
+      if (pointed) { this.armAutoContinue(); return }
+      try { this.deps.retractGuide() } catch { /* */ }
       return
     }
     if (this.standalone) this.armStandaloneDismiss()
@@ -125,7 +135,14 @@ export class GuideLessonManager {
 
   /** guide_user succeeded. Teaching turn (or live lesson) → the point becomes the
    *  lesson's current step; plain ask → it's a standalone highlight. */
+  /** A non-point guide cue (scroll arrow) was shown this turn — counts as "guided" so
+   *  afterTurn's stale-cue retract doesn't wipe an arrow we just put up. */
+  noteGuideShown(): void {
+    this.pointedThisTurn = true
+  }
+
   notePointFromTool(point: LessonPoint, stepNote?: string): void {
+    this.pointedThisTurn = true   // this turn produced on-screen guidance → cue is fresh
     const lesson = this.active
     if (lesson) {
       lesson.lastPointed = point

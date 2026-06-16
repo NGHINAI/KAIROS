@@ -21,6 +21,9 @@ export interface GuideToolsDeps {
     notePoint: (point: LessonPoint, stepNote?: string) => void
     noteStepDone: () => void
     endLesson: (reason: string) => boolean
+    /** A non-point guide cue (a scroll arrow) was shown this turn — counts as "guided"
+     *  so the turn-end stale-cue retract doesn't wipe an arrow we just put up. */
+    noteGuideShown?: () => void
   }
 }
 
@@ -168,6 +171,9 @@ export function buildGuideTools(deps: GuideToolsDeps): ToolDef[] {
       if (result == null) {
         return "The on-screen arrow isn't available right now (HUD not running) — tell the user verbally to scroll " + direction + ", then call read_screen again."
       }
+      // The arrow IS a guide cue — mark the turn as having guided so the turn-end
+      // stale-cue retract (guideLesson.afterTurn) doesn't immediately wipe it.
+      try { deps.lesson?.noteGuideShown?.() } catch { /* */ }
       return (
         `Showing a "scroll ${direction}" arrow now. Say ONE short line asking the user to scroll AND to tell you when ready — ` +
         `e.g. "scroll ${direction} a little, then say 'continue' (or 'I'm ready') and I'll point it out." Then END your turn and WAIT. ` +

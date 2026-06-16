@@ -109,6 +109,7 @@ export async function buildActionToolset(deps: ActionToolDeps): Promise<ToolDef[
           notePoint: (p: any, note?: string) => guideL.notePointFromTool(p, note),
           noteStepDone: () => guideL.noteStepDone(),
           endLesson: (reason: string) => guideL.endRequestFromModel(reason),
+          noteGuideShown: () => guideL.noteGuideShown(),
         } : undefined,
         openApp: deps.openApp,
       }))
