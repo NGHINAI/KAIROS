@@ -423,6 +423,50 @@ enum AXFinder {
                 return s
             }
         }
+        // (1) Linked title element: many SwiftUI controls expose their visible text via
+        // kAXTitleUIElement rather than an own title. Cheap (no walk).
+        var tref: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXTitleUIElementAttribute as CFString, &tref) == .success,
+           let raw = tref, CFGetTypeID(raw) == AXUIElementGetTypeID() {
+            if let s = ownLabel(of: raw as! AXUIElement) { return s }
+        }
+        // (2) Derived label: a CLICKABLE container (a System Settings sidebar row) whose
+        // OWN label is empty but which holds a text descendant — attribute that text to
+        // the container so find("Sound") matches the ROW, not the (now-excluded) menu
+        // item. This is the deterministic, vision-free fix for the AX-blind sidebar.
+        if let role = roleOf(element), derivableRoles.contains(role),
+           let s = childTextLabel(of: element, depth: 0) {
+            return s
+        }
+        return nil
+    }
+
+    /// Roles that legitimately stand in for their text child (clickable containers).
+    private static let derivableRoles: Set<String> =
+        ["AXRow", "AXCell", "AXOutlineRow", "AXButton", "AXLink", "AXTab"]
+
+    /// An element's OWN title/value/description (no walk) — used for the linked-title path.
+    private static func ownLabel(of element: AXUIElement) -> String? {
+        for attr in [kAXValueAttribute, kAXTitleAttribute, kAXDescriptionAttribute, "AXLabel"] {
+            var r: CFTypeRef?
+            if AXUIElementCopyAttributeValue(element, attr as CFString, &r) == .success,
+               let s = r as? String, !s.isEmpty, s.count <= 120 { return s }
+        }
+        return nil
+    }
+
+    /// First non-empty text label within a SHALLOW subtree (depth ≤ 3) — gives a
+    /// clickable container the visible text it lacks an own-title for. Bounded so it
+    /// can't blow the find() walk budget (sidebar rows are shallow).
+    private static func childTextLabel(of element: AXUIElement, depth: Int) -> String? {
+        if depth > 3 { return nil }
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &ref) == .success,
+              let children = ref as? [AXUIElement] else { return nil }
+        for child in children {
+            if let s = ownLabel(of: child) { return s }
+            if let nested = childTextLabel(of: child, depth: depth + 1) { return nested }
+        }
         return nil
     }
 
