@@ -133,11 +133,18 @@ enum AXFinder {
             if depth > maxDepth || visited > maxNodes || Date() > deadline { return }
             visited += 1
 
-            if let label = labelOf(element), !label.isEmpty {
-                let score = matchScore(needle: needle, label: normalize(label), role: roleOf(element))
+            let role = roleOf(element)
+            // Menu-bar constructs (a window's View-menu items etc.) sit in the AX tree
+            // even when the menu is CLOSED, with phantom frames — they hijacked sidebar
+            // locates (find "Sound" → the View menu's "Sound" item, comet flew to nowhere,
+            // live 2026-06-15). Guidance points at VISIBLE content; a genuine menu target
+            // is reached via read_screen instead. Skip menu-bar roles in the find path.
+            let isMenuConstruct = role == "AXMenuItem" || role == "AXMenuBarItem" || role == "AXMenu"
+            if let label = labelOf(element), !label.isEmpty, !isMenuConstruct {
+                let score = matchScore(needle: needle, label: normalize(label), role: role)
                 if debug {
                     let f = frameOf(element)
-                    seenLabels.append("\(roleOf(element) ?? "?"): \(label) [score=\(score) frame=\(f.map { "\(Int($0.width))x\(Int($0.height))" } ?? "nil")] norm=\"\(normalize(label))\"")
+                    seenLabels.append("\(role ?? "?"): \(label) [score=\(score) frame=\(f.map { "\(Int($0.width))x\(Int($0.height))" } ?? "nil")] norm=\"\(normalize(label))\"")
                 }
                 if score > 0, let frame = resolvedFrame(of: element) {
                     if best == nil || score > best!.score {
@@ -174,7 +181,34 @@ enum AXFinder {
                 if let b = best, b.score >= 100 { break }
             }
         }
-        if best == nil { walk(axApp, depth: 0) }
+        // Window AX flaky/empty (System Settings on macOS 26 returns no kAXWindows) →
+        // fall back to the app's children, but walk VISIBLE CONTENT first and the menu
+        // bar only as a LAST resort. Walking the whole app root (incl. the menu bar)
+        // let the View-menu's "Sound" item (role AXMenuItem, garbage closed-menu frame)
+        // win over the sidebar row — the comet then flew to nowhere (live 2026-06-15).
+        if best == nil {
+            var childrenRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(axApp, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+               let children = childrenRef as? [AXUIElement] {
+                for child in children where roleOf(child) != "AXMenuBar" {
+                    walk(child, depth: 1)
+                    if let b = best, b.score >= 100 { break }
+                }
+                if best == nil {
+                    for child in children where roleOf(child) == "AXMenuBar" { walk(child, depth: 1) }
+                }
+            }
+        }
+
+        // Diagnostic (KAIROS_AX_DEBUG=1): log the app actually searched + the matched
+        // element's label/role/frame, so a "pointed at the wrong thing" report is
+        // traceable from logs instead of guessed at.
+        if debug || ProcessInfo.processInfo.environment["KAIROS_AX_DEBUG"] == "1" {
+            let m = best?.match
+            let fr = m?.frame
+            FileHandle.standardError.write(("[ax-find] query=\"\(query)\" app=\"\(app.localizedName ?? "?")\" pid=\(app.processIdentifier) → " +
+                (m != nil ? "MATCH \"\(m!.title)\" role=\(m!.role ?? "?") score=\(best!.score) frame=\(fr.map { "(\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height)))" } ?? "nil")" : "NO MATCH") + "\n").data(using: .utf8)!)
+        }
 
         if let b = best { return .found(b.match) }
         let where_ = appName ?? (app.localizedName ?? "the frontmost app")
@@ -459,6 +493,21 @@ enum AXFinder {
         return CGRect(x: pos.x, y: flippedY, width: size.width, height: size.height)
     }
 
+    // Transient system overlays that float ABOVE the real app — they must never be the
+    // search target. Live bug 2026-06-15: a macOS screenshot thumbnail (screencaptureui)
+    // hijacked a "find Sound" locate because the call fell through to frontmost and the
+    // thumbnail was topmost, so the comet flew to a "Screenshot….png" element.
+    private static let overlayApps: Set<String> = [
+        "screencaptureui", "kairoshud", "notification center", "controlcenter",
+        "control center", "spotlight", "window server", "windowserver", "loginwindow",
+        "screenshot", "siri", "coreautha.daemon",
+    ]
+    private static func isOverlay(_ app: NSRunningApplication?) -> Bool {
+        let nm = (app?.localizedName ?? "").lowercased()
+        let bid = (app?.bundleIdentifier ?? "").lowercased()
+        return overlayApps.contains(nm) || bid.contains("screencaptureui") || bid.contains("controlcenter") || bid.contains("notificationcenter")
+    }
+
     private static func resolveApp(named name: String?) -> NSRunningApplication? {
         let apps = NSWorkspace.shared.runningApplications
         if let name, !name.isEmpty {
@@ -466,6 +515,13 @@ enum AXFinder {
             return apps.first { ($0.localizedName ?? "").lowercased() == n }
                 ?? apps.first { ($0.localizedName ?? "").lowercased().contains(n) }
         }
-        return NSWorkspace.shared.frontmostApplication
+        // Frontmost — but NEVER a transient overlay (screenshot thumbnail, our own orb,
+        // Notification/Control Center, Spotlight). If the topmost thing is an overlay,
+        // fall back to the most-recently-active REAL (.regular) app underneath it.
+        let front = NSWorkspace.shared.frontmostApplication
+        if let f = front, !isOverlay(f) { return f }
+        return apps.first { $0.activationPolicy == .regular && !isOverlay($0) && $0.isActive }
+            ?? apps.first { $0.activationPolicy == .regular && !isOverlay($0) }
+            ?? front
     }
 }
