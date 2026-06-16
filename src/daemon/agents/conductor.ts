@@ -37,6 +37,10 @@ export interface PlannerRunner {
      *  per-turn proxy alias (kairos-<effort>) → reasoning budget, and auto-escalates to
      *  high on failure. Omitted = the brain's env-default lane. */
     effort?: "low" | "medium" | "high"
+    /** Which dispatch lane this task belongs to, read by the BrainRouter to pick an
+     *  engine: "voice" (interactive/guidance → in-house) vs "background" (autonomous/
+     *  long-running → opencode). Omitted = "voice". */
+    lane?: "voice" | "background"
   }): Promise<{
     finalOutput: string
     /** The model's raw final answer that was STREAMED live (pre-verify-gate).
@@ -677,6 +681,11 @@ export class Conductor {
     }
 
     const runFn = this.deps.runPlanner ?? defaultPlannerRunner
+    // BRAIN-ROUTER LANE: a guidance/teaching turn (an active lesson, or a teach/locate
+    // utterance) is the latency-critical, advanced-guide-tools path → keep it in-house.
+    // Everything else (general agentic tasks) → opencode-first (with in-house fallback).
+    const isGuidance = !!opts.lessonContext || TEACH_ASK_RE.test(opts.utterance) || GUIDE_RE.test(opts.utterance)
+    const lane: "guidance" | "general" = isGuidance ? "guidance" : "general"
     // Lesson context rides on the INSTRUCTIONS, not the utterance — it's daemon
     // state ("you last highlighted Appearance; it's still on screen"), and the
     // utterance must stay the user's words for the verifier + transcript.
@@ -687,6 +696,7 @@ export class Conductor {
       onEvent,
       history,
       effort,
+      lane,
     })
 
     try { opts.signal?.removeEventListener?.("abort", onAbort) } catch { /* */ }

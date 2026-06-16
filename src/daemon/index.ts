@@ -2503,8 +2503,15 @@ async function main(): Promise<void> {
     // can call them (the codex Responses-namespace blocker is gone; docs 17/18).
     // Unset → the in-house defaultPlannerRunner (behavior unchanged). The conductor's
     // onEvent/verifier/persistence wiring is identical (same PlannerRunner contract).
-    let openCodeRunPlanner: ((input: string, o: any) => Promise<any>) | undefined
+    // DYNAMIC BRAIN ROUTER: both engines are wired and picked per-task (see brainRouter.ts).
+    //   guidance/teaching → in-house (latency + advanced guide tools); everything else →
+    //   opencode (robust agentic), with automatic fallback to in-house when opencode is
+    //   unavailable/fails/empty. KAIROS_BRAIN pins an engine: 'inhouse' (opencode off),
+    //   'opencode' (force it everywhere), 'dynamic'/unset (the router decides).
+    let opencodeBackendRun: ((input: string, o: any) => Promise<any>) | undefined
+    let opencodeReady = false
     let openCodeBrainShutdown: (() => void) | undefined
+    const brainMode = process.env.KAIROS_BRAIN || 'dynamic'
     // Make locally-installed CLIs (the `opencode` brain) resolvable no matter HOW the
     // daemon was launched. `bun run <script>` puts node_modules/.bin on PATH, but the
     // voice-hud/voice-live launcher starts the daemon via `bun <file.ts>`, which does
@@ -2518,9 +2525,9 @@ async function main(): Promise<void> {
         log(`[boot] prepended ${localBin} to PATH (local CLIs like opencode now resolvable)`)
       }
     } catch { /* PATH munging is best-effort */ }
-    if (process.env.KAIROS_BRAIN === 'opencode') {
+    if (brainMode !== 'inhouse') {
       if (!brainKey) {
-        log('[opencode-brain] KAIROS_BRAIN=opencode but KAIROS_BRAIN_KEY unset — using the in-house loop', 'warn')
+        log('[brain-router] no KAIROS_BRAIN_KEY — opencode backend disabled, in-house only', 'warn')
       } else {
         try {
           const { createOpenCodeBrain, spawnOpenCode, buildOpenCodeConfig } = await import('./opencode/openCodeBrain')
@@ -2561,22 +2568,13 @@ async function main(): Promise<void> {
           // cause we hit: the launcher started the daemon without node_modules/.bin on
           // PATH, so the SDK's `opencode` spawn failed and every smart turn returned
           // empty. The PATH is now fixed at boot too; this is the belt.)
-          openCodeRunPlanner = async (input: string, o: any) => {
-            let r: any
-            try { r = await ocBrain.run(input, o) } catch (e) {
-              log(`[opencode-brain] run threw (${String((e as Error)?.message ?? e)}) → in-house planner`, 'warn')
-              return defaultPlannerRunner(input, o)
-            }
-            const empty = !o?.signal?.aborted && !(r?.finalOutput && r.finalOutput.trim()) && !(r?.toolCalls?.length)
-            if (empty) {
-              log('[opencode-brain] produced no output (brain unavailable?) → in-house planner', 'warn')
-              return defaultPlannerRunner(input, o)
-            }
-            return r
-          }
+          // Raw opencode runner — the BrainRouter owns fallback (throw/empty → in-house),
+          // so this no longer self-falls-back (that would double-fall and hide routing).
+          opencodeBackendRun = (input: string, o: any) => ocBrain.run(input, o)
+          opencodeReady = true
           openCodeBrainShutdown = ocBrain.shutdown
-          void ocBrain.warmUp()   // pre-spawn `opencode serve` so the first real turn isn't cold
-          log(`[opencode-brain] ENABLED — via=${viaProxy ? `/brain proxy (hidden → ${realModel})` : `OpenRouter direct (${realModel})`}, tools via /mcp`)
+          void ocBrain.warmUp()   // pre-spawn `opencode serve` so the first opencode-routed task isn't cold
+          log(`[brain-router] opencode backend ENABLED — via=${viaProxy ? `/brain proxy (hidden → ${realModel})` : `OpenRouter direct (${realModel})`}, tools via /mcp`)
         } catch (e) {
           log(`[opencode-brain] init failed, using the in-house loop: ${String((e as Error)?.message ?? e)}`, 'warn')
         }
@@ -2593,8 +2591,23 @@ async function main(): Promise<void> {
       process.once('exit', () => { try { openCodeBrainShutdown?.() } catch { /* */ } })
     }
 
+    // Build the dynamic brain router: in-house (always) + opencode (when ready). The
+    // conductor tags each turn's lane (guidance → in-house; general/agentic → opencode),
+    // and the router falls back to in-house if opencode can't serve. KAIROS_BRAIN pins it.
+    const { createBrainRouter } = await import('./agents/brainRouter')
+    const forceBrain = brainMode === 'inhouse' || brainMode === 'opencode' ? (brainMode as 'inhouse' | 'opencode') : undefined
+    const brainRouter = createBrainRouter(
+      [
+        { name: 'inhouse', available: () => true, run: defaultPlannerRunner },
+        { name: 'opencode', available: () => opencodeReady && !!opencodeBackendRun, run: (i: string, o: any) => opencodeBackendRun!(i, o) },
+      ],
+      (m) => log(m),
+      { force: forceBrain },
+    )
+    log(`[brain-router] mode=${brainMode} opencode=${opencodeReady ? 'ready' : 'off'}${forceBrain ? ` force=${forceBrain}` : ''}`)
+
     const agentConductor = new Conductor({
-      runPlanner: openCodeRunPlanner as any,   // undefined → in-house defaultPlannerRunner
+      runPlanner: brainRouter.run,   // dynamic: lane-based engine pick + fallback
       classifyLlm: buildAgentLlmCompleter('fast'),
       fastLlm:     buildAgentLlmCompleter('fast'),
       smartLlm:    buildAgentLlmCompleter('smart'),

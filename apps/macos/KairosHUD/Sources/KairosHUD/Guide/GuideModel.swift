@@ -292,12 +292,18 @@ final class GuideModel: ObservableObject {
         var anchor: CGRect? = nil
         if let element = targetElement, element >= 1, element <= snapshot.count {
             let entry = snapshot[element - 1]
-            // Prefer the scroll area's rect (the arrow hugs the viewport edge); fall back
-            // to the element's own frame when the viewport wasn't resolvable at snapshot.
+            let elem = overlayRect(fromAppKit: entry.frame)
+            // X comes from the TARGET ELEMENT (reliably in the content pane we're
+            // scrolling); only the vertical EDGE comes from the scroll viewport. Taking
+            // both X and Y from the viewport put the arrow on the wrong side when System
+            // Settings' flaky AX resolved the viewport to the sidebar (live "wrong side"
+            // bug 2026-06-15). A zero-width rect centered on the element keeps midX = the
+            // element's X while maxY/minY track the viewport edge.
             if let viewport = entry.scrollViewport {
-                anchor = overlayRect(fromAppKit: viewport)
+                let vp = overlayRect(fromAppKit: viewport)
+                anchor = CGRect(x: elem.midX, y: vp.minY, width: 0, height: vp.height)
             } else {
-                anchor = overlayRect(fromAppKit: entry.frame)
+                anchor = elem
             }
         }
         FileHandle.standardError.write("scroll_request dir=\(direction) element=\(targetElement.map(String.init) ?? "-") anchor=\(anchor != nil ? "viewport" : "edge-default")\n".data(using: .utf8)!)

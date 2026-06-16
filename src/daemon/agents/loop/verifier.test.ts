@@ -218,3 +218,71 @@ test("zero-tool PROMISE final ('I'm going to create it') is flagged; offer-quest
   const chat = await v.verify({ utterance: "hi", finalText: "Hey! Good to hear from you.", toolCalls: [] })
   expect(chat.ok).toBe(true)
 })
+
+// ── VOICE-PACED WALKTHROUGH gates (the "say continue" model, no wait_for_screen) ──
+const POINTING = 'Pointing at "Dark" now — the user sees the highlight (it STAYS on screen until they act).'
+const SCREEN = "CURRENT SCREEN (System Settings)\n1 General\n2 Appearance\n5 Dark"
+const teachV = () => buildDestructiveVerifier({ llm: { complete: async () => ({ text: JSON.stringify({ ok: true }) }) } as any })
+
+test("guide: LOOK-FIRST is satisfied when read_screen precedes the LAST point (retry-trap fix)", async () => {
+  // The in-turn retry leaves the blind pass-1 guide_user at index 0; the model then
+  // read_screen and re-pointed. The standing point IS grounded — must NOT keep firing
+  // the look-first correction (which strands the user with "say continue, fresh look").
+  const r = await teachV().verify({
+    utterance: "Walk me through how to turn on dark mode in System Settings.",
+    finalText: "Click \"Dark\" to enable dark mode, then say 'continue' when you're done.",
+    toolCalls: [
+      { name: "guide_user", args: { find: "Appearance" }, result: POINTING },
+      { name: "read_screen", args: {}, result: SCREEN },
+      { name: "guide_user", args: { element: 5 }, result: POINTING },
+    ],
+  })
+  expect(r.correction ?? "").not.toContain("take a fresh look")
+  expect(r.concern ?? "").not.toContain("pointed WITHOUT looking first")
+})
+
+test("guide: a voice-paced step (point + ask to say continue, NO wait_for_screen) is OK", async () => {
+  // The voice-paced design removed wait_for_screen — the user paces by saying "continue".
+  // The must-watch gate must NOT demand a tool the toolset no longer exposes.
+  const r = await teachV().verify({
+    utterance: "Walk me through how to turn on dark mode in System Settings.",
+    finalText: "Click \"Dark\" in the Appearance section, then say 'continue' when you're ready.",
+    toolCalls: [
+      { name: "read_screen", args: {}, result: SCREEN },
+      { name: "guide_user", args: { element: 5 }, result: POINTING },
+    ],
+  })
+  expect(r.ok).toBe(true)
+})
+
+test("guide: a plain 'where is X' locate that ASKS instead of pointing is flagged", async () => {
+  // "Where is the sound setting?" routed as guidance but the model asked "what app are
+  // you in?" with zero tools — offloading the one job it has eyes for. Must be caught.
+  const r = await teachV().verify({
+    utterance: "Where is the sound setting?",
+    finalText: "I can help you find that. What application are you currently in?",
+    toolCalls: [],
+  })
+  expect(r.ok).toBe(false)
+})
+
+test("guide: 'where is my next meeting' (calendar turn) is NOT mis-gated as screen guidance", async () => {
+  // The broadened locate regex also matches calendar 'where is' — but a turn that used
+  // an EXTERNAL (non-screen) tool is not screen guidance, so the look/point gates skip.
+  const r = await teachV().verify({
+    utterance: "Where is my next meeting?",
+    finalText: "Your next meeting is in Conference Room B at 3pm.",
+    toolCalls: [{ name: "execute_tool", args: { tool_name: "GMAIL_FETCH_EMAILS" }, result: { messages: [{ id: "1" }] } }],
+  })
+  expect(r.ok).toBe(true)
+})
+
+test("guide: genuinely blind pointing (NEVER read_screen) still fails look-first", async () => {
+  // Preserve the gate's purpose: pointing from memory with no read at all is wrong.
+  const r = await teachV().verify({
+    utterance: "Walk me through how to turn on dark mode in System Settings.",
+    finalText: "It's the Appearance section.",
+    toolCalls: [{ name: "guide_user", args: { find: "Appearance" }, result: POINTING }],
+  })
+  expect(r.ok).toBe(false)
+})

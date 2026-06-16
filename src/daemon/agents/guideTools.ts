@@ -40,7 +40,7 @@ const ACT_PROTOCOL =
 /** The walkthrough contract, repeated on every guide tool so the model can't miss it. */
 const WALKTHROUGH_PROTOCOL =
   "WALKTHROUGH (for 'teach me / walk me through X') — VOICE-PACED, one step per turn, like a patient teacher: " +
-  "(1) read_screen to see what's REALLY there — never guess section names. " +
+  "(1) When you don't already know the CURRENT step's exact on-screen label, read_screen to see what's REALLY there — never guess section names. (If you already know the exact label, point it directly with find.) " +
   "(2) guide_user the element for the CURRENT step, then speak ONE short instruction that ENDS by asking the user to tell you when they're ready — e.g. \"Click Sound, then say 'continue' (or 'I'm ready') and I'll show you the next step.\" " +
   "(3) STOP — end your turn now. Do NOT call wait_for_screen, do NOT narrate what you're doing, do NOT guess or jump to the next step. WAIT for the user. " +
   "(4) When the user says continue / I'm ready / next / okay / go ahead, read_screen again and guide the NEXT step the same way (point, one short instruction, ask them to say continue, stop). " +
@@ -57,12 +57,16 @@ export function buildGuideTools(deps: GuideToolsDeps): ToolDef[] {
       "Visually point at a UI element on the USER'S screen: the orb transforms into an on-screen guide that flies " +
       "to the element and highlights it while you talk. Works in ANY app — windows, menu bar menus ('File'), " +
       "the Dock (app='Dock' for Dock icons/Trash), Finder, System Settings. If the app isn't running it opens it " +
-      "automatically. It only points — the USER does the clicking. " + WALKTHROUGH_PROTOCOL,
+      "automatically. It only points — the USER does the clicking. " +
+      "WHEN TO READ FIRST — decide by the request: " +
+      "• LOCATE ('where is X / show me X', user NAMED the target): call this IMMEDIATELY with find:'X' — it resolves by name on screen, so do NOT read_screen first (that just adds a slow round-trip). Only fall back to read_screen if this comes back not-found. " +
+      "• WALKTHROUGH ('teach me / walk me through X', multi-step) where you don't yet know the exact on-screen label: read_screen FIRST, then point the CURRENT step by its NUMBER. " +
+      "(The full voice-paced step rhythm is spelled out for you the moment you call this on a walkthrough.)",
     parameters: {
       type: "object",
       properties: {
-        element: { type: "number", description: "PREFERRED: the element's NUMBER from your latest read_screen — exact, grounded pointing" },
-        find: { type: "string", description: "Fallback when you haven't read the screen: the element's visible label (e.g. 'Export…', 'Trash')" },
+        element: { type: "number", description: "The element's NUMBER from a read_screen you ALREADY did — exact, grounded pointing for walkthrough steps" },
+        find: { type: "string", description: "The target's visible label (e.g. 'Sound', 'Export…', 'Trash'). FAST-PATH for a named locate — resolves by name, no read_screen needed first" },
         app: { type: "string", description: "App to look in (e.g. 'System Settings', 'Dock'). Omit for the frontmost app." },
       },
     },
@@ -288,7 +292,10 @@ export function buildGuideTools(deps: GuideToolsDeps): ToolDef[] {
         "If NOTHING here matches the goal, the path runs through a sidebar/section item — use the section that " +
         "would CONTAIN the goal (dark mode → Appearance) and never ask the user what's on their screen. " +
         "If the matching element is tagged [off-screen ↓] or [off-screen ↑], it exists but is scrolled out of view — " +
-        "call guide_scroll({direction}) to point the way, have the USER scroll, then read_screen again and guide_user by NUMBER:\n" +
+        "call guide_scroll({direction}) to point the way, have the USER scroll, then read_screen again and guide_user by NUMBER. " +
+        "STATE: this list shows what EXISTS, not its current value. Unless an element carries an explicit state tag " +
+        "([✓ selected] / [on] / [off] / [disabled]), you CANNOT tell whether a setting is already on — so NEVER say a " +
+        "setting is 'already enabled' or that the user is 'already done'. Guide the step regardless and let them do it:\n" +
         result.summary
       )
     },

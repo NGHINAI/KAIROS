@@ -113,7 +113,18 @@ export const TEACHING_RE =
 // A pointing ask ("show me where X is", "highlight it again") — needs the LOOK and
 // POINT gates (an answer with zero guide tools is fabrication-from-memory) but NOT
 // the full walkthrough mechanics: pointing IS the complete answer, no forced wait.
-export const GUIDE_RE = /\b(show me where|highlight|point (at|to|out))\b/i
+// A pointing/locate ask. Covers the natural phrasings — "show me where", and the bare
+// "where is/are X", "where can I find", "find the X", "locate the X" — that users
+// actually use. (The verifier's guide gates only fire when NO external tool ran, so a
+// calendar/email "where is my meeting" is not mistaken for screen guidance.)
+export const GUIDE_RE = /\b(show me where|where (is|are|can i find)|find (the|my)\b|locate (the|my)\b|highlight|point (at|to|out))\b/i
+
+// A voice-paced walkthrough step legitimately ENDS by handing the baton to the user:
+// "…then say 'continue' / 'I'm ready' / let me know when you're done." This IS the turn
+// boundary now (the user paces by voice) — it replaced the old wait_for_screen handoff.
+// A step that ends this way must NOT be flagged as unfinished/un-watched.
+export const CONTINUE_ASK_RE =
+  /\b(say|tell me|let me know)\b[^.?!]{0,45}\b(continue|i'?m ready|ready|done|next|when you'?re (done|ready)|once you('?ve| have)?)\b/i
 
 // An imperative DO ask ("switch my Mac to light mode", "turn on do not disturb") —
 // the user wants it DONE, not taught. Evaluated only when TEACHING_RE didn't match.
@@ -292,7 +303,14 @@ export function buildDestructiveVerifier(deps: VerifierDeps) {
       // pointing IS the complete answer.
       const teachingAsk = TEACHING_RE.test(opts.utterance ?? "")
       const guideAsk = GUIDE_RE.test(opts.utterance ?? "")
-      if (teachingAsk || guideAsk) {
+      // SCREEN-TURN GUARD: the look/point/offload gates only make sense for ON-SCREEN
+      // guidance. The broadened GUIDE_RE also matches non-screen locates ("where is my
+      // next meeting" → calendar). A turn that ran an EXTERNAL (non-LOCAL) tool did real
+      // toolkit work, not screen guidance — so skip the guide gates and let the normal
+      // grounding check handle it. Screen turns use only LOCAL/guide tools (or, in the
+      // failure we're catching, NO tools — the model asked instead of pointing).
+      const usedExternalTool = calls.some((c) => !LOCAL_TOOLS.has(c.name))
+      if ((teachingAsk || guideAsk) && !usedExternalTool) {
         const names = calls.map((c) => c.name)
         const guides = calls.filter((c) => c.name === "guide_user")
         // The on-screen guide being genuinely unavailable (no HUD / no AX) makes
@@ -303,11 +321,17 @@ export function buildDestructiveVerifier(deps: VerifierDeps) {
         // "can you confirm you clicked Appearance?" — the question exemption let
         // the misdirection stand). read_screen must precede the first guide_user.
         const firstGuide = names.indexOf("guide_user")
-        const lookedFirst = firstGuide >= 0 && names.slice(0, firstGuide).includes("read_screen")
+        // "Looked" = the model called read_screen AT ALL this turn. We deliberately do
+        // NOT require read_screen to precede a SPECIFIC guide_user: toolCalls is
+        // cumulative across in-turn retries, so a blind pass-1 point + a nudged pass-2
+        // read interleave in orders that defeat any positional anchor — which perma-
+        // failed the retry and made the loop SPEAK the canned "fresh look" correction
+        // (live 2026-06-15). Pure-memory pointing (a guide with ZERO reads) is the real
+        // failure mode this gate exists to catch; once the model has looked, trust it.
         const lookedAtAll = names.includes("read_screen")
         // Look-first is TEACHING-only: a re-highlight ("highlight it again") may
         // legitimately point straight at the remembered target without re-reading.
-        if (teachingAsk && !guideUnavailable && firstGuide >= 0 && !lookedFirst) {
+        if (teachingAsk && !guideUnavailable && firstGuide >= 0 && !lookedAtAll) {
           return {
             ok: false,
             severity,
@@ -397,14 +421,19 @@ export function buildDestructiveVerifier(deps: VerifierDeps) {
           // pointing IS the answer. A wait that TIMED OUT still counts as watched —
           // ending the turn with a gentle check-in is now legitimate (the lesson
           // manager keeps the highlight up and auto-resumes when the user acts).
-          if (teachingAsk && !watched) {
+          // VOICE-PACED exemption: a step that points and ENDS by asking the user to say
+          // "continue"/"I'm ready" is complete — that's the turn boundary now (the user
+          // paces by voice; wait_for_screen was removed from the default toolset). Only a
+          // step that points and then just trails off (no handoff, no watch) is unfinished.
+          const handedBaton = CONTINUE_ASK_RE.test(finalText)
+          if (teachingAsk && !watched && !handedBaton) {
             return {
               ok: false,
               severity,
               retryable: true,
               concern:
-                "the walkthrough isn't finished — you pointed at a step but never watched for the user to complete it. " +
-                "Call wait_for_screen with the element that appears once they've done this step, then keep guiding in this same turn",
+                "the walkthrough isn't finished — you pointed at a step but didn't hand the baton back. " +
+                "End your turn by asking the user to say 'continue' (or 'I'm ready') once they've done this step, then stop and wait",
             }
           }
         }

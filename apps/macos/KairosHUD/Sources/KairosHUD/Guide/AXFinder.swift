@@ -222,7 +222,7 @@ enum AXFinder {
             }
         }
 
-        func walk(_ element: AXUIElement, depth: Int) {
+        func walk(_ element: AXUIElement, depth: Int, windowFrame: CGRect?) {
             if depth > maxDepth || visited > maxNodes || total >= 90 || Date() > deadline { return }
             visited += 1
             if let label = labelOf(element), !label.isEmpty, label.count <= 60,
@@ -238,8 +238,14 @@ enum AXFinder {
                         let off = offscreenDirection(of: element, frame: frame)
                         entries.append(AXInventoryEntry(label: label, role: role, frame: frame,
                                                         scrollDirection: off?.dir, scrollViewport: off?.viewport))
-                        buckets[bucket, default: []].append("\(entries.count) \(label)"
-                            + (off?.dir == "down" ? " [off-screen ↓]" : off?.dir == "up" ? " [off-screen ↑]" : ""))
+                        let offTag = off?.dir == "down" ? " [off-screen ↓]" : off?.dir == "up" ? " [off-screen ↑]" : ""
+                        // STATE tag (on/off/selected/disabled) — so the brain can SEE whether
+                        // a setting is already set instead of guessing "already enabled".
+                        let stateTag = Self.stateTag(of: element, role: role)
+                        // SIDE tag (left/right within the window) — grounds spoken direction
+                        // ("the switch on the right") instead of a coin-flip.
+                        let sideTag = Self.sideTag(frame: frame, windowFrame: windowFrame)
+                        buckets[bucket, default: []].append("\(entries.count) \(label)\(stateTag)\(sideTag)\(offTag)")
                         total += 1
                     }
                 }
@@ -247,7 +253,7 @@ enum AXFinder {
             var childrenRef: CFTypeRef?
             guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenRef) == .success,
                   let children = childrenRef as? [AXUIElement] else { return }
-            for child in children { walk(child, depth: depth + 1) }
+            for child in children { walk(child, depth: depth + 1, windowFrame: windowFrame) }
         }
 
         var windowsRef: CFTypeRef?
@@ -255,7 +261,7 @@ enum AXFinder {
         if AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef) == .success,
            let windows = windowsRef as? [AXUIElement] {
             windowCount = windows.count
-            for w in windows { walk(w, depth: 1) }
+            for w in windows { walk(w, depth: 1, windowFrame: resolvedFrame(of: w)) }
         }
 
         // kAXWindowsAttribute is FLAKY on some apps (System Settings on macOS 26
@@ -269,7 +275,7 @@ enum AXFinder {
                let children = childrenRef as? [AXUIElement] {
                 for child in children where roleOf(child) != "AXMenuBar" {
                     windowCount += 1
-                    walk(child, depth: 1)
+                    walk(child, depth: 1, windowFrame: resolvedFrame(of: child))
                 }
             }
         }
@@ -287,6 +293,53 @@ enum AXFinder {
             lines.append("\(bucket): " + labels.prefix(28).joined(separator: " · "))
         }
         return .ok(summary: String(lines.joined(separator: "\n").prefix(2400)), entries: entries)
+    }
+
+    // ── inventory enrichment (state + side) ──
+    // These tags are the data the model was previously BLIND to — the cause of
+    // "you already enabled dark mode" (no state) and "wrong arrow side" (no geometry).
+    // The values are read straight from AX; AXActor already reads the same attrs to
+    // actuate, we just surface them to the planner in the summary string.
+
+    /// A compact state tag for a stateful control: " [on]" / " [off]" / " [✓ selected]" /
+    /// " [disabled]" — or "" when the element carries no meaningful state. Toggles and
+    /// radios expose kAXValue (1/0); rows/tabs/radios expose kAXSelected.
+    private static func stateTag(of element: AXUIElement, role: String) -> String {
+        var parts: [String] = []
+        if let enabled = boolAttr(element, kAXEnabledAttribute), enabled == false { parts.append("disabled") }
+        switch role {
+        case kAXCheckBoxRole, kAXRadioButtonRole:
+            if let v = intAttr(element, kAXValueAttribute) { parts.append(v != 0 ? "on" : "off") }
+            else if let sel = boolAttr(element, kAXSelectedAttribute) { parts.append(sel ? "✓ selected" : "off") }
+        default:
+            if let sel = boolAttr(element, kAXSelectedAttribute), sel { parts.append("✓ selected") }
+        }
+        return parts.isEmpty ? "" : " [" + parts.joined(separator: ", ") + "]"
+    }
+
+    /// Coarse left/right position WITHIN the window — grounds the model's spoken
+    /// direction. Center elements get no tag (no useful side cue). NOTE: this informs
+    /// the model's SPEECH, not the rendered arrow x (that's a separate HUD geometry path).
+    private static func sideTag(frame: CGRect, windowFrame: CGRect?) -> String {
+        guard let w = windowFrame, w.width > 1 else { return "" }
+        let rel = (frame.midX - w.minX) / w.width
+        if rel < 0.38 { return " [left]" }
+        if rel > 0.62 { return " [right]" }
+        return ""
+    }
+
+    private static func boolAttr(_ element: AXUIElement, _ attr: String) -> Bool? {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attr as CFString, &ref) == .success else { return nil }
+        if let n = ref as? NSNumber { return n.boolValue }
+        return nil
+    }
+
+    private static func intAttr(_ element: AXUIElement, _ attr: String) -> Int? {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attr as CFString, &ref) == .success else { return nil }
+        if let n = ref as? NSNumber { return n.intValue }
+        return nil
     }
 
     // ── matching ──
