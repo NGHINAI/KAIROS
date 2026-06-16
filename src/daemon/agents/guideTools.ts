@@ -44,7 +44,13 @@ const WALKTHROUGH_PROTOCOL =
   "(2) guide_user the element for the CURRENT step, then speak ONE short instruction that ENDS by asking the user to tell you when they're ready — e.g. \"Click Sound, then say 'continue' (or 'I'm ready') and I'll show you the next step.\" " +
   "(3) STOP — end your turn now. Do NOT call wait_for_screen, do NOT narrate what you're doing, do NOT guess or jump to the next step. WAIT for the user. " +
   "(4) When the user says continue / I'm ready / next / okay / go ahead, read_screen again and guide the NEXT step the same way (point, one short instruction, ask them to say continue, stop). " +
-  "When the goal is fully done, call end_lesson and wrap up warmly. NEVER advance on your own or rush them — the user paces every step by voice."
+  "When the goal is fully done, call end_lesson and wrap up warmly. NEVER advance on your own or rush them — the user paces every step by voice. " +
+  "STATE-AWARENESS (this is what makes you feel expert): the LATEST read_screen is the ONLY truth. " +
+  "• If an element already shows the target state ([✓ selected]/[on]), that step is DONE — do NOT re-point it; move to the next step or finish. " +
+  "• If the screen is UNCHANGED after the user acted, your last point REVEALED/opened something (a pane, a menu) — it was not a miss; guide the NEXT thing, never re-point the same opener twice. " +
+  "• The user may have already moved ahead — never make them repeat a step the screen shows is complete. " +
+  "• One atomic action per step. A conceptual question ('what does this do?') gets a SPOKEN answer and NO pointing. " +
+  "• For a step only the user can do (a drag, a physical toggle), point/highlight it and say 'you do that, then say continue' — never invent a fake click target."
 
 export function buildGuideTools(deps: GuideToolsDeps): ToolDef[] {
   // Unchanged-screen detector for read_screen (see the short-circuit below).
@@ -143,16 +149,20 @@ export function buildGuideTools(deps: GuideToolsDeps): ToolDef[] {
       type: "object",
       properties: {
         direction: { type: "string", enum: ["up", "down"], description: "Which way the user should scroll to reveal the target (from read_screen's off-screen marker: ↓ = down, ↑ = up)" },
-        element: { type: "number", description: "The target's NUMBER from read_screen (so the arrow can anchor on its scroll region)" },
+        element: { type: "number", description: "REQUIRED: the target's NUMBER from read_screen — the arrow anchors on THIS element's scroll pane. Without it the arrow can't know which side of the window to sit on." },
         app: { type: "string", description: "App to guide in. Omit for the frontmost app." },
       },
-      required: ["direction"],
+      required: ["direction", "element"],
     },
     execute: async (args: { direction?: string; element?: number; app?: string }) => {
       const direction = args?.direction === "up" || args?.direction === "down" ? args.direction : undefined
       if (!direction) return "Tell guide_scroll the DIRECTION — 'up' or 'down' (read_screen's off-screen marker shows ↑ or ↓)."
       if (!deps.bridge.requestScroll) return "Scroll guidance isn't available right now — just tell the user out loud to scroll that way, then call read_screen again."
       const element = Number.isFinite(args?.element) ? Math.round(args!.element!) : undefined
+      // The off-screen target's NUMBER is what anchors the arrow to the correct scroll
+      // pane (the right content column in System Settings). Without it the HUD falls back
+      // to screen-center, which reads as "wrong side" (live bug 2026-06-16). Demand it.
+      if (element === undefined) return "Pass guide_scroll the off-screen target's element NUMBER (from your last read_screen) so the arrow anchors to the right pane — re-read if you don't have it."
       let result
       try { result = await deps.bridge.requestScroll({ direction, targetElement: element, app: args?.app?.trim() || undefined }) } catch { result = null }
       if (result == null) {

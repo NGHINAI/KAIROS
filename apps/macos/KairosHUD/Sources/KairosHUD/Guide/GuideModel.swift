@@ -305,6 +305,12 @@ final class GuideModel: ObservableObject {
             } else {
                 anchor = elem
             }
+        } else if let vpAppKit = snapshot.compactMap({ $0.scrollViewport }).first {
+            // No element passed (the tool now requires one, but belt-and-suspenders):
+            // anchor on the KNOWN scroll viewport from the last read_screen so the arrow
+            // sits over the real scroll pane — NEVER the screen-center fallback, which
+            // reads as "wrong side" over an off-center window (live bug 2026-06-16).
+            anchor = overlayRect(fromAppKit: vpAppKit)
         }
         FileHandle.standardError.write("scroll_request dir=\(direction) element=\(targetElement.map(String.init) ?? "-") anchor=\(anchor != nil ? "viewport" : "edge-default")\n".data(using: .utf8)!)
 
