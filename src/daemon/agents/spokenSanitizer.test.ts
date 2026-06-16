@@ -106,3 +106,25 @@ test("UUIDs and long hex tokens are never spoken (ids stripped, names survive)",
   expect(out).toContain("Which one?")
   expect(sanitizeSpoken("the message id is 19eaf24c59b23d51, done")).not.toContain("19eaf24c59b23d51")
 })
+
+// ── tool-instruction leak (D6): coaching echoed from a tool result must not reach TTS ──
+test("strips a 'Call wait_for_screen…' clause but keeps the real instruction", () => {
+  const out = sanitizeSpoken("Click Dark to enable dark mode. Call wait_for_screen with the element that appears.")
+  expect(out).toContain("Click Dark to enable dark mode.")
+  expect(out.toLowerCase()).not.toContain("wait_for_screen")
+})
+
+test("strips an inline (guide_user) tool-name echo", () => {
+  const out = sanitizeSpoken("I'll point at its element (guide_user) now.")
+  expect(out.toLowerCase()).not.toContain("guide_user")
+})
+
+test("strips an 'I don't have access to the wait_for_screen tool' leak", () => {
+  const out = sanitizeSpoken("I don't have access to the wait_for_screen tool right now.")
+  expect(out.toLowerCase()).not.toContain("wait_for_screen")
+})
+
+test("leaves a normal spoken reply untouched", () => {
+  const out = sanitizeSpoken("It's right there in the sidebar. Click it when you're ready.")
+  expect(out).toBe("It's right there in the sidebar. Click it when you're ready.")
+})

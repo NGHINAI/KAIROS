@@ -53,6 +53,13 @@ const INTERNAL_TERMS_RE = /\b(?:composio|mcp(?: server)?)\b/gi   // Composio / M
 // labels. Strip the leak, keep any real guidance that follows.
 const PROCESS_LEAK_RE = /\bI'?ve\s+(?:hit|reached)\s+(?:my|the)\s+(?:step|turn|iteration|tool)\s+limit\b[^.!?]*[.!?]\s*/gi
 const PROCESS_LABEL_RE = /\b(?:quick summary|what I did|here'?s what I did)\s*:\s*/gi
+// Tool-coaching that the model sometimes echoes verbatim from a tool RESULT into speech
+// (live 2026-06-16: "…IMMEDIATELY speak the next step and point at its element
+// (guide_user)…", "Call wait_for_screen…", "I don't have access to the wait_for_screen
+// tool"). Strip the whole offending clause/sentence — these tool names + planning notes
+// are internal and must never reach TTS.
+const TOOL_INSTRUCTION_LEAK_RE =
+  /[^.!?\n]*\b(?:guide_user|read_screen|wait_for_screen|guide_scroll|end_lesson|click_element|type_text|open_app|for your planning(?:\s+only)?)\b[^.!?\n]*[.!?]?/gi
 // A raw tool slug leaked into prose, e.g. "GMAIL_SEND_EMAIL" or "GOOGLECALENDAR_CREATE_EVENT".
 const TOOL_SLUG_RE = /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/g
 // Machine identifiers TTS would spell out character-by-character ("two two five d c d…").
@@ -68,6 +75,7 @@ function scrubInternal(s: string): string {
   return s
     .replace(PROCESS_LEAK_RE, "")                                       // "I've hit my step limit…" → gone
     .replace(PROCESS_LABEL_RE, "")                                      // "Quick summary:" / "What I did:" → gone
+    .replace(TOOL_INSTRUCTION_LEAK_RE, "")                              // "Call wait_for_screen…" / "(guide_user)" → gone
     .replace(TOOL_SLUG_RE, (m) => m.toLowerCase().replace(/_/g, " "))   // GMAIL_SEND_EMAIL → "gmail send email"
     .replace(INTERNAL_TERMS_RE, "the integration")
     .replace(UUID_RE, "")
